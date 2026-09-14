@@ -16,6 +16,7 @@
   "experimental_scope": [
     "lw_model_*",
     "lw_session_*",
+    "lw_tensor_desc_init",
     "LWM v0.1 file format",
     "WASM Host ABI"
   ],

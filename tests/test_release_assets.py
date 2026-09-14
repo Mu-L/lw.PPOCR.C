@@ -141,6 +141,10 @@ class ReleaseAssetContractTests(unittest.TestCase):
         self.assertIn("--strict", workflow)
         self.assertIn("BUILD_VERSION: ${{ steps.version.outputs.base_version }}", workflow)
         self.assertIn("VERSION: ${{ steps.version.outputs.version }}", workflow)
+        self.assertEqual(
+            workflow.count("runtime_version: ${{ github.ref_name }}"),
+            3,
+        )
         self.assertIn("id-token: write", workflow)
         self.assertIn("attestations: write", workflow)
         self.assertIn(

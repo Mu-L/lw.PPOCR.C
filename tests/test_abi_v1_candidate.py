@@ -49,6 +49,7 @@ class AbiV1CandidateTest(unittest.TestCase):
         self.assertEqual(manifest["layout_manifest"], "abi/c-abi-v1-layout.json")
         self.assertIn("lw_model_*", manifest["experimental_scope"])
         self.assertIn("lw_session_*", manifest["experimental_scope"])
+        self.assertIn("lw_tensor_desc_init", manifest["experimental_scope"])
 
     def test_candidate_symbols_are_declared_and_exported(self) -> None:
         symbols = {
@@ -61,6 +62,23 @@ class AbiV1CandidateTest(unittest.TestCase):
         for symbol in sorted(symbols):
             self.assertRegex(header, rf"\b{re.escape(symbol)}\s*\(", symbol)
         self.assertTrue(symbols <= actual, sorted(symbols - actual))
+
+    def test_no_unscoped_public_symbols_are_exported(self) -> None:
+        symbols = {
+            line.strip()
+            for line in ARGUMENTS.allowlist.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        actual = exported_symbols(ARGUMENTS.library, ARGUMENTS.tool)
+        allowed_experimental = {
+            symbol
+            for symbol in actual
+            if symbol.startswith("lw_model_")
+            or symbol.startswith("lw_session_")
+            or symbol == "lw_tensor_desc_init"
+        }
+        unexpected = sorted(actual - symbols - allowed_experimental)
+        self.assertEqual(unexpected, [])
 
     def test_low_level_api_is_not_in_candidate_scope(self) -> None:
         symbols = {

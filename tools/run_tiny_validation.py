@@ -140,18 +140,23 @@ def main(argv: list[str] | None = None) -> int:
         ],
         root,
     )
-    validation = run(
+    validation_output = run(
         "runtime model pack validation",
         [sys.executable, "tools/validate_runtime_model_pack.py", str(pack)],
         root,
     )
-    (output / "pack-validation.json").write_text(validation, encoding="utf-8", newline="\n")
+    (output / "pack-validation.json").write_text(validation_output, encoding="utf-8", newline="\n")
+    validation = json.loads(validation_output)
     summary = {
         "status": "ok",
         "variant": "tiny",
         "full_ocr_lines": args.expected_lines,
         "full_ocr_first_text": text_lines[0],
         "runtime_model_pack": pack.name,
+        "runtime_version": validation["model_revision"],
+        "runtime_status": validation["runtime_status"],
+        "asset_set_id": validation["asset_set_id"],
+        "manifest_sha256": validation["manifest_sha256"],
     }
     (output / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",

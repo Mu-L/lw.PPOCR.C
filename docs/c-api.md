@@ -1,8 +1,9 @@
 # C API and ABI v1 freeze candidate
 
 The high-level REC, CLS, DET, and full-OCR portions of `include/lw_infer.h`
-entered the C ABI v1 freeze-candidate period in `v0.2.0-preview.2`. The
-candidate is not a permanent ABI guarantee yet; see
+are prepared as the C ABI v1 freeze-candidate for the next preview release,
+planned as `v0.2.0-preview.2`. The currently published preview remains
+`v0.2.0-preview.1`; this candidate is not a permanent ABI guarantee yet; see
 `docs/c-abi-v1-candidate.md` and `abi/exports-v1-candidate.txt` for the exact
 scope and release gates.
 
@@ -116,7 +117,9 @@ lw_model_free(model);
 
 The low-level session planner still accepts no input data pointer. Applications
 should use the recognizer API for completed REC inference; the internal executor
-is not an integration contract and may change without ABI notice.
+is not an integration contract and may change without ABI notice. Its
+`lw_tensor_desc_init` helper and `lw_model_*`/`lw_session_*` symbols remain
+outside the v1 freeze-candidate allowlist.
 
 ## Public REC recognizer
 

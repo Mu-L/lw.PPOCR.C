@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -31,7 +32,8 @@ class RuntimeModelPackTests(unittest.TestCase):
             first, second = root / "first.zip", root / "second.zip"
             report = package(source, first, "small")
             package(source, second, "small")
-            self.assertEqual(validate_pack(first)["status"], "ok")
+            validation = validate_pack(first)
+            self.assertEqual(validation["status"], "ok")
             self.assertEqual(first.read_bytes(), second.read_bytes())
             self.assertEqual(report["variant"], "small")
             with zipfile.ZipFile(first) as archive:
@@ -51,6 +53,11 @@ class RuntimeModelPackTests(unittest.TestCase):
                         "ppocrv6-small/ppocr_keys.txt",
                         "ppocrv6-small/rec.lwm",
                     ],
+                )
+                manifest_bytes = archive.read("ppocrv6-small/manifest.json")
+                self.assertEqual(
+                    validation["manifest_sha256"],
+                    hashlib.sha256(manifest_bytes).hexdigest(),
                 )
                 self.assertTrue(
                     archive.read("ppocrv6-small/SHA256SUMS")

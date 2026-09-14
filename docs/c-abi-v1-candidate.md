@@ -1,9 +1,10 @@
 # C ABI v1 freeze candidate
 
-`v0.2.0-preview.2` starts the C ABI v1 soft-freeze period. This is a
-compatibility candidate, not a permanent ABI guarantee yet. A later release
-will promote this contract only after the candidate client, package, and
-cross-platform compatibility tests have passed.
+The next preview release, planned as `v0.2.0-preview.2`, will start the
+C ABI v1 soft-freeze period. The currently published preview remains
+`v0.2.0-preview.1`. This is a compatibility candidate, not a permanent ABI
+guarantee yet. A later release will promote this contract only after the
+candidate client, package, and cross-platform compatibility tests have passed.
 
 ## Stable candidate scope
 
@@ -27,7 +28,7 @@ development package.
 
 The following remain experimental in the 0.2.x preview line:
 
-- `lw_model_*` and `lw_session_*` low-level planning APIs;
+- `lw_model_*`, `lw_session_*`, and `lw_tensor_desc_init` low-level planning APIs;
 - the internal graph executor and tensor scheduling details;
 - the LWM v0.1 file format;
 - the separate WebAssembly Host ABI.

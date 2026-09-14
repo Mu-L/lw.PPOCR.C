@@ -102,6 +102,10 @@ class VersionConsistencyTest(unittest.TestCase):
         platform_matrix = (ROOT / "docs" / "platform-matrix.md").read_text(
             encoding="utf-8"
         )
+        c_api_doc = (ROOT / "docs" / "c-api.md").read_text(encoding="utf-8")
+        abi_candidate_doc = (ROOT / "docs" / "c-abi-v1-candidate.md").read_text(
+            encoding="utf-8"
+        )
         java_readme = (ROOT / "examples" / "java-jni" / "README.md").read_text(
             encoding="utf-8"
         )
@@ -116,6 +120,10 @@ class VersionConsistencyTest(unittest.TestCase):
         for token in ("Tiny", "Small", "Medium", "android-arm64.aar"):
             self.assertIn(token, readme_zh)
         self.assertIn("Do not mix binaries", readme)
+        self.assertIn("currently published preview remains", c_api_doc)
+        self.assertIn("planned as `v0.2.0-preview.2`", c_api_doc)
+        self.assertIn("currently published preview remains", abi_candidate_doc)
+        self.assertIn("planned as `v0.2.0-preview.2`", abi_candidate_doc)
         self.assertIn("不要混用不同 Release", readme_zh)
 
         for artifact in (

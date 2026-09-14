@@ -282,7 +282,13 @@ def main() -> int:
         run("canonical runtime staging", [sys.executable, "tools/prepare_ppocrv6_runtime_variant.py", "--variant", "medium", "--build-dir", str(build), "--output-dir", str(pack_dir), "--converted-dir", str(converted_dir)], root)
         pack = output / "ppocrv6-medium-runtime.zip"
         run("runtime model pack", [sys.executable, "tools/package_ppocrv6_runtime.py", "--input-dir", str(pack_dir), "--variant", "medium", "--runtime-version", args.runtime_version, "--output", str(pack)], root)
-        run("runtime model pack validation", [sys.executable, "tools/validate_runtime_model_pack.py", str(pack)], root)
+        validation_output = run(
+            "runtime model pack validation",
+            [sys.executable, "tools/validate_runtime_model_pack.py", str(pack)],
+            root,
+            output / "pack-validation.json",
+        )
+        validation = json.loads(validation_output)
 
     match = re.search(r"(?m)^lines=(\d+)\s", stdout)
     if match is None or int(match.group(1)) != resolved["expected_lines"]:
@@ -306,6 +312,11 @@ def main() -> int:
         "schema_version": 1,
         "status": "validated-analysis-only",
         "variant": "ppocrv6-medium",
+        "runtime_model_pack": pack.name,
+        "runtime_version": validation["model_revision"],
+        "runtime_status": validation["runtime_status"],
+        "asset_set_id": validation["asset_set_id"],
+        "manifest_sha256": validation["manifest_sha256"],
         "contract_sha256": resolved["contract_sha256"],
         "model_catalog_sha256": resolved["model_catalog_sha256"],
         "assets": assets,

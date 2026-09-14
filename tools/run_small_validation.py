@@ -198,14 +198,30 @@ def main() -> int:
     run("canonical runtime staging", [sys.executable, "tools/prepare_ppocrv6_runtime_variant.py", "--variant", "small", "--build-dir", str(build), "--output-dir", str(pack_dir), "--converted-dir", str(converted_dir)], root)
     pack = output / "ppocrv6-small-runtime.zip"
     run("runtime model pack", [sys.executable, "tools/package_ppocrv6_runtime.py", "--input-dir", str(pack_dir), "--variant", "small", "--runtime-version", args.runtime_version, "--output", str(pack)], root)
-    run("runtime model pack validation", [sys.executable, "tools/validate_runtime_model_pack.py", str(pack)], root)
+    validation_output = run(
+        "runtime model pack validation",
+        [sys.executable, "tools/validate_runtime_model_pack.py", str(pack)],
+        root,
+    )
+    (output / "pack-validation.json").write_text(
+        validation_output,
+        encoding="utf-8",
+        newline="\n",
+    )
+    validation = json.loads(validation_output)
     summary = {
         "status": "ok",
+        "variant": "small",
         "rec_widths": list(widths),
         "full_ocr_rec_max_width": args.rec_max_width,
         "det_shapes": [[320, 320], [640, 640], [640, 960]],
         "full_ocr_lines": args.expected_lines,
         "full_ocr_text_sha256": text_sha256,
+        "runtime_model_pack": pack.name,
+        "runtime_version": validation["model_revision"],
+        "runtime_status": validation["runtime_status"],
+        "asset_set_id": validation["asset_set_id"],
+        "manifest_sha256": validation["manifest_sha256"],
     }
     (output / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",

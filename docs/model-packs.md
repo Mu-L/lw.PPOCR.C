@@ -38,6 +38,13 @@ python tools/validate_runtime_model_pack.py `
 The input directory must contain `det.lwm`, `cls.lwm`, `rec.lwm` and `ppocr_keys.txt`. Use `tools/prepare_ppocrv6_runtime_variant.py` to produce the canonical directory from a native build before packaging. The same command works for `tiny`, `small` and `medium`. The ZIP is deterministic and stored without compression so its checksum is stable across CI runners.
 The validator also rejects path traversal, duplicate members, mixed variant roots,
 missing assets, checksum drift, and extra files before any model is accepted.
+The Tiny, Small and Medium CI validation jobs upload a machine-readable
+`summary.json` together with `pack-validation.json`. The summary records the
+normalized `runtime_version`, `runtime_status`, `asset_set_id`, and
+`manifest_sha256` returned by the pack validator, in addition to the OCR golden
+checksum. This lets a release audit prove that the uploaded model pack was
+validated against the same runtime revision and exact manifest, rather than
+only checking that a ZIP file exists.
 
 Manifest version fields are part of the pack contract:
 

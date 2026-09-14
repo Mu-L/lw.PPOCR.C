@@ -58,7 +58,9 @@ def validate_pack(pack_path: Path) -> dict[str, Any]:
         required = set(ASSET_NAMES) | {"manifest.json", "SHA256SUMS"}
         if set(relative_names) != required or len(names) != len(required):
             raise ValueError(f"model pack files must be exactly {sorted(required)}")
-        manifest = json.loads(archive.read(f"{root}/manifest.json").decode("utf-8"))
+        manifest_bytes = archive.read(f"{root}/manifest.json")
+        manifest_sha256 = _sha256(manifest_bytes)
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
         if manifest.get("schema_version") != SCHEMA_VERSION:
             raise ValueError("unsupported model pack schema_version")
         if manifest.get("family") != "PP-OCRv6":
@@ -109,7 +111,7 @@ def validate_pack(pack_path: Path) -> dict[str, Any]:
             raise ValueError("manifest asset_set_id does not match the assets")
         checksum_lines = archive.read(f"{root}/SHA256SUMS").decode("ascii").splitlines()
         expected_lines = [f"{checksums[name]}  {name}" for name in ASSET_NAMES]
-        expected_lines.append(f"{_sha256(archive.read(f'{root}/manifest.json'))}  manifest.json")
+        expected_lines.append(f"{manifest_sha256}  manifest.json")
         if checksum_lines != expected_lines:
             raise ValueError("SHA256SUMS does not match manifest and assets")
         return {
@@ -119,6 +121,7 @@ def validate_pack(pack_path: Path) -> dict[str, Any]:
             "model_revision": model_revision,
             "runtime_status": manifest["runtime_status"],
             "asset_set_id": manifest["asset_set_id"],
+            "manifest_sha256": manifest_sha256,
             "members": names,
         }
 
