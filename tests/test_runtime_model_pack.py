@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -56,6 +57,25 @@ class RuntimeModelPackTests(unittest.TestCase):
                     .decode("ascii")
                     .endswith("  manifest.json\n")
                 )
+
+    def test_unsafe_member_path_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pack_path = Path(directory) / "unsafe.zip"
+            with zipfile.ZipFile(pack_path, "w") as archive:
+                archive.writestr("../manifest.json", b"{}")
+            with self.assertRaisesRegex(ValueError, "unsafe member path"):
+                validate_pack(pack_path)
+
+    def test_duplicate_member_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pack_path = Path(directory) / "duplicate.zip"
+            with zipfile.ZipFile(pack_path, "w") as archive:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    archive.writestr("ppocrv6-small/manifest.json", b"{}")
+                    archive.writestr("ppocrv6-small/manifest.json", b"{}")
+            with self.assertRaisesRegex(ValueError, "duplicate members"):
+                validate_pack(pack_path)
 
     def test_production_revision_is_marked_production(self) -> None:
         hashes = {
