@@ -73,6 +73,13 @@ class StagedPackageTest(unittest.TestCase):
             )
         missing = [str(path) for path in required if not path.is_file()]
         self.assertFalse(missing, f"missing staged files: {missing}")
+        sbom = json.loads((root / "sbom.cdx.json").read_text(encoding="utf-8"))
+        component = sbom["metadata"]["component"]
+        self.assertEqual(component["type"], "library")
+        self.assertEqual(component["name"], "lw.PPOCR.C")
+        self.assertEqual(component["purl"], component["bom-ref"])
+        dependency_refs = {item["ref"] for item in sbom["dependencies"]}
+        self.assertIn(component["bom-ref"], dependency_refs)
         consumer = consumer_build / ("Release" if sys.platform == "win32" else "") / (
             "lw-abi-v1-consumer.exe" if sys.platform == "win32" else "lw-abi-v1-consumer"
         )
