@@ -40,6 +40,13 @@ The runtime may derive these structures during session creation or preparation,
 subject to the configured workspace and memory limits. Reusing them across
 sessions is an implementation detail and does not change the model contract.
 
+## Sanitizer gate
+
+The `runtime-sanitizers` workflow builds the native runtime with AddressSanitizer
+and UndefinedBehaviorSanitizer on Ubuntu and runs the loader, corruption, ABI
+layout, pipeline-reference, and Full OCR Golden gates. Sanitizers are a CI
+safety net only; they do not change the release binary or the LWM contract.
+
 ## Release and test requirements
 
 Every format change must update the converter, validator, model metadata tests,
