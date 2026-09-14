@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "product_version": "0.2.0",
+  "release_track": "preview",
+  "c_abi": {
+    "version": 1,
+    "status": "freeze-candidate",
+    "candidate_manifest": "abi/c-abi-v1-candidate.json",
+    "layout_manifest": "abi/c-abi-v1-layout.json",
+    "symbol_allowlist": "abi/exports-v1-candidate.txt"
+  },
+  "wasm_host_abi_version": 1,
+  "lwm_format_version": "0.1",
+  "orientation_contract": "docs/ocr-orientation-contract.md"
+}

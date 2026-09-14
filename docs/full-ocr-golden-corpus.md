@@ -5,6 +5,10 @@ The v0.1 full-OCR regression gate is versioned in
 source image, DET/CLS/REC ONNX models, and recognition dictionary so a model or
 fixture change cannot silently reuse stale expectations.
 
+See [OCR orientation and reading-order contract](ocr-orientation-contract.md) for the
+coordinate, crop-local rotation, CLS, and reading-order semantics asserted by
+the manifest.
+
 `full_ocr_golden_corpus` runs seven deterministic cases through the public
 three-model OCR pipeline:
 

@@ -72,6 +72,14 @@ def polygon_area(box: list[float]) -> float:
     )
 
 
+def signed_polygon_area(box: list[float]) -> float:
+    points = np.asarray(box, dtype=np.float64).reshape(4, 2)
+    return 0.5 * float(
+        np.dot(points[:, 0], np.roll(points[:, 1], -1))
+        - np.dot(points[:, 1], np.roll(points[:, 0], -1))
+    )
+
+
 class OcrGoldenCorpusTest(unittest.TestCase):
     driver: Path
     detector: Path
@@ -89,6 +97,30 @@ class OcrGoldenCorpusTest(unittest.TestCase):
         self.assertEqual(manifest.get("schema_version"), 1)
         self.assertEqual(manifest.get("detector_limit_side_length"), 320)
         self.assertEqual(manifest.get("recognizer_max_width"), 960)
+        orientation_contract = manifest.get("orientation_contract")
+        self.assertIsInstance(orientation_contract, dict)
+        assert isinstance(orientation_contract, dict)
+        self.assertEqual(orientation_contract.get("schema_version"), 1)
+        self.assertEqual(
+            orientation_contract.get("box_order"),
+            "top_left_top_right_bottom_right_bottom_left",
+        )
+        supported_source_orientations = set(
+            orientation_contract.get("supported_source_orientations", [])
+        )
+        supported_reading_orders = set(
+            orientation_contract.get("supported_reading_orders", [])
+        )
+        classifier_rotation_degrees = set(
+            orientation_contract.get("classifier_rotation_degrees", [])
+        )
+        self.assertEqual(classifier_rotation_degrees, {0, 180})
+        self.assertEqual(orientation_contract.get("tall_crop_canonicalization_degrees"), 90)
+        self.assertIn("upright", supported_source_orientations)
+        self.assertIn("rotated_90_counterclockwise", supported_source_orientations)
+        self.assertEqual(
+            supported_reading_orders, {"horizontal_ltr", "vertical_rtl", "vertical_ltr"}
+        )
         self.assertEqual(sha256(self.sample), manifest.get("source_sha256"))
         self.assertEqual(
             {
@@ -112,6 +144,14 @@ class OcrGoldenCorpusTest(unittest.TestCase):
             temporary = Path(directory)
             for case in cases:
                 with self.subTest(case=case["name"]):
+                    source_orientation = case.get("source_orientation")
+                    self.assertIn(source_orientation, supported_source_orientations)
+                    self.assertIn(case.get("reading_order"), supported_reading_orders)
+                    transform_type = case["transform"]["type"]
+                    if source_orientation == "rotated_90_counterclockwise":
+                        self.assertEqual(transform_type, "rotate_90_counterclockwise")
+                    else:
+                        self.assertNotEqual(transform_type, "rotate_90_counterclockwise")
                     rgb = transform_image(source, case["transform"])
                     height, width = rgb.shape[:2]
                     bgr = np.ascontiguousarray(rgb[:, :, ::-1])
@@ -188,11 +228,13 @@ class OcrGoldenCorpusTest(unittest.TestCase):
                         self.assertLessEqual(recognition_score, 1.0)
                         self.assertEqual(classification_label, expected_labels[index])
                         self.assertEqual(rotation, expected_rotations[index])
+                        self.assertIn(rotation, classifier_rotation_degrees)
                         self.assertEqual(len(box), 8)
                         for x, y in zip(box[0::2], box[1::2]):
                             self.assertTrue(-0.5 <= x <= width + 0.5, box)
                             self.assertTrue(-0.5 <= y <= height + 0.5, box)
                         self.assertGreater(polygon_area(box), 1.0)
+                        self.assertGreater(signed_polygon_area(box), 0.0)
                         if use_classifier:
                             self.assertGreaterEqual(
                                 classification_score, float(case["min_cls_score"])

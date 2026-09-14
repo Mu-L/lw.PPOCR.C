@@ -18,7 +18,9 @@ The candidate scope is the high-level, decoded-pixel OCR API in
 
 The exact exported symbol list is maintained in
 `abi/exports-v1-candidate.txt`. The machine-readable summary is
-`abi/c-abi-v1-candidate.json`. It is installed under docs/abi/ in the
+`abi/c-abi-v1-candidate.json`. Cross-product version and compatibility
+metadata is recorded in `abi/runtime-contract-v1.json` and checked by the
+versioning test. It is installed under docs/abi/ in the
 development package.
 
 ## Not frozen by this candidate

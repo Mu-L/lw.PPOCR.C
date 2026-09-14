@@ -46,6 +46,39 @@ class VersionConsistencyTest(unittest.TestCase):
         dependency_refs = {item["ref"] for item in sbom["dependencies"]}
         self.assertIn(component["bom-ref"], dependency_refs)
 
+    def test_runtime_contract_snapshot_matches_sources(self) -> None:
+        snapshot = json.loads(
+            (ROOT / "abi" / "runtime-contract-v1.json").read_text(encoding="utf-8")
+        )
+        cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+        version = self.project_version()
+        self.assertEqual(snapshot["schema_version"], 1)
+        self.assertEqual(snapshot["product_version"], version)
+        wasm_match = re.search(
+            r'set\(LW_WASM_HOST_ABI_VERSION "([0-9]+)" CACHE STRING', cmake
+        )
+        lwm_match = re.search(
+            r'set\(LW_LWM_FORMAT_VERSION "([0-9]+\.[0-9]+)" CACHE STRING', cmake
+        )
+        self.assertIsNotNone(wasm_match)
+        self.assertIsNotNone(lwm_match)
+        assert wasm_match is not None
+        assert lwm_match is not None
+        self.assertEqual(snapshot["wasm_host_abi_version"], int(wasm_match.group(1)))
+        self.assertEqual(snapshot["lwm_format_version"], lwm_match.group(1))
+
+        candidate = json.loads(
+            (ROOT / "abi" / "c-abi-v1-candidate.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(snapshot["c_abi"]["version"], candidate["abi_version"])
+        self.assertEqual(snapshot["c_abi"]["status"], candidate["status"])
+        self.assertEqual(
+            snapshot["c_abi"]["candidate_manifest"], "abi/c-abi-v1-candidate.json"
+        )
+        self.assertEqual(snapshot["c_abi"]["layout_manifest"], candidate["layout_manifest"])
+        self.assertEqual(snapshot["c_abi"]["symbol_allowlist"], candidate["stable_symbols"])
+        self.assertTrue((ROOT / snapshot["orientation_contract"]).is_file())
+
     def test_preview_tools_and_release_example_share_the_version_base(self) -> None:
         version = self.project_version()
         packager = (ROOT / "tools" / "package_ppocrv6_runtime.py").read_text(

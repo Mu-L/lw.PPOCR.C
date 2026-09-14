@@ -2,6 +2,14 @@
   "schema_version": 1,
   "detector_limit_side_length": 320,
   "recognizer_max_width": 960,
+  "orientation_contract": {
+    "schema_version": 1,
+    "box_order": "top_left_top_right_bottom_right_bottom_left",
+    "supported_source_orientations": ["upright", "rotated_90_counterclockwise"],
+    "supported_reading_orders": ["horizontal_ltr", "vertical_rtl", "vertical_ltr"],
+    "classifier_rotation_degrees": [0, 180],
+    "tall_crop_canonicalization_degrees": 90
+  },
   "source_sha256": "30c417c9f758a3b62718729f5a944f7d2e10cdd2bde0e8ce6785523ddb68ffe9",
   "model_sha256": {
     "detector": "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8",
@@ -165,6 +173,8 @@
   "cases": [
     {
       "name": "identity-classified",
+      "source_orientation": "upright",
+      "reading_order": "horizontal_ltr",
       "transform": {"type": "identity"},
       "use_classifier": true,
       "detected_count": 16,
@@ -179,6 +189,8 @@
     },
     {
       "name": "identity-classifier-disabled",
+      "source_orientation": "upright",
+      "reading_order": "horizontal_ltr",
       "transform": {"type": "identity"},
       "use_classifier": false,
       "detected_count": 16,
@@ -193,6 +205,8 @@
     },
     {
       "name": "nearest-resize-375",
+      "source_orientation": "upright",
+      "reading_order": "horizontal_ltr",
       "transform": {"type": "nearest_resize", "width": 375, "height": 375},
       "use_classifier": true,
       "detected_count": 16,
@@ -205,6 +219,8 @@
     },
     {
       "name": "nearest-resize-750",
+      "source_orientation": "upright",
+      "reading_order": "horizontal_ltr",
       "transform": {"type": "nearest_resize", "width": 750, "height": 750},
       "use_classifier": true,
       "detected_count": 16,
@@ -217,6 +233,8 @@
     },
     {
       "name": "tall-canvas",
+      "source_orientation": "upright",
+      "reading_order": "horizontal_ltr",
       "transform": {
         "type": "canvas",
         "width": 500,
@@ -235,6 +253,8 @@
     },
     {
       "name": "rotated-90-counterclockwise",
+      "source_orientation": "rotated_90_counterclockwise",
+      "reading_order": "horizontal_ltr",
       "transform": {"type": "rotate_90_counterclockwise"},
       "use_classifier": true,
       "detected_count": 16,
@@ -247,6 +267,8 @@
     },
     {
       "name": "blank-wide",
+      "source_orientation": "upright",
+      "reading_order": "horizontal_ltr",
       "transform": {
         "type": "blank",
         "width": 640,

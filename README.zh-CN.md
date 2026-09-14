@@ -365,6 +365,7 @@ HTTP Demo 和正式发布包均不链接、加载或携带 OpenCV。
 - [公共 C API](docs/c-api.md)
 - [完整 OCR 流程](docs/full-ocr.md)
 - [完整 OCR Golden Corpus](docs/full-ocr-golden-corpus.md)
+- [OCR 方向与阅读顺序契约](docs/ocr-orientation-contract.md)
 - [DET 流程](docs/det-pipeline.md)
 - [CLS 流程](docs/cls-pipeline.md)
 - [REC 流程](docs/rec-pipeline.md)

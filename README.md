@@ -286,6 +286,7 @@ bundles as versioned ZIP/TAR.GZ assets when the release workflow runs.
   [CLS](docs/cls-pipeline.md), [DET](docs/det-pipeline.md), and
   [full OCR](docs/full-ocr.md)
 - [REC and full-OCR Golden corpora](docs/rec-golden-corpus.md),
+- [OCR orientation and reading-order contract](docs/ocr-orientation-contract.md),
   [full-OCR corpus](docs/full-ocr-golden-corpus.md), and
   [graph-executor gates](docs/graph-executor.md)
 - [Performance baseline, profile, and optimization notes](docs/performance-baseline.md),

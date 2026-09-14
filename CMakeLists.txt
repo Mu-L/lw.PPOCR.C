@@ -1927,6 +1927,7 @@ install(DIRECTORY docs/
     PATTERN "*.jpg")
 install(FILES
     abi/c-abi-v1-candidate.json
+    abi/runtime-contract-v1.json
     abi/c-abi-v1-layout.json
     abi/exports-v1-candidate.txt
     DESTINATION docs/abi)
