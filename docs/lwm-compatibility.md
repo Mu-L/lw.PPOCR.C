@@ -48,6 +48,9 @@ layout, pipeline-reference, and Full OCR Golden gates. Sanitizers are a CI
 safety net only; they do not change the release binary or the LWM contract.
 The `lwm_corruption` test also runs deterministic byte mutations across header,
 table, checksum, and payload regions and requires a diagnostic rejection for each.
+It separately verifies that non-zero reserved fields in the header,
+Tensor records, and Node records, as well as unsupported header flags, are
+rejected with a stable diagnostic instead of being silently reinterpreted.
 
 ## Release and test requirements
 

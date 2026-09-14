@@ -65,6 +65,31 @@ class CorruptModelTests(unittest.TestCase):
         replace_checksum(data)
         self.run_variant(data, "out_of_bounds")
 
+    def test_header_reserved_field_is_rejected(self) -> None:
+        data = bytearray(MODEL.read_bytes())
+        struct.pack_into("<Q", data, 136, 1)
+        self.run_variant(data, "invalid_format")
+
+    def test_unsupported_header_flags_are_rejected(self) -> None:
+        data = bytearray(MODEL.read_bytes())
+        struct.pack_into("<I", data, 12, 0)
+        replace_checksum(data)
+        self.run_variant(data, "unsupported")
+
+    def test_tensor_reserved_field_is_rejected(self) -> None:
+        data = bytearray(MODEL.read_bytes())
+        tensor_offset = struct.unpack_from("<Q", data, 48)[0]
+        struct.pack_into("<I", data, tensor_offset + 44, 1)
+        replace_checksum(data)
+        self.run_variant(data, "invalid_format")
+
+    def test_node_reserved_field_is_rejected(self) -> None:
+        data = bytearray(MODEL.read_bytes())
+        node_offset = struct.unpack_from("<Q", data, 56)[0]
+        struct.pack_into("<I", data, node_offset + 68, 1)
+        replace_checksum(data)
+        self.run_variant(data, "invalid_format")
+
     def test_deterministic_mutations_fail_closed(self) -> None:
         original = MODEL.read_bytes()
         rng = random.Random(0x4C574C4D)
