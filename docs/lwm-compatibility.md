@@ -46,6 +46,8 @@ The `runtime-sanitizers` workflow builds the native runtime with AddressSanitize
 and UndefinedBehaviorSanitizer on Ubuntu and runs the loader, corruption, ABI
 layout, pipeline-reference, and Full OCR Golden gates. Sanitizers are a CI
 safety net only; they do not change the release binary or the LWM contract.
+The `lwm_corruption` test also runs deterministic byte mutations across header,
+table, checksum, and payload regions and requires a diagnostic rejection for each.
 
 ## Release and test requirements
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import random
 import struct
 import subprocess
 import sys
@@ -63,6 +64,29 @@ class CorruptModelTests(unittest.TestCase):
         struct.pack_into("<I", data, node_offset + 8, tensor_count)
         replace_checksum(data)
         self.run_variant(data, "out_of_bounds")
+
+    def test_deterministic_mutations_fail_closed(self) -> None:
+        original = MODEL.read_bytes()
+        rng = random.Random(0x4C574C4D)
+        offsets = [0, 1, 16, 24, 48, 56, 64, 72, CHECKSUM_OFFSET]
+        offsets.extend(rng.randrange(len(original)) for _ in range(16))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mutated.lwm"
+            for index, offset in enumerate(offsets):
+                data = bytearray(original)
+                data[offset] ^= 1 << (index % 8)
+                path.write_bytes(data)
+                result = subprocess.run(
+                    [str(INSPECT), str(path)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                    timeout=30,
+                )
+                self.assertGreaterEqual(result.returncode, 0, f"mutation {offset} crashed")
+                self.assertNotEqual(result.returncode, 0, f"mutation {offset} accepted")
+                self.assertTrue(result.stderr.strip(), f"mutation {offset} had no diagnostic")
 
     def test_utf8_model_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
