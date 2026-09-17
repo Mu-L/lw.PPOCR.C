@@ -19,7 +19,7 @@ from tools.package_ppocrv6_runtime import (
     asset_set_id,
     normalize_runtime_version,
     package_root,
-    runtime_status,
+    resolve_runtime_status,
 )
 
 
@@ -83,8 +83,14 @@ def validate_pack(pack_path: Path) -> dict[str, Any]:
             raise ValueError("model_revision must be normalized without a leading v")
         if manifest.get("minimum_runtime_version") != minimum_runtime_version:
             raise ValueError("minimum_runtime_version must be normalized without a leading v")
-        if manifest.get("runtime_status") != runtime_status(model_revision):
-            raise ValueError("runtime_status does not match model_revision")
+        try:
+            resolved_status = resolve_runtime_status(
+                model_revision, manifest.get("runtime_status")
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"runtime_status is invalid: {error}") from error
+        if manifest.get("runtime_status") != resolved_status:
+            raise ValueError("runtime_status does not match model_revision policy")
         if not LWM_VERSION_RE.fullmatch(str(manifest.get("lwm_format_version", ""))):
             raise ValueError("lwm_format_version must use the form major.minor")
         if manifest.get("models") != {"det": "det.lwm", "cls": "cls.lwm", "rec": "rec.lwm"}:

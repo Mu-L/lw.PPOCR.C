@@ -112,7 +112,7 @@ _lw_web_malloc
 _lw_web_free
 ```
 
-这些函数构成 WASM Host ABI v1。函数名暂不改为 `lw_wasm_*`，以保持现有
+这些函数构成已冻结的 WASM Host ABI v1 合同。函数名暂不改为 `lw_wasm_*`，以保持现有
 浏览器 SDK 和第三方集成兼容。ABI 结构大小、字段顺序和偏移均视为兼容
 契约；不兼容变更必须升级 ABI 版本。
 

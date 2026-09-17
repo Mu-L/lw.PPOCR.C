@@ -71,6 +71,30 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Require a verified tag signature for stable releases
+        if: ${{ !contains(github.ref_name, '-') }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag_object="$(git rev-parse "${GITHUB_REF_NAME}^{tag}" 2>/dev/null || true)"
+          if [[ -z "${tag_object}" ]]; then
+            echo "stable release tags must be annotated tags" >&2
+            exit 1
+          fi
+          verified="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" \
+            --jq '.verification.verified')"
+          if [[ "${verified}" != "true" ]]; then
+            echo "stable release tag ${GITHUB_REF_NAME} is not GitHub-verified" >&2
+            gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" \
+              --jq '.verification'
+            exit 1
+          fi
 
       - name: Validate release tag and project version
         id: version
@@ -146,6 +170,21 @@ jobs:
         with:
           name: lw-ppocr-java-jni-macos-arm64
           path: release-assets/java/macos-bundle
+
+      - name: Check release metadata readiness
+        shell: bash
+        env:
+          BUILD_VERSION: ${{ steps.version.outputs.base_version }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mode=preview
+          if [[ "${VERSION}" != *-* ]]; then
+            mode=stable
+          fi
+          python tools/check_release_readiness.py \
+            --mode "${mode}" \
+            --version "${BUILD_VERSION}"
 
       - name: Verify and prepare release assets
         shell: bash
@@ -366,12 +405,19 @@ jobs:
               exit 1
             fi
           else
-            gh release create "${TAG}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --verify-tag \
-              --draft \
-              --generate-notes \
+            create_args=(
+              "${TAG}"
+              --repo "${GITHUB_REPOSITORY}"
+              --verify-tag
+              --draft
               --title "${TAG} — lw.PPOCR.C Pure C OCR Runtime / 纯 C OCR 运行时"
+            )
+            if [[ "${VERSION}" == "1.0.0" ]]; then
+              create_args+=(--notes-file "docs/release-notes-v1.0.0.md")
+            else
+              create_args+=(--generate-notes)
+            fi
+            gh release create "${create_args[@]}"
           fi
 
           # Upload into a draft first so customers never see a partially

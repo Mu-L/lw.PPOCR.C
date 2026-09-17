@@ -1,4 +1,5 @@
 #include "lw_infer.h"
+#include "abi_compat_internal.h"
 
 /*
  * Full OCR composition layer: DET -> perspective crop -> optional CLS -> REC.
@@ -138,13 +139,71 @@ void lw_ocr_result_init(lw_ocr_result* result) {
 
 static lw_status validate_options(const lw_ocr_options* options, lw_ocr_options* values,
                                   lw_error* error) {
+    lw_ocr_options raw;
+    size_t supplied_size;
+    size_t fixed_size = offsetof(lw_ocr_options, detector);
     lw_ocr_options_init(values);
     if (options != NULL) {
-        if (options->struct_size != sizeof(*options)) {
+        uint32_t declared_size;
+        size_t detector_bytes;
+        size_t classifier_bytes;
+        size_t recognizer_bytes;
+        lw_detector_options detector_defaults;
+        lw_classifier_options classifier_defaults;
+        lw_recognizer_options recognizer_defaults;
+
+        memcpy(&declared_size, options, sizeof(declared_size));
+        if (declared_size < sizeof(uint32_t)) {
             lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "invalid OCR options structure");
             return LW_STATUS_INVALID_ARGUMENT;
         }
-        *values = *options;
+        supplied_size = (size_t)declared_size;
+        if (supplied_size > sizeof(raw)) {
+            supplied_size = sizeof(raw);
+        }
+        memset(&raw, 0, sizeof(raw));
+        memcpy(&raw, options, supplied_size);
+        if (supplied_size < fixed_size) {
+            fixed_size = supplied_size;
+        }
+        memcpy(values, &raw, fixed_size);
+
+        lw_detector_options_init(&detector_defaults);
+        detector_bytes = supplied_size > offsetof(lw_ocr_options, detector)
+                             ? supplied_size - offsetof(lw_ocr_options, detector)
+                             : 0u;
+        if (!lw_abi_copy_nested_input_prefix(&detector_defaults, sizeof(detector_defaults),
+                                             &raw.detector, detector_bytes)) {
+            lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "invalid OCR detector options");
+            return LW_STATUS_INVALID_ARGUMENT;
+        }
+        detector_defaults.struct_size = (uint32_t)sizeof(detector_defaults);
+        values->detector = detector_defaults;
+
+        lw_classifier_options_init(&classifier_defaults);
+        classifier_bytes = supplied_size > offsetof(lw_ocr_options, classifier)
+                               ? supplied_size - offsetof(lw_ocr_options, classifier)
+                               : 0u;
+        if (!lw_abi_copy_nested_input_prefix(&classifier_defaults, sizeof(classifier_defaults),
+                                             &raw.classifier, classifier_bytes)) {
+            lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "invalid OCR classifier options");
+            return LW_STATUS_INVALID_ARGUMENT;
+        }
+        classifier_defaults.struct_size = (uint32_t)sizeof(classifier_defaults);
+        values->classifier = classifier_defaults;
+
+        lw_recognizer_options_init(&recognizer_defaults);
+        recognizer_bytes = supplied_size > offsetof(lw_ocr_options, recognizer)
+                               ? supplied_size - offsetof(lw_ocr_options, recognizer)
+                               : 0u;
+        if (!lw_abi_copy_nested_input_prefix(&recognizer_defaults, sizeof(recognizer_defaults),
+                                             &raw.recognizer, recognizer_bytes)) {
+            lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "invalid OCR recognizer options");
+            return LW_STATUS_INVALID_ARGUMENT;
+        }
+        recognizer_defaults.struct_size = (uint32_t)sizeof(recognizer_defaults);
+        values->recognizer = recognizer_defaults;
+        values->struct_size = (uint32_t)sizeof(*values);
         if (values->max_crop_pixels == 0u)
             values->max_crop_pixels = LW_OCR_DEFAULT_MAX_CROP_PIXELS;
     }
@@ -380,9 +439,9 @@ void lw_ocr_free(lw_ocr* ocr) {
 }
 
 lw_status lw_ocr_get_info(const lw_ocr* ocr, lw_ocr_info* info) {
-    if (ocr == NULL || info == NULL || info->struct_size != sizeof(*info))
+    if (ocr == NULL || info == NULL ||
+        !lw_abi_copy_output_prefix(info, info->struct_size, &ocr->info, sizeof(ocr->info)))
         return LW_STATUS_INVALID_ARGUMENT;
-    *info = ocr->info;
     return LW_STATUS_OK;
 }
 
@@ -770,15 +829,18 @@ static lw_status ocr_run_bgr_u8_impl(lw_ocr* ocr, const uint8_t* source, uint64_
     uint64_t output_started;
     uint32_t index;
     int capacity_query;
+    lw_ocr_result output;
+    uint32_t result_size;
     lw_status status;
-    if (ocr == NULL || source == NULL || result == NULL || result->struct_size != sizeof(*result) ||
+    if (ocr == NULL || source == NULL || result == NULL || result->struct_size < sizeof(uint32_t) ||
         (lines == NULL && line_capacity != 0u) || (text_utf8 == NULL && text_capacity != 0u)) {
         lw_set_error(
             error, LW_STATUS_INVALID_ARGUMENT,
             "OCR handle, BGR source, initialized result, and valid output buffers are required");
         return LW_STATUS_INVALID_ARGUMENT;
     }
-    clear_result(result);
+    result_size = result->struct_size;
+    clear_result(&output);
     total_started = lw_ocr_profile_now(profile);
     capacity_query =
         lines == NULL && line_capacity == 0u && text_utf8 == NULL && text_capacity == 0u;
@@ -794,11 +856,13 @@ static lw_status ocr_run_bgr_u8_impl(lw_ocr* ocr, const uint8_t* source, uint64_
                        ocr->detector, source, source_byte_count, source_width, source_height,
                        source_stride, ocr->detected_boxes, ocr->info.max_line_capacity, &detection,
                        &profile->detector, error);
-    result->detected_count = detection.box_count;
-    result->detector_resized_width = detection.resized_width;
-    result->detector_resized_height = detection.resized_height;
-    if (status != LW_STATUS_OK)
+    output.detected_count = detection.box_count;
+    output.detector_resized_width = detection.resized_width;
+    output.detector_resized_height = detection.resized_height;
+    if (status != LW_STATUS_OK) {
+        (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
         return status;
+    }
     /* Resolve crop geometry before running REC. The private scheduler can then
      * materialize every crop in longest-first order and dynamically balance
      * the complete request across the available line workers. */
@@ -814,15 +878,18 @@ static lw_status ocr_run_bgr_u8_impl(lw_ocr* ocr, const uint8_t* source, uint64_
             continue;
         if (status != LW_STATUS_OK) {
             lw_set_error(error, status, "unable to compute OCR crop dimensions");
+            (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
             return status;
         }
         crop_pixels = (uint64_t)crop_width * crop_height;
         if (crop_pixels > ocr->max_crop_pixels) {
             lw_set_error(error, LW_STATUS_MEMORY_LIMIT, "OCR crop exceeds max_crop_pixels");
+            (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
             return LW_STATUS_MEMORY_LIMIT;
         }
         if (crop_width > UINT32_MAX / 3u) {
             lw_set_error(error, LW_STATUS_OUT_OF_BOUNDS, "OCR crop row stride overflows");
+            (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
             return LW_STATUS_OUT_OF_BOUNDS;
         }
         crop = &ocr->crops[line_count];
@@ -839,6 +906,7 @@ static lw_status ocr_run_bgr_u8_impl(lw_ocr* ocr, const uint8_t* source, uint64_
     status = crop_and_run_adaptive(ocr, source, source_byte_count, source_width, source_height,
                                    source_stride, line_count, profile, error);
     if (status != LW_STATUS_OK) {
+        (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
         return status;
     }
     /* Workers write fixed-size text slots to avoid synchronization. Compact
@@ -849,6 +917,7 @@ static lw_status ocr_run_bgr_u8_impl(lw_ocr* ocr, const uint8_t* source, uint64_
         uint64_t line_bytes = line->text_length + 1u;
         if (text_used > ocr->info.max_text_capacity - line_bytes) {
             lw_set_error(error, LW_STATUS_OUT_OF_BOUNDS, "OCR text scratch capacity is exhausted");
+            (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
             return LW_STATUS_OUT_OF_BOUNDS;
         }
         memmove(ocr->scratch_text + (size_t)text_used,
@@ -856,20 +925,22 @@ static lw_status ocr_run_bgr_u8_impl(lw_ocr* ocr, const uint8_t* source, uint64_
         line->text_offset = text_used;
         text_used += line_bytes;
     }
-    result->line_count = line_count;
-    result->required_line_capacity = line_count;
-    result->required_text_capacity = text_used;
+    output.line_count = line_count;
+    output.required_line_capacity = line_count;
+    output.required_text_capacity = text_used;
     if (capacity_query) {
         /* The caller can now allocate exact line/text buffers and call again. */
         lw_ocr_profile_add_elapsed(profile == NULL ? NULL : &profile->output_nanoseconds,
                                    output_started, profile);
         lw_ocr_profile_add_elapsed(profile == NULL ? NULL : &profile->total_nanoseconds,
                                    total_started, profile);
+        (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
         lw_set_error(error, LW_STATUS_OK, "");
         return LW_STATUS_OK;
     }
     if (line_capacity < line_count || text_capacity < text_used ||
         (line_count != 0u && lines == NULL) || (text_used != 0u && text_utf8 == NULL)) {
+        (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
         lw_set_error(error, LW_STATUS_OUT_OF_BOUNDS,
                      "OCR line or text output capacity is insufficient");
         return LW_STATUS_OUT_OF_BOUNDS;
@@ -884,6 +955,7 @@ static lw_status ocr_run_bgr_u8_impl(lw_ocr* ocr, const uint8_t* source, uint64_
                                output_started, profile);
     lw_ocr_profile_add_elapsed(profile == NULL ? NULL : &profile->total_nanoseconds, total_started,
                                profile);
+    (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
     lw_set_error(error, LW_STATUS_OK, "");
     return LW_STATUS_OK;
 }

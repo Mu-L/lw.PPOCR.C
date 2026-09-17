@@ -82,6 +82,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--report", type=Path)
+    parser.add_argument(
+        "--runtime-status",
+        choices=("analysis-only", "production"),
+        default="analysis-only",
+        help="status recorded in the conversion report (production is used by the stable wrapper)",
+    )
     args = parser.parse_args(argv)
     if args.height <= 0 or args.width <= 0:
         raise SystemExit("--height and --width must be positive")
@@ -102,10 +108,13 @@ def main(argv: list[str] | None = None) -> int:
         inferred = static_model
     args.output.parent.mkdir(parents=True, exist_ok=True)
     info = _write_model(static_model, args.output, inferred)
+    report_status = args.runtime_status
+    if report_status == "analysis-only" and args.dynamic:
+        report_status = "dynamic-analysis-only"
     report = {
         "schema_version": 1,
-        "tool": "tools/convert_small_det_experimental.py",
-        "status": "dynamic-analysis-only" if args.dynamic else "analysis-only",
+        "tool": "tools/convert_small_det.py" if args.runtime_status == "production" else "tools/convert_small_det_experimental.py",
+        "status": report_status,
         "model": str(args.model),
         "height": args.height,
         "width": args.width,

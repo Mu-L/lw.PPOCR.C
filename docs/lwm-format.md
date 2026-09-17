@@ -1,6 +1,15 @@
 # LWM v0.1 format
 
-Status: **experimental and not frozen**.
+Status: **freeze candidate; not frozen**. The proposed v1.0 scope currently
+uses this format as an internal Preview implementation asset; it is not yet a
+stable interchange contract.
+
+The machine-readable layout contract is maintained in
+[`abi/lwm-v0.1-layout.json`](../abi/lwm-v0.1-layout.json). The `lwm_layout_contract`
+CTest gate parses every bundled Tiny DET/CLS/REC model and verifies the on-disk
+invariants below. Passing this gate is evidence that the checked-in converters
+and loader agree; it is not, by itself, a promise that future LWM extensions
+are backward compatible.
 
 LWM means LightWeight Model. Version 0.1 currently encodes only the exact
 PP-OCRv6 tiny REC and fixed-batch CLS graphs documented in `SUPPORTED_OPS_V0.md`. It is not an ONNX

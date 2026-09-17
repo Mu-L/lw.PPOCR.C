@@ -9,30 +9,34 @@ Python、OpenCV、ONNX Runtime、OpenVINO、TensorRT 或 protobuf，适合将文
 > 本项目不是通用 ONNX 推理框架。当前目标是可靠、高效地运行已经转换为 LWM 格式的
 > PP-OCRv6 Tiny、Small 和 Medium；Tiny 为默认模型，Small/Medium 为可选 preview。
 
-## 当前预览版：v0.2.0-preview.1
+## 当前稳定版：v1.0.0
 
-本预览版通过同一套纯 C Runtime 提供 PP-OCRv6 Tiny、Small、Medium。Tiny 继续作为默认，
-Small 和 Medium 通过独立 Runtime Model Pack 与自包含浏览器文件提供。公共 C ABI 和
-LWM v0.1 格式仍未冻结。
+本稳定版对 Tiny 模型承诺冻结的 C ABI v1 和 WASM Host ABI v1。Tiny 是唯一纳入稳定
+支持范围的模型；Small 和 Medium 仍作为可选 Preview 变体，通过独立 Runtime Model
+Pack 与自包含浏览器文件提供。LWM v0.1 仍是内部 Preview 格式。
 
 请从 [GitHub Releases](https://github.com/lxw112190/lw.PPOCR.C/releases) 按用途下载：
 
 | 用途 | Release 文件 | 说明 |
 |---|---|---|
 | 双击使用离线 OCR | `*-ocr-demo.html` | Tiny，手机和通用场景首选 |
-| 体验更大浏览器模型 | `*-ocr-demo-small.html` / `*-ocr-demo-medium.html` | Small 按需选择；Medium 桌面优先 |
+| 体验更大浏览器模型 | `*-ocr-demo-small.html` / `*-ocr-demo-medium.html` | Preview 附属产物；Small 按需选择；Medium 桌面优先 |
 | 网页集成 OCR | `*-web-sdk.js` / `*-web-sdk-small.js` / `*-web-sdk-medium.js` | `LwPpocr` API 相同，内嵌模型不同 |
 | 原生 C/C++ | `*-windows-x64-msvc.zip` / `*-linux-x86_64.tar.gz` | 默认内置 Tiny |
-| Android ARM64 | `*-android-arm64.aar` / `*-android-arm64-demo.apk` | `arm64-v8a`、`minSdk 21`、Tiny |
-| 桌面 Java/JNI | `*-java-jni-windows-x64.zip` / `*-java-jni-linux-x64.tar.gz` / `*-java-jni-macos-arm64.tar.gz` | Java 8+ 控制台接入 |
+| Android ARM64 | `*-android-arm64.aar` / `*-android-arm64-demo.apk` | Preview 附属产物；`arm64-v8a`、`minSdk 21`、Tiny |
+| 桌面 Java/JNI | `*-java-jni-windows-x64.zip` / `*-java-jni-linux-x64.tar.gz` / `*-java-jni-macos-arm64.tar.gz` | Preview 附属产物；Java 8+ 控制台接入 |
 | Node.js | `*-node-wasm.zip` | Node 18+ 原始 WASM 包，Tiny |
 | 原生端切换模型 | `*-ppocrv6-{tiny,small,medium}-runtime.zip` | 带 manifest 和哈希的命名空间模型包 |
 
 下载产物时请同时下载并验证校验文件。Android 的 `SHA256SUMS.txt` 同时覆盖 AAR 和 APK，
 其他主要产物使用同名 `.sha256`。不要混用不同 Release 的二进制、SDK、模型或字典。
 从 `0.1.x` 升级时应整体替换同一版本的配套文件，并重新编译 Native/Managed 调用方，
-因为 ABI 尚未冻结。详见[开发包说明](docs/package.md)和
-[模型选型矩阵](docs/supported-models.md)。
+因为 LWM 仍是内部 Preview 格式。详见[开发包说明](docs/package.md)和
+[模型选型矩阵](docs/supported-models.md)。正式版门槛见
+[v1.0 发布准备清单](docs/release-readiness-v1.0.md)。
+已批准的 1.0 稳定范围记录在
+[`ci/stable-release-scope.json`](ci/stable-release-scope.json)；Small、Medium、
+Android、Java/JNI、ARM64 和 LoongArch64 仍明确标记为 Preview。
 
 ## 主要功能
 
@@ -87,7 +91,7 @@ PP-OCR ONNX 模型
 - 手动客户构建工作流可生成原生 Linux ARM64 包，以及经 QEMU 验证的实验性 Linux
   LoongArch64 包；客户实体机验证仍是独立门槛；
 - 兼容目标：Windows 7 x86；
-- 模型格式：LWM v0.1，目前尚未冻结为稳定格式。
+- 模型格式：LWM v0.1，当前作为内部 Preview 格式使用。
 
 平台支持分为源码兼容、CI 验证和实体机验证三个层次。不要仅凭某个平台能够编译，便认为
 所有发行版和硬件都已经得到验证。具体说明请查看
@@ -198,7 +202,7 @@ Tiny、Small、Medium 的 DET/REC；三个变体共用 Tiny CLS，Small 和 Medi
 共用 `PP-OCRv6_small_rec_dict.txt`。Tiny 仍是现有集成的默认模型；Small、
 Medium 已成为可选 preview 变体，通过独立 Runtime Model Pack 和浏览器
 SDK/HTML 发行。它们的 Native/Web 完整 OCR golden 已进入 Release 门禁，
-但 C ABI 和 LWM 格式尚未冻结。选择建议见
+但 LWM 格式仍是内部 Preview；C ABI v1/WASM Host ABI v1 已冻结。选择建议见
 [`docs/supported-models.md`](docs/supported-models.md)，项目自有测试语料见
 [`docs/full-ocr-golden-corpus.md`](docs/full-ocr-golden-corpus.md)。
 

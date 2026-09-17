@@ -12,6 +12,7 @@ from typing import Any
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VARIANTS = ("tiny", "small", "medium")
+RUNTIME_STATUSES = frozenset(("primary", "supported", "analysis-only"))
 
 
 def sha256(path: Path) -> str:
@@ -71,6 +72,12 @@ def validate_catalog(catalog_path: Path) -> dict[str, Any]:
         entry = variants[variant]
         if not isinstance(entry, dict):
             raise ValueError(f"variants.{variant} must be an object")
+        runtime_status = entry.get("runtime_status")
+        if runtime_status not in RUNTIME_STATUSES:
+            raise ValueError(
+                f"variants.{variant}.runtime_status must be one of "
+                f"{sorted(RUNTIME_STATUSES)}"
+            )
         assets = {role: check_asset(root, entry.get(role), f"variants.{variant}.{role}") for role in ("det", "rec")}
         for role in ("cls", "dictionary"):
             reference = entry.get(role)
@@ -88,7 +95,12 @@ def validate_catalog(catalog_path: Path) -> dict[str, Any]:
         raise ValueError("Small and Medium must use the same dictionary")
     if len({resolved[variant]["cls"] for variant in VARIANTS}) != 1:
         raise ValueError("Tiny, Small, and Medium must use the same CLS asset")
-    return {"status": "ok", "variants": list(VARIANTS), "resolved": resolved}
+    return {
+        "status": "ok",
+        "variants": list(VARIANTS),
+        "runtime_status": {variant: variants[variant]["runtime_status"] for variant in VARIANTS},
+        "resolved": resolved,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

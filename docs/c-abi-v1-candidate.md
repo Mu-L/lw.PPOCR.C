@@ -1,14 +1,12 @@
-# C ABI v1 freeze candidate
+# C ABI v1 frozen contract
 
-The next preview release, planned as `v0.2.0-preview.2`, will start the
-C ABI v1 soft-freeze period. The currently published preview remains
-`v0.2.0-preview.1`. This is a compatibility candidate, not a permanent ABI
-guarantee yet. A later release will promote this contract only after the
-candidate client, package, and cross-platform compatibility tests have passed.
+The C ABI v1 contract is frozen for the approved 1.0 scope and is shipped by
+the `v1.0.0` stable package. The historical `*-candidate` filenames are
+retained so existing package and documentation paths remain valid.
 
-## Stable candidate scope
+## Frozen scope
 
-The candidate scope is the high-level, decoded-pixel OCR API in
+The frozen scope is the high-level, decoded-pixel OCR API in
 `include/lw_infer.h`:
 
 - common status and error helpers;
@@ -18,33 +16,48 @@ The candidate scope is the high-level, decoded-pixel OCR API in
 - `lw_ocr_*` for composed detection, optional classification, and recognition.
 
 The exact exported symbol list is maintained in
-`abi/exports-v1-candidate.txt`. The machine-readable summary is
+`abi/exports-v1-candidate.txt` (the filename is retained for path
+compatibility). The machine-readable summary is
 `abi/c-abi-v1-candidate.json`. Cross-product version and compatibility
 metadata is recorded in `abi/runtime-contract-v1.json` and checked by the
 versioning test. It is installed under docs/abi/ in the
 development package.
 
-## Not frozen by this candidate
+## Not frozen by this contract
 
-The following remain experimental in the 0.2.x preview line:
+The following remain experimental and are outside the stable v1 contract:
 
 - `lw_model_*`, `lw_session_*`, and `lw_tensor_desc_init` low-level planning APIs;
 - the internal graph executor and tensor scheduling details;
-- the LWM v0.1 file format;
-- the separate WebAssembly Host ABI.
+- LWM v0.1 remains an internal Preview format; the WebAssembly Host ABI is
+  frozen separately in `abi/web-abi-v1-candidate.json`.
 
 Applications should use the recognizer, classifier, detector, and full-OCR
 handles for integration. The low-level model/session API is useful for tests
-and experiments but is not covered by the candidate compatibility promise.
+and experiments but is not covered by the frozen compatibility promise.
 
 ## Contract rules
 
-The current preview validates the complete known `struct_size` for public calls. Prefix-compatible input/output handling is a requirement to verify before the permanent freeze; this candidate does not claim that older shorter structures are already accepted.
+Output metadata queries now accept a caller-advertised prefix: the `*_get_info`
+functions and `lw_session_get_output_desc` copy only the common bytes and leave
+the caller's original `struct_size` intact. A larger caller structure is also
+accepted; fields unknown to this library are ignored. This behavior is covered
+by `c_abi_prefix_compatibility`.
+
+Stable high-level input options (`lw_recognizer_options`,
+`lw_classifier_options`, `lw_detector_options`, and `lw_ocr_options`) also
+accept a caller-advertised prefix. Missing fields retain the documented
+defaults, including missing nested OCR options. Recognition result structures
+(`lw_recognition_result`, `lw_classification_result`,
+`lw_detection_result`, and `lw_ocr_result`) use a local full result and copy
+only the caller's prefix on every success, capacity error, and pipeline error
+after result fields become available. Bytes beyond the declared prefix are not
+written. Experimental model/session options remain exact-size APIs.
 
 - Public option/info/result structures begin with struct_size and must be initialized with
   their matching _init function. Array element records lw_detection_box and lw_ocr_line intentionally omit struct_size; their capacities and layout are governed by the surrounding result structures.
-- Existing structure prefixes and enum numeric values are retained after the
-  eventual freeze. Additive fields can only be appended under the documented
+- Existing structure prefixes and enum numeric values are permanent after the
+  freeze. Additive fields can only be appended under the documented
   size/version rules.
 - Strings crossing the boundary are UTF-8.
 - Input pixels are caller-owned interleaved BGR8. JPEG/PNG decoding remains an
@@ -80,18 +93,17 @@ an exact output allocation is required.
 
 ## Release gate
 
-The candidate is considered ready for an RC only when all of the following
-remain green:
+The frozen contract is maintained only while all of the following remain
+green:
 
 1. structure-size and enum-value checks in `tests/test_abi.c`;
-2. exact legacy export checks in `abi/exports-v0.txt`;
-3. candidate stable-symbol checks in `abi/exports-v1-candidate.txt`;
-4. recognition-only buffer, error, and lifecycle tests;
+2. prefix-compatible output metadata checks in `tests/test_abi_prefix.c`;
+3. exact legacy export checks in `abi/exports-v0.txt`;
+4. frozen stable-symbol checks in `abi/exports-v1-candidate.txt`;
+5. recognition-only buffer, error, and lifecycle tests;
    The staged package also configures and runs the abi_v1_client.c example against the installed CMake package and shared library;
-5. candidate client tests against the staged Windows and Linux packages;
-6. Tiny, Small, and Medium model-pack compatibility tests.
+6. client tests against the staged Windows and Linux packages;
+7. Tiny, Small, and Medium model-pack compatibility tests.
 
-The ABI may still receive corrections during the preview line. Once the final
-freeze is announced, removing or changing an existing candidate symbol,
-structure prefix, enum value, ownership rule, or error semantic requires a new
-ABI major version.
+Removing or changing an existing frozen symbol, structure prefix, enum value,
+ownership rule, or error semantic requires a new ABI major version.

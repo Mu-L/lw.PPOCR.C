@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "format": "LWM",
+  "status": "freeze-candidate",
+  "format_major": 0,
+  "format_minor": 1,
+  "header_size": 160,
+  "tensor_record_size": 80,
+  "node_record_size": 72,
+  "section_alignment": 8,
+  "checksum_offset": 128,
+  "checksum_size": 8,
+  "header_flags": {
+    "no_memory_plan": 1
+  },
+  "limits": {
+    "max_dims": 8,
+    "max_node_inputs": 8,
+    "max_node_outputs": 4
+  },
+  "operator_parameters": {
+    "1": {"name": "Conv", "size": 64},
+    "2": {"name": "Add", "size": 0},
+    "3": {"name": "Mul", "size": 0},
+    "4": {"name": "Div", "size": 0},
+    "5": {"name": "Erf", "size": 0},
+    "6": {"name": "HardSigmoid", "size": 16},
+    "7": {"name": "BatchNormalization", "size": 24},
+    "8": {"name": "ReduceMean", "size": 48},
+    "9": {"name": "Relu", "size": 0},
+    "10": {"name": "AveragePool", "size": 64},
+    "11": {"name": "Squeeze", "size": 40},
+    "12": {"name": "Transpose", "size": 40},
+    "13": {"name": "Unsqueeze", "size": 40},
+    "14": {"name": "MatMul", "size": 0},
+    "15": {"name": "Softmax", "size": 16},
+    "16": {"name": "Reshape", "size": 0},
+    "17": {"name": "Concat", "size": 16},
+    "18": {"name": "ConvTranspose", "size": 64},
+    "19": {"name": "MaxPool", "size": 64},
+    "20": {"name": "Resize", "size": 32},
+    "21": {"name": "Sigmoid", "size": 0},
+    "22": {"name": "Sub", "size": 0},
+    "23": {"name": "Sqrt", "size": 0},
+    "24": {"name": "Pow", "size": 0},
+    "25": {"name": "Slice", "size": 136}
+  }
+}

@@ -78,7 +78,8 @@ async function main() {{
 main().catch(error => {{ console.error(error); process.exitCode = 1; }});
 ```
 
-The exported `lw_web_*` symbols are the stable WASM Host ABI v{abi_version}. Use one
+The exported `lw_web_*` symbols follow the frozen contract for WASM Host ABI
+v{abi_version}. Use one
 runtime instance from one request at a time; create separate Node Worker
 instances when an application needs concurrency. See `manifest.json` and
 `SHA256SUMS.txt` before loading assets.

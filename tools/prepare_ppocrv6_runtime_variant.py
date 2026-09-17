@@ -95,7 +95,7 @@ def prepare(
                 repository_root,
                 [
                     sys.executable,
-                    "tools/convert_small_det_experimental.py",
+                    "tools/convert_small_det.py",
                     "--model",
                     str(detector),
                     "--height",
@@ -111,7 +111,7 @@ def prepare(
                 repository_root,
                 [
                     sys.executable,
-                    "tools/convert_small_rec_experimental.py",
+                    "tools/convert_small_rec.py",
                     "--model",
                     str(recognizer),
                     "--dynamic",
@@ -124,7 +124,7 @@ def prepare(
                 repository_root,
                 [
                     sys.executable,
-                    "tools/convert_medium_det_experimental.py",
+                    "tools/convert_medium_det.py",
                     "--model",
                     str(detector),
                     "--dynamic",
@@ -136,7 +136,7 @@ def prepare(
                 repository_root,
                 [
                     sys.executable,
-                    "tools/convert_medium_rec_experimental.py",
+                    "tools/convert_medium_rec.py",
                     "--model",
                     str(recognizer),
                     "--dynamic",

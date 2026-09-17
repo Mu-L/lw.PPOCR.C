@@ -12,6 +12,7 @@ from tools.package_ppocrv6_runtime import (
     build_manifest,
     normalize_runtime_version,
     package,
+    resolve_runtime_status,
 )
 from tools.validate_runtime_model_pack import validate_pack
 
@@ -39,9 +40,9 @@ class RuntimeModelPackTests(unittest.TestCase):
             with zipfile.ZipFile(first) as archive:
                 manifest = json.loads(archive.read("ppocrv6-small/manifest.json"))
                 self.assertEqual(manifest["model_id"], "ppocrv6-small")
-                self.assertEqual(manifest["model_revision"], "0.2.0-preview.1")
-                self.assertEqual(manifest["runtime_status"], "preview")
-                self.assertEqual(manifest["minimum_runtime_version"], "0.2.0")
+                self.assertEqual(manifest["model_revision"], "1.0.0")
+                self.assertEqual(manifest["runtime_status"], "production")
+                self.assertEqual(manifest["minimum_runtime_version"], "1.0.0")
                 self.assertEqual(manifest["lwm_format_version"], "0.1")
                 self.assertEqual(
                     sorted(archive.namelist()),
@@ -92,6 +93,24 @@ class RuntimeModelPackTests(unittest.TestCase):
         manifest = build_manifest("tiny", "v0.2.0", "0.1", hashes)
         self.assertEqual(manifest["model_revision"], "0.2.0")
         self.assertEqual(manifest["runtime_status"], "production")
+
+    def test_analysis_only_status_is_preserved_on_stable_revision(self) -> None:
+        hashes = {
+            name: "0" * 64
+            for name in ("det.lwm", "cls.lwm", "rec.lwm", "ppocr_keys.txt")
+        }
+        manifest = build_manifest(
+            "small", "v1.0.0", "0.1", hashes, runtime_status_override="analysis-only"
+        )
+        self.assertEqual(manifest["model_revision"], "1.0.0")
+        self.assertEqual(manifest["runtime_status"], "analysis-only")
+        self.assertEqual(resolve_runtime_status("1.0.0", "analysis-only"), "analysis-only")
+
+    def test_status_and_revision_must_agree(self) -> None:
+        with self.assertRaises(ValueError):
+            resolve_runtime_status("1.0.0-preview.1", "production")
+        with self.assertRaises(ValueError):
+            resolve_runtime_status("1.0.0", "preview")
 
     def test_asset_set_id_normalizes_revision_and_rejects_bad_hashes(self) -> None:
         hashes = {

@@ -1,4 +1,5 @@
 #include "lw_infer.h"
+#include "abi_compat_internal.h"
 
 /* Public DET handle: preprocessing -> graph execution -> DB postprocessing. */
 
@@ -80,11 +81,15 @@ static lw_status validate_options(const lw_detector_options* options, lw_detecto
     lw_detector_options values;
     lw_detector_options_init(&values);
     if (options != NULL) {
-        if (options->struct_size != sizeof(*options) || options->reserved != 0u) {
+        if (!lw_abi_copy_input_prefix(&values, sizeof(values), options)) {
             lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "invalid detector options structure");
             return LW_STATUS_INVALID_ARGUMENT;
         }
-        values = *options;
+        values.struct_size = (uint32_t)sizeof(values);
+        if (values.reserved != 0u) {
+            lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "invalid detector options structure");
+            return LW_STATUS_INVALID_ARGUMENT;
+        }
         if (values.limit_side_length == 0u)
             values.limit_side_length = LW_DET_DEFAULT_LIMIT_SIDE_LENGTH;
         if (values.max_candidates == 0u)
@@ -257,9 +262,10 @@ void lw_detector_free(lw_detector* detector) {
 }
 
 lw_status lw_detector_get_info(const lw_detector* detector, lw_detector_info* info) {
-    if (detector == NULL || info == NULL || info->struct_size != sizeof(*info))
+    if (detector == NULL || info == NULL ||
+        !lw_abi_copy_output_prefix(info, info->struct_size, &detector->info,
+                                   sizeof(detector->info)))
         return LW_STATUS_INVALID_ARGUMENT;
-    *info = detector->info;
     return LW_STATUS_OK;
 }
 
@@ -295,15 +301,18 @@ static lw_status detector_detect_bgr_u8_impl(
     uint32_t box_count = 0u;
     float width_ratio;
     float height_ratio;
+    lw_detection_result output;
+    uint32_t result_size;
     uint64_t started;
     lw_status status;
     if (detector == NULL || source == NULL || result == NULL ||
-        result->struct_size != sizeof(*result) || (boxes == NULL && box_capacity != 0u)) {
+        result->struct_size < sizeof(uint32_t) || (boxes == NULL && box_capacity != 0u)) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT,
                      "detector, BGR source, initialized result, and valid box buffer are required");
         return LW_STATUS_INVALID_ARGUMENT;
     }
-    clear_result(result);
+    result_size = result->struct_size;
+    clear_result(&output);
     if (source_width == 0u || source_height == 0u) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "source image dimensions must be positive");
         return LW_STATUS_INVALID_ARGUMENT;
@@ -320,18 +329,21 @@ static lw_status detector_detect_bgr_u8_impl(
         lw_set_error(error, status, "unable to compute detector input size");
         return status;
     }
-    result->resized_width = resized_width;
-    result->resized_height = resized_height;
-    result->width_ratio = width_ratio;
-    result->height_ratio = height_ratio;
+    output.resized_width = resized_width;
+    output.resized_height = resized_height;
+    output.width_ratio = width_ratio;
+    output.height_ratio = height_ratio;
     status = ensure_session(detector, resized_width, resized_height, error);
-    if (status != LW_STATUS_OK)
+    if (status != LW_STATUS_OK) {
+        (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
         return status;
+    }
     status = lw_det_preprocess_bgr_u8(source, source_byte_count, source_width, source_height,
                                       source_stride, resized_width, resized_height, detector->input,
                                       detector->input_element_count);
     if (status != LW_STATUS_OK) {
         lw_set_error(error, status, "BGR source layout is invalid");
+        (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
         return status;
     }
     lw_pipeline_profile_add_elapsed(profile == NULL ? NULL : &profile->preprocess_nanoseconds,
@@ -348,6 +360,7 @@ static lw_status detector_detect_bgr_u8_impl(
     lw_pipeline_profile_add_elapsed(profile == NULL ? NULL : &profile->graph_nanoseconds, started,
                                     profile);
     if (status != LW_STATUS_OK) {
+        (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
         return status;
     }
     started = lw_pipeline_profile_now(profile);
@@ -358,8 +371,9 @@ static lw_status detector_detect_bgr_u8_impl(
                                    width_ratio, height_ratio, boxes, box_capacity, &box_count);
     lw_pipeline_profile_add_elapsed(profile == NULL ? NULL : &profile->postprocess_nanoseconds,
                                     started, profile);
-    result->box_count = box_count;
-    result->required_box_capacity = box_count;
+    output.box_count = box_count;
+    output.required_box_capacity = box_count;
+    (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
     if (status != LW_STATUS_OK) {
         lw_set_error(error, status,
                      status == LW_STATUS_OUT_OF_BOUNDS ? "box buffer capacity is insufficient"
@@ -373,6 +387,7 @@ static lw_status detector_detect_bgr_u8_impl(
             return status;
         }
     }
+    (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
     lw_set_error(error, LW_STATUS_OK, "");
     return LW_STATUS_OK;
 }

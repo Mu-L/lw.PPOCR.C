@@ -1,4 +1,5 @@
 #include "model_internal.h"
+#include "abi_compat_internal.h"
 
 /*
  * Model handle lifecycle and platform-specific UTF-8 file opening.
@@ -187,10 +188,10 @@ void lw_model_retain(lw_model* model) {
 }
 
 lw_status lw_model_get_info(const lw_model* model, lw_model_info* info) {
-    if (model == NULL || info == NULL || info->struct_size != sizeof(*info)) {
+    if (model == NULL || info == NULL ||
+        !lw_abi_copy_output_prefix(info, info->struct_size, &model->info, sizeof(model->info))) {
         return LW_STATUS_INVALID_ARGUMENT;
     }
-    *info = model->info;
     return LW_STATUS_OK;
 }
 

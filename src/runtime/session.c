@@ -1,4 +1,5 @@
 #include "session_internal.h"
+#include "abi_compat_internal.h"
 
 /*
  * Session construction joins model metadata, concrete input shapes and the
@@ -674,10 +675,10 @@ lw_status lw_session_share_prepared_constants(lw_session* destination,
 }
 
 lw_status lw_session_get_info(const lw_session* session, lw_session_info* info) {
-    if (session == NULL || info == NULL || info->struct_size != sizeof(*info)) {
+    if (session == NULL || info == NULL ||
+        !lw_abi_copy_output_prefix(info, info->struct_size, &session->info, sizeof(session->info))) {
         return LW_STATUS_INVALID_ARGUMENT;
     }
-    *info = session->info;
     return LW_STATUS_OK;
 }
 
@@ -685,17 +686,21 @@ lw_status lw_session_get_output_desc(const lw_session* session, uint32_t output_
                                      lw_tensor_desc* output) {
     uint32_t tensor_index;
     const lw_runtime_tensor* tensor;
-    if (session == NULL || output == NULL || output->struct_size != sizeof(*output) ||
+    lw_tensor_desc value;
+    if (session == NULL || output == NULL || output->struct_size < sizeof(uint32_t) ||
         output_index >= session->model->info.output_count) {
         return LW_STATUS_INVALID_ARGUMENT;
     }
     tensor_index = lwm_read_u32(session->model->bytes + (size_t)session->model->output_offset +
                                 (size_t)output_index * 4u);
     tensor = &session->tensors[tensor_index];
-    memset(output, 0, sizeof(*output));
-    output->struct_size = (uint32_t)sizeof(*output);
-    output->dtype = tensor->dtype;
-    output->rank = tensor->rank;
-    memcpy(output->dimensions, tensor->dimensions, sizeof(output->dimensions));
+    memset(&value, 0, sizeof(value));
+    value.struct_size = (uint32_t)sizeof(value);
+    value.dtype = tensor->dtype;
+    value.rank = tensor->rank;
+    memcpy(value.dimensions, tensor->dimensions, sizeof(value.dimensions));
+    if (!lw_abi_copy_output_prefix(output, output->struct_size, &value, sizeof(value))) {
+        return LW_STATUS_INVALID_ARGUMENT;
+    }
     return LW_STATUS_OK;
 }

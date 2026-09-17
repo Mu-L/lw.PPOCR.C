@@ -1,4 +1,5 @@
 #include "lw_infer.h"
+#include "abi_compat_internal.h"
 
 /* Public CLS handle for detecting whether a text crop needs 180-degree rotation. */
 
@@ -65,28 +66,35 @@ static lw_status validate_options(const lw_classifier_options* options, uint64_t
                                   lw_model_options* model_options,
                                   lw_session_options* session_options, lw_error* error) {
     lw_classifier_options defaults;
+    lw_classifier_options values;
     lw_classifier_options_init(&defaults);
+    values = defaults;
     *max_image_pixels = defaults.max_image_pixels;
     lw_model_options_init(model_options);
     lw_session_options_init(session_options);
     if (options == NULL) {
         return LW_STATUS_OK;
     }
-    if (options->struct_size != sizeof(*options) || options->reserved != 0u) {
+    if (!lw_abi_copy_input_prefix(&values, sizeof(values), options)) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "invalid classifier options structure");
         return LW_STATUS_INVALID_ARGUMENT;
     }
-    if (options->max_model_file_size != 0u) {
-        model_options->max_file_size = options->max_model_file_size;
+    values.struct_size = (uint32_t)sizeof(values);
+    if (values.reserved != 0u) {
+        lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "invalid classifier options structure");
+        return LW_STATUS_INVALID_ARGUMENT;
     }
-    if (options->max_workspace_size != 0u) {
-        session_options->max_workspace_size = options->max_workspace_size;
+    if (values.max_model_file_size != 0u) {
+        model_options->max_file_size = values.max_model_file_size;
     }
-    if (options->max_tensor_size != 0u) {
-        session_options->max_tensor_size = options->max_tensor_size;
+    if (values.max_workspace_size != 0u) {
+        session_options->max_workspace_size = values.max_workspace_size;
     }
-    if (options->max_image_pixels != 0u) {
-        *max_image_pixels = options->max_image_pixels;
+    if (values.max_tensor_size != 0u) {
+        session_options->max_tensor_size = values.max_tensor_size;
+    }
+    if (values.max_image_pixels != 0u) {
+        *max_image_pixels = values.max_image_pixels;
     }
     return LW_STATUS_OK;
 }
@@ -189,10 +197,11 @@ void lw_classifier_free(lw_classifier* classifier) {
 }
 
 lw_status lw_classifier_get_info(const lw_classifier* classifier, lw_classifier_info* info) {
-    if (classifier == NULL || info == NULL || info->struct_size != sizeof(*info)) {
+    if (classifier == NULL || info == NULL ||
+        !lw_abi_copy_output_prefix(info, info->struct_size, &classifier->info,
+                                   sizeof(classifier->info))) {
         return LW_STATUS_INVALID_ARGUMENT;
     }
-    *info = classifier->info;
     return LW_STATUS_OK;
 }
 
@@ -205,15 +214,18 @@ static lw_status classifier_classify_bgr_u8_impl(lw_classifier* classifier, cons
     uint64_t source_pixels;
     uint32_t resized_width = 0u;
     uint32_t label;
+    lw_classification_result output;
+    uint32_t result_size;
     uint64_t started;
     lw_status status;
     if (classifier == NULL || source == NULL || result == NULL ||
-        result->struct_size != sizeof(*result)) {
+        result->struct_size < sizeof(uint32_t)) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT,
                      "classifier, BGR source, and initialized result are required");
         return LW_STATUS_INVALID_ARGUMENT;
     }
-    clear_result(result);
+    result_size = result->struct_size;
+    clear_result(&output);
     if (source_width == 0u || source_height == 0u) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "source image dimensions must be positive");
         return LW_STATUS_INVALID_ARGUMENT;
@@ -253,12 +265,13 @@ static lw_status classifier_classify_bgr_u8_impl(lw_classifier* classifier, cons
         return LW_STATUS_INVALID_ARGUMENT;
     }
     label = classifier->probabilities[1] > classifier->probabilities[0] ? 1u : 0u;
-    result->label = label;
-    result->score = classifier->probabilities[label];
-    result->resized_width = resized_width;
-    result->orientation_degrees = label == 0u ? 0u : 180u;
+    output.label = label;
+    output.score = classifier->probabilities[label];
+    output.resized_width = resized_width;
+    output.orientation_degrees = label == 0u ? 0u : 180u;
     lw_pipeline_profile_add_elapsed(profile == NULL ? NULL : &profile->postprocess_nanoseconds,
                                     started, profile);
+    (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
     lw_set_error(error, LW_STATUS_OK, "");
     return LW_STATUS_OK;
 }

@@ -66,12 +66,56 @@ typedef struct lw_web_result {
 /* Freeze the byte layout consumed by the offline page. Any future incompatible
  * layout needs a new LW_WEB_ABI_VERSION instead of silently changing offsets. */
 _Static_assert(sizeof(lw_web_info) == 20u, "unexpected lw_web_info layout");
+_Static_assert(offsetof(lw_web_info, abi_version) == 0u,
+               "unexpected lw_web_info abi_version offset");
+_Static_assert(offsetof(lw_web_info, max_line_capacity) == 4u,
+               "unexpected lw_web_info max_line_capacity offset");
+_Static_assert(offsetof(lw_web_info, max_text_capacity) == 8u,
+               "unexpected lw_web_info max_text_capacity offset");
+_Static_assert(offsetof(lw_web_info, line_size) == 12u,
+               "unexpected lw_web_info line_size offset");
+_Static_assert(offsetof(lw_web_info, result_size) == 16u,
+               "unexpected lw_web_info result_size offset");
 _Static_assert(sizeof(lw_web_line) == 60u, "unexpected lw_web_line layout");
+_Static_assert(offsetof(lw_web_line, x1) == 0u,
+               "unexpected lw_web_line x1 offset");
+_Static_assert(offsetof(lw_web_line, y1) == 4u,
+               "unexpected lw_web_line y1 offset");
+_Static_assert(offsetof(lw_web_line, x2) == 8u,
+               "unexpected lw_web_line x2 offset");
+_Static_assert(offsetof(lw_web_line, y2) == 12u,
+               "unexpected lw_web_line y2 offset");
+_Static_assert(offsetof(lw_web_line, x3) == 16u,
+               "unexpected lw_web_line x3 offset");
+_Static_assert(offsetof(lw_web_line, y3) == 20u,
+               "unexpected lw_web_line y3 offset");
+_Static_assert(offsetof(lw_web_line, x4) == 24u,
+               "unexpected lw_web_line x4 offset");
+_Static_assert(offsetof(lw_web_line, y4) == 28u,
+               "unexpected lw_web_line y4 offset");
 _Static_assert(sizeof(lw_web_result) == 16u, "unexpected lw_web_result layout");
+_Static_assert(offsetof(lw_web_result, line_count) == 0u,
+               "unexpected lw_web_result line_count offset");
+_Static_assert(offsetof(lw_web_result, detected_count) == 4u,
+               "unexpected lw_web_result detected_count offset");
+_Static_assert(offsetof(lw_web_result, detector_resized_width) == 8u,
+               "unexpected lw_web_result detector_resized_width offset");
+_Static_assert(offsetof(lw_web_result, detector_resized_height) == 12u,
+               "unexpected lw_web_result detector_resized_height offset");
 _Static_assert(offsetof(lw_web_line, detection_score) == 32u,
                "unexpected lw_web_line detection_score offset");
+_Static_assert(offsetof(lw_web_line, recognition_score) == 36u,
+               "unexpected lw_web_line recognition_score offset");
+_Static_assert(offsetof(lw_web_line, classification_score) == 40u,
+               "unexpected lw_web_line classification_score offset");
+_Static_assert(offsetof(lw_web_line, classification_label) == 44u,
+               "unexpected lw_web_line classification_label offset");
+_Static_assert(offsetof(lw_web_line, applied_rotation_degrees) == 48u,
+               "unexpected lw_web_line applied_rotation_degrees offset");
 _Static_assert(offsetof(lw_web_line, text_offset) == 52u,
                "unexpected lw_web_line text_offset offset");
+_Static_assert(offsetof(lw_web_line, text_length) == 56u,
+               "unexpected lw_web_line text_length offset");
 
 static lw_ocr* g_ocr;
 static lw_ocr_info g_ocr_info;

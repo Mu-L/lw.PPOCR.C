@@ -44,7 +44,7 @@ initialization time, and memory pressure vary by device.
 
 ## Preview model-pack and browser gates
 
-`v0.2.0-preview.1` introduces namespaced runtime model packs containing
+`v1.0.0` ships namespaced runtime model packs containing
 `manifest.json`, `SHA256SUMS`, `det.lwm`, `cls.lwm`, `rec.lwm`, and the matching
 dictionary. The manifest includes an `asset_set_id` for cache invalidation. On a
 tagged release, each Tiny/Small/Medium pack is published only after Windows and

@@ -235,6 +235,12 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--dynamic", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--report", type=Path)
+    parser.add_argument(
+        "--runtime-status",
+        choices=("analysis-only", "production"),
+        default="analysis-only",
+        help="status recorded in the conversion report (production is used by the stable wrapper)",
+    )
     args = parser.parse_args(argv)
     if args.width is not None and args.width <= 0:
         raise SystemExit("--width must be positive")
@@ -266,10 +272,13 @@ def main(argv: list[str] | None = None) -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     info = _write_model(model, args.output, inferred)
 
+    report_status = args.runtime_status
+    if report_status == "analysis-only" and args.dynamic:
+        report_status = "dynamic-analysis-only"
     report = {
         "schema_version": 1,
-        "tool": "tools/convert_small_rec_experimental.py",
-        "status": "dynamic-analysis-only" if args.dynamic else "analysis-only",
+        "tool": "tools/convert_small_rec.py" if args.runtime_status == "production" else "tools/convert_small_rec_experimental.py",
+        "status": report_status,
         "model": str(args.model),
         "width": width,
         "dynamic": bool(args.dynamic),

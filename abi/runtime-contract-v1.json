@@ -1,15 +1,17 @@
 {
   "schema_version": 1,
-  "product_version": "0.2.0",
-  "release_track": "preview",
+  "product_version": "1.0.0",
+  "release_track": "stable",
   "c_abi": {
     "version": 1,
-    "status": "freeze-candidate",
+    "status": "frozen",
     "candidate_manifest": "abi/c-abi-v1-candidate.json",
     "layout_manifest": "abi/c-abi-v1-layout.json",
     "symbol_allowlist": "abi/exports-v1-candidate.txt"
   },
   "wasm_host_abi_version": 1,
+  "wasm_host_abi_manifest": "abi/web-abi-v1-candidate.json",
   "lwm_format_version": "0.1",
+  "lwm_layout_manifest": "abi/lwm-v0.1-layout.json",
   "orientation_contract": "docs/ocr-orientation-contract.md"
 }

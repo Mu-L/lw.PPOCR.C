@@ -40,7 +40,8 @@ def sha256(path: Path) -> str:
 
 
 def convert(
-    model_path: Path, width: int | None, dynamic: bool, output_path: Path
+    model_path: Path, width: int | None, dynamic: bool, output_path: Path,
+    runtime_status: str = "analysis-only",
 ) -> dict[str, object]:
     digest = sha256(model_path)
     if digest != PP_OCRV6_MEDIUM_REC_SHA256:
@@ -91,8 +92,8 @@ def convert(
     info = _write_model(lowered, output_path, inferred)
     return {
         "schema_version": 1,
-        "tool": "tools/convert_medium_rec_experimental.py",
-        "status": "dynamic-analysis-only" if dynamic else "analysis-only",
+        "tool": "tools/convert_medium_rec.py" if runtime_status == "production" else "tools/convert_medium_rec_experimental.py",
+        "status": runtime_status if runtime_status == "production" else ("dynamic-analysis-only" if dynamic else "analysis-only"),
         "model": str(model_path),
         "model_sha256": digest,
         "width": width,
@@ -115,8 +116,14 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--dynamic", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--report", type=Path)
+    parser.add_argument(
+        "--runtime-status",
+        choices=("analysis-only", "production"),
+        default="analysis-only",
+        help="status recorded in the conversion report (production is used by the stable wrapper)",
+    )
     args = parser.parse_args(argv)
-    report = convert(args.model, args.width, args.dynamic, args.output)
+    report = convert(args.model, args.width, args.dynamic, args.output, args.runtime_status)
     encoded = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)

@@ -1,14 +1,14 @@
-# C API and ABI v1 freeze candidate
+# C API and ABI v1 frozen contract
 
 The high-level REC, CLS, DET, and full-OCR portions of `include/lw_infer.h`
-are prepared as the C ABI v1 freeze-candidate for the next preview release,
-planned as `v0.2.0-preview.2`. The currently published preview remains
-`v0.2.0-preview.1`; this candidate is not a permanent ABI guarantee yet; see
-`docs/c-abi-v1-candidate.md` and `abi/exports-v1-candidate.txt` for the exact
-scope and release gates.
+form the frozen C ABI v1 contract for the approved Tiny-only 1.0 scope. The
+`v1.0.0` stable package carries this contract. See
+`docs/c-abi-v1-candidate.md` and
+`abi/exports-v1-candidate.txt` for the exact scope and release gates; their
+historical candidate filenames are retained for path compatibility.
 
 The same header also contains low-level model/session planning APIs. Those
-remain experimental and may change before 1.0. The high-level API covers
+remain experimental and may change in a later ABI revision. The high-level API covers
 recognize-only, direction-classification, text-detection, and full-OCR calls
 for decoded BGR8 pixels. The recognizer hides preprocessing, graph execution,
 dictionary indexing, and UTF-8 CTC decoding. The classifier hides
@@ -56,6 +56,21 @@ optional direction correction.
 
 Paths passed to the library are UTF-8. The Windows implementation converts to
 UTF-16 before opening a file.
+
+## `struct_size` compatibility
+
+The stable REC, CLS, DET, and full-OCR option structures accept a prefix-sized
+caller buffer. Fields outside the advertised prefix retain the defaults from
+the matching initializer; `lw_ocr_options` applies the same rule to its nested
+options. The metadata queries (`*_get_info`) and the four result structures
+copy only the advertised prefix, so bytes beyond it are never written. A
+caller may also provide a larger structure from a newer header; unknown tail
+fields are ignored and the caller's original `struct_size` is preserved.
+
+The low-level model/session option structures remain exact-size experimental
+APIs. Callers should initialize current structures with the public `_init`
+helpers and check the returned status before consuming fields that may not be
+present in an older prefix.
 
 ## REC session planning
 
@@ -119,7 +134,7 @@ The low-level session planner still accepts no input data pointer. Applications
 should use the recognizer API for completed REC inference; the internal executor
 is not an integration contract and may change without ABI notice. Its
 `lw_tensor_desc_init` helper and `lw_model_*`/`lw_session_*` symbols remain
-outside the v1 freeze-candidate allowlist.
+outside the frozen v1 allowlist.
 
 ## Public REC recognizer
 

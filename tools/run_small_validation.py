@@ -70,7 +70,7 @@ def main() -> int:
     parser.add_argument("--dictionary", type=Path, required=True)
     parser.add_argument("--build-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--runtime-version", default="0.2.0-preview.1")
+    parser.add_argument("--runtime-version", default="1.0.0")
     parser.add_argument(
         "--rec-max-width",
         type=int,
@@ -117,12 +117,12 @@ def main() -> int:
     rec_lwm = output / "small-rec-dynamic.lwm"
     run(
         "DET conversion",
-        [sys.executable, "tools/convert_small_det_experimental.py", "--model", str(output / "model/det.onnx"), "--height", "640", "--width", "640", "--dynamic", "--output", str(det_lwm)],
+        [sys.executable, "tools/convert_small_det.py", "--model", str(output / "model/det.onnx"), "--height", "640", "--width", "640", "--dynamic", "--output", str(det_lwm)],
         root,
     )
     run(
         "REC conversion",
-        [sys.executable, "tools/convert_small_rec_experimental.py", "--model", str(output / "model/rec.onnx"), "--dynamic", "--output", str(rec_lwm)],
+        [sys.executable, "tools/convert_small_rec.py", "--model", str(output / "model/rec.onnx"), "--dynamic", "--output", str(rec_lwm)],
         root,
     )
     det_outputs = output / "det-outputs"
@@ -197,7 +197,7 @@ def main() -> int:
     pack_dir = output / "runtime-model"
     run("canonical runtime staging", [sys.executable, "tools/prepare_ppocrv6_runtime_variant.py", "--variant", "small", "--build-dir", str(build), "--output-dir", str(pack_dir), "--converted-dir", str(converted_dir)], root)
     pack = output / "ppocrv6-small-runtime.zip"
-    run("runtime model pack", [sys.executable, "tools/package_ppocrv6_runtime.py", "--input-dir", str(pack_dir), "--variant", "small", "--runtime-version", args.runtime_version, "--output", str(pack)], root)
+    run("runtime model pack", [sys.executable, "tools/package_ppocrv6_runtime.py", "--input-dir", str(pack_dir), "--variant", "small", "--runtime-version", args.runtime_version, "--runtime-status", "analysis-only", "--output", str(pack)], root)
     validation_output = run(
         "runtime model pack validation",
         [sys.executable, "tools/validate_runtime_model_pack.py", str(pack)],

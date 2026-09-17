@@ -1,4 +1,5 @@
 #include "lw_infer.h"
+#include "abi_compat_internal.h"
 
 /* Public REC handle: preprocessing -> graph execution -> UTF-8 CTC decoding. */
 
@@ -200,7 +201,9 @@ static lw_status validate_options(const lw_recognizer_options* options, uint32_t
                                   uint64_t* max_image_pixels, lw_model_options* model_options,
                                   lw_session_options* session_options, lw_error* error) {
     lw_recognizer_options defaults;
+    lw_recognizer_options values;
     lw_recognizer_options_init(&defaults);
+    values = defaults;
     *target_width = defaults.target_width;
     *max_image_pixels = defaults.max_image_pixels;
     lw_model_options_init(model_options);
@@ -208,25 +211,29 @@ static lw_status validate_options(const lw_recognizer_options* options, uint32_t
     if (options == NULL) {
         return LW_STATUS_OK;
     }
-    if (options->struct_size != sizeof(*options) || options->reserved0 != 0u ||
-        options->reserved1 != 0u) {
+    if (!lw_abi_copy_input_prefix(&values, sizeof(values), options)) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "invalid recognizer options structure");
         return LW_STATUS_INVALID_ARGUMENT;
     }
-    if (options->target_width != 0u) {
-        *target_width = options->target_width;
+    values.struct_size = (uint32_t)sizeof(values);
+    if (values.reserved0 != 0u || values.reserved1 != 0u) {
+        lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "invalid recognizer options structure");
+        return LW_STATUS_INVALID_ARGUMENT;
     }
-    if (options->max_model_file_size != 0u) {
-        model_options->max_file_size = options->max_model_file_size;
+    if (values.target_width != 0u) {
+        *target_width = values.target_width;
     }
-    if (options->max_workspace_size != 0u) {
-        session_options->max_workspace_size = options->max_workspace_size;
+    if (values.max_model_file_size != 0u) {
+        model_options->max_file_size = values.max_model_file_size;
     }
-    if (options->max_tensor_size != 0u) {
-        session_options->max_tensor_size = options->max_tensor_size;
+    if (values.max_workspace_size != 0u) {
+        session_options->max_workspace_size = values.max_workspace_size;
     }
-    if (options->max_image_pixels != 0u) {
-        *max_image_pixels = options->max_image_pixels;
+    if (values.max_tensor_size != 0u) {
+        session_options->max_tensor_size = values.max_tensor_size;
+    }
+    if (values.max_image_pixels != 0u) {
+        *max_image_pixels = values.max_image_pixels;
     }
     if (*target_width > INT32_MAX) {
         lw_set_error(error, LW_STATUS_INVALID_SHAPE,
@@ -654,10 +661,11 @@ void lw_recognizer_free(lw_recognizer* recognizer) {
 }
 
 lw_status lw_recognizer_get_info(const lw_recognizer* recognizer, lw_recognizer_info* info) {
-    if (recognizer == NULL || info == NULL || info->struct_size != sizeof(*info)) {
+    if (recognizer == NULL || info == NULL ||
+        !lw_abi_copy_output_prefix(info, info->struct_size, &recognizer->info,
+                                   sizeof(recognizer->info))) {
         return LW_STATUS_INVALID_ARGUMENT;
     }
-    *info = recognizer->info;
     return LW_STATUS_OK;
 }
 
@@ -677,15 +685,18 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
     uint32_t width_bucket = 0u;
     uint64_t node_nanoseconds_before[LW_EXECUTION_PROFILE_NODE_CAPACITY];
     uint64_t node_invocations_before[LW_EXECUTION_PROFILE_NODE_CAPACITY];
+    lw_recognition_result output;
+    uint32_t result_size;
     uint64_t started;
     lw_status status;
     if (recognizer == NULL || source == NULL || result == NULL ||
-        result->struct_size != sizeof(*result) || (text_utf8 == NULL && text_capacity != 0u)) {
+        result->struct_size < sizeof(uint32_t) || (text_utf8 == NULL && text_capacity != 0u)) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT,
                      "recognizer, BGR source, and initialized result are required");
         return LW_STATUS_INVALID_ARGUMENT;
     }
-    clear_result(result);
+    result_size = result->struct_size;
+    clear_result(&output);
     if (source_width == 0u || source_height == 0u) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "source image dimensions must be positive");
         return LW_STATUS_INVALID_ARGUMENT;
@@ -791,13 +802,14 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
                                        text_utf8, text_capacity, &required_capacity, &score,
                                        &emitted_count, error);
     }
-    result->emitted_count = emitted_count;
-    result->score = score;
-    result->resized_width = resized_width;
-    result->time_steps = recognizer->current_time_steps;
-    result->required_text_capacity = required_capacity;
+    output.emitted_count = emitted_count;
+    output.score = score;
+    output.resized_width = resized_width;
+    output.time_steps = recognizer->current_time_steps;
+    output.required_text_capacity = required_capacity;
     lw_pipeline_profile_add_elapsed(profile == NULL ? NULL : &profile->postprocess_nanoseconds,
                                     started, profile);
+    (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
     return status;
 }
 

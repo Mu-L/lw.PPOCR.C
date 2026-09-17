@@ -121,7 +121,7 @@ def main() -> int:
     parser.add_argument("--contract", type=Path, required=True)
     parser.add_argument("--build-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--runtime-version", default="0.2.0-preview.1")
+    parser.add_argument("--runtime-version", default="1.0.0")
     parser.add_argument("--expected-full-text-sha256-override")
     args = parser.parse_args()
 
@@ -162,7 +162,7 @@ def main() -> int:
             "DET dynamic conversion",
             [
                 sys.executable,
-                "tools/convert_medium_det_experimental.py",
+                "tools/convert_medium_det.py",
                 "--model",
                 str(detector),
                 "--dynamic",
@@ -212,7 +212,7 @@ def main() -> int:
             "REC dynamic conversion",
             [
                 sys.executable,
-                "tools/convert_medium_rec_experimental.py",
+                "tools/convert_medium_rec.py",
                 "--model",
                 str(recognizer),
                 "--dynamic",
@@ -281,7 +281,7 @@ def main() -> int:
         pack_dir = output / "runtime-model"
         run("canonical runtime staging", [sys.executable, "tools/prepare_ppocrv6_runtime_variant.py", "--variant", "medium", "--build-dir", str(build), "--output-dir", str(pack_dir), "--converted-dir", str(converted_dir)], root)
         pack = output / "ppocrv6-medium-runtime.zip"
-        run("runtime model pack", [sys.executable, "tools/package_ppocrv6_runtime.py", "--input-dir", str(pack_dir), "--variant", "medium", "--runtime-version", args.runtime_version, "--output", str(pack)], root)
+        run("runtime model pack", [sys.executable, "tools/package_ppocrv6_runtime.py", "--input-dir", str(pack_dir), "--variant", "medium", "--runtime-version", args.runtime_version, "--runtime-status", "analysis-only", "--output", str(pack)], root)
         validation_output = run(
             "runtime model pack validation",
             [sys.executable, "tools/validate_runtime_model_pack.py", str(pack)],

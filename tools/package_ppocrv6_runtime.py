@@ -13,13 +13,14 @@ from typing import Any
 ASSET_NAMES = ("det.lwm", "cls.lwm", "rec.lwm", "ppocr_keys.txt")
 SCHEMA_VERSION = 1
 DEFAULT_LWM_VERSION = "0.1"
-DEFAULT_RUNTIME_VERSION = "0.2.0-preview.1"
-DEFAULT_MINIMUM_RUNTIME_VERSION = "0.2.0"
+DEFAULT_RUNTIME_VERSION = "1.0.0"
+DEFAULT_MINIMUM_RUNTIME_VERSION = "1.0.0"
 RUNTIME_VERSION_RE = re.compile(
     r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$"
 )
 LWM_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+RUNTIME_STATUSES = frozenset(("production", "preview", "analysis-only"))
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
 
@@ -48,6 +49,20 @@ def normalize_runtime_version(value: str) -> str:
 
 def runtime_status(runtime_version: str) -> str:
     return "preview" if "-" in normalize_runtime_version(runtime_version) else "production"
+
+
+def resolve_runtime_status(runtime_version: str, requested: str | None = None) -> str:
+    """Resolve an explicit model support status without version-driven upgrades."""
+    normalized_version = normalize_runtime_version(runtime_version)
+    if requested is None:
+        return runtime_status(normalized_version)
+    if requested not in RUNTIME_STATUSES:
+        raise ValueError(f"unsupported runtime status: {requested}")
+    if requested == "production" and "-" in normalized_version:
+        raise ValueError("production runtime status requires a stable model revision")
+    if requested == "preview" and "-" not in normalized_version:
+        raise ValueError("preview runtime status requires a prerelease model revision")
+    return requested
 
 
 def package_root(variant: str) -> str:
@@ -79,11 +94,13 @@ def build_manifest(
     lwm_version: str,
     hashes: dict[str, str],
     minimum_runtime_version: str = DEFAULT_MINIMUM_RUNTIME_VERSION,
+    runtime_status_override: str | None = None,
 ) -> dict[str, Any]:
     runtime_version = normalize_runtime_version(runtime_version)
     minimum_runtime_version = normalize_runtime_version(minimum_runtime_version)
     if not LWM_VERSION_RE.fullmatch(lwm_version):
         raise ValueError("LWM format version must use the form major.minor")
+    resolved_status = resolve_runtime_status(runtime_version, runtime_status_override)
     return {
         "schema_version": SCHEMA_VERSION,
         "family": "PP-OCRv6",
@@ -91,7 +108,7 @@ def build_manifest(
         "model_id": f"ppocrv6-{variant}",
         "model_revision": runtime_version,
         "asset_set_id": asset_set_id(variant, runtime_version, hashes),
-        "runtime_status": runtime_status(runtime_version),
+        "runtime_status": resolved_status,
         "lwm_format_version": lwm_version,
         "minimum_runtime_version": minimum_runtime_version,
         "models": {"det": "det.lwm", "cls": "cls.lwm", "rec": "rec.lwm"},
@@ -117,6 +134,7 @@ def package(
     runtime_version: str = DEFAULT_RUNTIME_VERSION,
     lwm_version: str = DEFAULT_LWM_VERSION,
     minimum_runtime_version: str = DEFAULT_MINIMUM_RUNTIME_VERSION,
+    runtime_status_override: str | None = None,
 ) -> dict[str, Any]:
     input_dir = input_dir.resolve()
     if not input_dir.is_dir():
@@ -130,7 +148,12 @@ def package(
         assets[name] = path.read_bytes()
         hashes[name] = sha256(path)
     manifest = build_manifest(
-        variant, runtime_version, lwm_version, hashes, minimum_runtime_version
+        variant,
+        runtime_version,
+        lwm_version,
+        hashes,
+        minimum_runtime_version,
+        runtime_status_override,
     )
     manifest_bytes = (
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
@@ -167,6 +190,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--minimum-runtime-version", default=DEFAULT_MINIMUM_RUNTIME_VERSION
     )
+    parser.add_argument(
+        "--runtime-status",
+        choices=sorted(RUNTIME_STATUSES),
+        default=None,
+        help="support status; analysis-only prevents a stable tag from implying production support",
+    )
     args = parser.parse_args(argv)
     print(
         json.dumps(
@@ -177,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.runtime_version,
                 args.lwm_version,
                 args.minimum_runtime_version,
+                args.runtime_status,
             ),
             ensure_ascii=False,
             indent=2,

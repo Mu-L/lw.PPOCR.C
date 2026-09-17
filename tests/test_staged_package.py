@@ -53,6 +53,8 @@ class StagedPackageTest(unittest.TestCase):
             root / "docs" / "assets" / "sponsor.jpg",
             root / "docs" / "abi" / "c-abi-v1-candidate.json",
             root / "docs" / "abi" / "c-abi-v1-layout.json",
+            root / "docs" / "abi" / "lwm-v0.1-layout.json",
+            root / "docs" / "abi" / "web-abi-v1-candidate.json",
             root / "docs" / "abi" / "exports-v1-candidate.txt",
             root / "THIRD-PARTY-NOTICES.md",
             root / "sbom.cdx.json",

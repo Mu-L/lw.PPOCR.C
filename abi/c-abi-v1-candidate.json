@@ -2,10 +2,11 @@
   "schema_version": 1,
   "abi_name": "lw.PPOCR.C",
   "abi_version": 1,
-  "status": "freeze-candidate",
+  "status": "frozen",
   "header": "include/lw_infer.h",
   "stable_symbols": "abi/exports-v1-candidate.txt",
   "layout_manifest": "abi/c-abi-v1-layout.json",
+  "lwm_layout_manifest": "abi/lwm-v0.1-layout.json",
   "stable_scope": [
     "common status and error helpers",
     "recognizer",
@@ -18,7 +19,7 @@
     "lw_session_*",
     "lw_tensor_desc_init",
     "LWM v0.1 file format",
-    "WASM Host ABI"
+    "WASM Host ABI (see abi/web-abi-v1-candidate.json)"
   ],
   "input_contract": {
     "pixel_format": "interleaved BGR8",
@@ -27,7 +28,33 @@
     "output_buffers": "caller-owned"
   },
   "compatibility_policy": {
-    "structs": "exact known sizes in preview; append-only prefix compatibility required before final freeze",
+    "structs": "stable high-level input options, output metadata, and result prefixes are compatible; experimental low-level options require exact known sizes in preview",
+    "input_prefix_compatible": [
+      "lw_recognizer_options",
+      "lw_classifier_options",
+      "lw_detector_options",
+      "lw_ocr_options"
+    ],
+    "output_prefix_compatible": [
+      "lw_model_info",
+      "lw_session_info",
+      "lw_tensor_desc",
+      "lw_recognizer_info",
+      "lw_classifier_info",
+      "lw_detector_info",
+      "lw_ocr_info"
+    ],
+    "result_prefix_compatible": [
+      "lw_recognition_result",
+      "lw_classification_result",
+      "lw_detection_result",
+      "lw_ocr_result"
+    ],
+    "exact_size_until_followup": [
+      "lw_error",
+      "lw_model_options",
+      "lw_session_options"
+    ],
     "enums": "existing numeric values are permanent after freeze",
     "functions": "existing signatures are permanent after freeze",
     "ownership": "each successful create has one matching free"

@@ -9,12 +9,14 @@ TensorRT, protobuf, or any other deployment-time runtime dependency.
 
 > This is not a general-purpose ONNX Runtime.
 
-## Current preview: v0.2.0-preview.1
+## Current stable release: v1.0.0
 
-This preview release makes PP-OCRv6 Tiny, Small, and Medium available through one
-pure-C Runtime. Tiny remains the default. Small and Medium are opt-in preview
-variants with separate runtime model packs and self-contained browser files.
-The C ABI and LWM v0.1 format are still not frozen.
+This stable release makes PP-OCRv6 Tiny available through the frozen v1 C
+Runtime and WASM Host ABI. Tiny is the only stable model promise. Small and
+Medium remain opt-in preview variants with separate runtime model packs and
+self-contained browser files.
+The C ABI v1 and WASM Host ABI v1 are frozen for the approved Tiny-only 1.0
+scope. LWM v0.1 remains an internal Preview format.
 
 Download from [GitHub Releases](https://github.com/lxw112190/lw.PPOCR.C/releases)
 according to the integration target:
@@ -22,21 +24,26 @@ according to the integration target:
 | Need | Release asset | Notes |
 |---|---|---|
 | Open an offline OCR page | `*-ocr-demo.html` | Tiny; recommended for phones and general use |
-| Try a larger browser model | `*-ocr-demo-small.html` / `*-ocr-demo-medium.html` | Small is opt-in; Medium is desktop-first |
+| Try a larger browser model | `*-ocr-demo-small.html` / `*-ocr-demo-medium.html` | Preview attachments; Small is opt-in; Medium is desktop-first |
 | Embed OCR in a Web page | `*-web-sdk.js` / `*-web-sdk-small.js` / `*-web-sdk-medium.js` | Same `LwPpocr` API, different embedded models |
 | Native C/C++ | `*-windows-x64-msvc.zip` / `*-linux-x86_64.tar.gz` | Tiny is bundled by default |
-| Android ARM64 | `*-android-arm64.aar` / `*-android-arm64-demo.apk` | `arm64-v8a`, `minSdk 21`, Tiny |
-| Desktop Java/JNI | `*-java-jni-windows-x64.zip` / `*-java-jni-linux-x64.tar.gz` / `*-java-jni-macos-arm64.tar.gz` | Java 8+ console integration |
+| Android ARM64 | `*-android-arm64.aar` / `*-android-arm64-demo.apk` | Preview attachment; `arm64-v8a`, `minSdk 21`, Tiny |
+| Desktop Java/JNI | `*-java-jni-windows-x64.zip` / `*-java-jni-linux-x64.tar.gz` / `*-java-jni-macos-arm64.tar.gz` | Preview attachment; Java 8+ console integration |
 | Node.js | `*-node-wasm.zip` | Raw Node 18+ WASM package, Tiny |
 | Change native model variant | `*-ppocrv6-{tiny,small,medium}-runtime.zip` | Namespaced model pack with manifest and hashes |
 
 Download checksum files with the selected assets and verify them before use.
 The Android `SHA256SUMS.txt` covers both its AAR and APK; other primary assets
 have a sidecar `.sha256`. Do not mix binaries, SDK files, models, or dictionaries
-from different releases. When upgrading from `0.1.x`, replace the complete
-matching set and rebuild native/managed consumers because the ABI is not frozen.
+from different releases. When upgrading from a preview or 0.x build, replace
+the complete matching set and rebuild native/managed consumers because LWM
+remains an internal Preview format.
 See the [package guide](docs/package.md) and
-[model selection matrix](docs/supported-models.md).
+[model selection matrix](docs/supported-models.md). The stable-release gate is
+tracked in the [v1.0 readiness checklist](docs/release-readiness-v1.0.md).
+The approved stable scope is recorded in
+[`ci/stable-release-scope.json`](ci/stable-release-scope.json); Small, Medium,
+Android, Java/JNI, ARM64, and LoongArch64 remain explicitly Preview.
 
 ## Current milestone
 
@@ -76,7 +83,7 @@ application concern, so the core itself stays dependency-free.
   QEMU-validated Linux LoongArch64 package; physical customer hardware remains
   a separate validation gate.
 - Windows 7 x86 compatibility is preserved by design.
-- The LWM v0.1 format is custom and not yet frozen.
+- The LWM v0.1 format is custom and remains an internal Preview format.
 
 ARM64 uses NEON for packed pointwise Conv, regular 3x3 Conv, and 2x2
 ConvTranspose. LoongArch64 detects LSX/LASX through Linux HWCAP, uses the LSX
@@ -161,7 +168,8 @@ Small, and Medium DET/REC assets, with one shared Tiny CLS and one shared
 Small/Medium REC dictionary. Tiny remains the default in existing integrations;
 Small and Medium are opt-in preview variants distributed as separate runtime
 model packs and browser SDK/HTML artifacts. Their native and browser full-OCR
-goldens are release gates, but the C ABI and LWM format are not yet frozen.
+goldens are Preview release gates; the C ABI v1 and WASM Host ABI v1 are frozen
+while the LWM format remains an internal Preview format.
 See the [model support and selection matrix](docs/supported-models.md) and the
 project-owned [full-OCR corpus](docs/full-ocr-golden-corpus.md).
 

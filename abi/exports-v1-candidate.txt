@@ -1,5 +1,5 @@
-# C ABI v1 freeze-candidate symbols.
-# Low-level lw_model_* and lw_session_* symbols remain experimental in 0.2.x.
+# C ABI v1 frozen symbols. The historical candidate filename is retained for path compatibility.
+# Low-level lw_model_* and lw_session_* symbols remain experimental.
 lw_error_init
 lw_status_string
 lw_recognition_result_init

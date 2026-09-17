@@ -44,7 +44,7 @@ class AbiV1CandidateTest(unittest.TestCase):
         manifest = json.loads(ARGUMENTS.manifest.read_text(encoding="utf-8"))
         self.assertEqual(manifest["abi_name"], "lw.PPOCR.C")
         self.assertEqual(manifest["abi_version"], 1)
-        self.assertEqual(manifest["status"], "freeze-candidate")
+        self.assertEqual(manifest["status"], "frozen")
         self.assertEqual(manifest["stable_symbols"], "abi/exports-v1-candidate.txt")
         self.assertEqual(manifest["layout_manifest"], "abi/c-abi-v1-layout.json")
         self.assertIn("lw_model_*", manifest["experimental_scope"])

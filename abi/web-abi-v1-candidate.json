@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "abi_name": "lw.PPOCR.C.wasm-host",
+  "abi_version": 1,
+  "status": "frozen",
+  "source": "web/lw_web_api.c",
+  "js_adapter": "web/lw_ppocr_sdk.template.js",
+  "stable_symbols": [
+    "lw_web_init",
+    "lw_web_shutdown",
+    "lw_web_info_size",
+    "lw_web_get_info",
+    "lw_web_set_reading_order",
+    "lw_web_run",
+    "lw_web_last_error",
+    "lw_web_malloc",
+    "lw_web_free"
+  ],
+  "structures": {
+    "lw_web_info": {
+      "size": 20,
+      "fields": {
+        "abi_version": 0,
+        "max_line_capacity": 4,
+        "max_text_capacity": 8,
+        "line_size": 12,
+        "result_size": 16
+      }
+    },
+    "lw_web_line": {
+      "size": 60,
+      "fields": {
+        "detection_score": 32,
+        "recognition_score": 36,
+        "classification_score": 40,
+        "classification_label": 44,
+        "applied_rotation_degrees": 48,
+        "text_offset": 52,
+        "text_length": 56
+      }
+    },
+    "lw_web_result": {
+      "size": 16,
+      "fields": {
+        "line_count": 0,
+        "detected_count": 4,
+        "detector_resized_width": 8,
+        "detector_resized_height": 12
+      }
+    }
+  },
+  "semantics": {
+    "pixel_format": "interleaved BGR8",
+    "text_encoding": "UTF-8",
+    "threading": "one runtime instance per request",
+    "memory": "caller allocates through lw_web_malloc and releases with lw_web_free",
+    "incompatible_layout": "requires a new abi_version"
+  }
+}

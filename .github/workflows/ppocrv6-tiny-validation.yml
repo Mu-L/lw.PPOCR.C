@@ -6,7 +6,7 @@ on:
       runtime_version:
         required: false
         type: string
-        default: "0.2.0-preview.1"
+        default: "1.0.0"
   push:
     branches:
       - main
@@ -28,7 +28,7 @@ on:
       runtime_version:
         description: "Model-pack revision recorded in manifest"
         required: false
-        default: "0.2.0-preview.1"
+        default: "1.0.0"
         type: string
 
 permissions:
@@ -64,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           runtime_version="${REQUESTED_VERSION}"
-          if [[ -z "${runtime_version}" ]]; then runtime_version="0.2.0-preview.1"; fi
+          if [[ -z "${runtime_version}" ]]; then runtime_version="1.0.0"; fi
           echo "version=${runtime_version}" >> "${GITHUB_OUTPUT}"
       - name: Configure Windows
         if: runner.os == 'Windows'

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(lw.PPOCR.C VERSION 0.2.0 LANGUAGES C)
+project(lw.PPOCR.C VERSION 1.0.0 LANGUAGES C)
 
 option(LW_BUILD_HTTP_DEMO
     "Build the cross-platform cpp-httplib HTTP OCR Demo" ON)
@@ -602,10 +602,10 @@ if(EMSCRIPTEN)
             "${CMAKE_CURRENT_SOURCE_DIR}/models/ppocrv6-medium/det.onnx"
             "${CMAKE_CURRENT_SOURCE_DIR}/models/ppocrv6-medium/rec.onnx"
             "${CMAKE_CURRENT_SOURCE_DIR}/models/ppocrv6-shared/PP-OCRv6_small_rec_dict.txt"
-            "${CMAKE_CURRENT_SOURCE_DIR}/tools/convert_small_det_experimental.py"
-            "${CMAKE_CURRENT_SOURCE_DIR}/tools/convert_small_rec_experimental.py"
-            "${CMAKE_CURRENT_SOURCE_DIR}/tools/convert_medium_det_experimental.py"
-            "${CMAKE_CURRENT_SOURCE_DIR}/tools/convert_medium_rec_experimental.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/convert_small_det.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/convert_small_rec.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/convert_medium_det.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/convert_medium_rec.py"
             "${CMAKE_CURRENT_SOURCE_DIR}/tools/validate_model_catalog.py")
 
         function(lw_add_web_model_variant variant display_name)
@@ -1128,6 +1128,22 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 
     add_test(
+        NAME release_metadata_consistency
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_release_readiness.py"
+                --mode preview
+                --version "${PROJECT_VERSION}")
+    set_tests_properties(release_metadata_consistency PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+
+    add_test(
+        NAME wasm_host_abi_contract
+        COMMAND "${Python3_EXECUTABLE}" -m unittest -v
+                tests.test_web_abi_contract)
+    set_tests_properties(wasm_host_abi_contract PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+
+    add_test(
         NAME conv_shape_analysis
         COMMAND "${Python3_EXECUTABLE}" -m unittest -v
                 tests.test_analyze_conv_shapes)
@@ -1240,6 +1256,23 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
     endif()
     add_test(NAME c_abi_contract COMMAND test-c-abi)
 
+    add_executable(test-c-abi-prefix tests/test_abi_prefix.c)
+    target_link_libraries(test-c-abi-prefix PRIVATE lw_ppocr_c)
+    target_compile_features(test-c-abi-prefix PRIVATE c_std_11)
+    add_dependencies(test-c-abi-prefix convert_det_model convert_cls_model convert_rec_model)
+    if(MSVC)
+        target_compile_options(test-c-abi-prefix PRIVATE /W4 /WX /utf-8)
+    else()
+        target_compile_options(test-c-abi-prefix PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(
+        NAME c_abi_prefix_compatibility
+        COMMAND test-c-abi-prefix
+                "${LW_PPOCR_C_DET_LWM}"
+                "${LW_PPOCR_C_CLS_LWM}"
+                "${LW_PPOCR_C_REC_LWM}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/models/ppocrv6-tiny/ppocr_keys.txt")
+
     add_executable(abi-layout-driver tests/abi_layout_driver.c)
     target_include_directories(abi-layout-driver PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -1255,6 +1288,17 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_abi_layout.py"
                 --driver "$<TARGET_FILE:abi-layout-driver>"
                 --manifest "${CMAKE_CURRENT_SOURCE_DIR}/abi/c-abi-v1-layout.json")
+
+    add_test(
+        NAME lwm_layout_contract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_lwm_layout.py"
+                --manifest "${CMAKE_CURRENT_SOURCE_DIR}/abi/lwm-v0.1-layout.json"
+                --model "${LW_PPOCR_C_DET_LWM}"
+                --model "${LW_PPOCR_C_CLS_LWM}"
+                --model "${LW_PPOCR_C_REC_LWM}")
+    set_tests_properties(lwm_layout_contract PROPERTIES
+        DEPENDS "det_converter;cls_converter;rec_converter")
 
     add_executable(test-recognizer-api tests/test_recognizer.c)
     target_link_libraries(test-recognizer-api PRIVATE lw_ppocr_c)
@@ -1546,6 +1590,7 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
     target_compile_features(rec-graph-driver PRIVATE c_std_11)
     add_dependencies(rec-graph-driver convert_rec_model)
     if(MSVC)
+        target_compile_definitions(rec-graph-driver PRIVATE _CRT_SECURE_NO_WARNINGS)
         target_compile_options(rec-graph-driver PRIVATE /W4 /WX /utf-8)
     else()
         target_compile_options(rec-graph-driver PRIVATE
@@ -1592,6 +1637,7 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
     target_compile_features(det-graph-driver PRIVATE c_std_11)
     add_dependencies(det-graph-driver convert_det_model)
     if(MSVC)
+        target_compile_definitions(det-graph-driver PRIVATE _CRT_SECURE_NO_WARNINGS)
         target_compile_options(det-graph-driver PRIVATE /W4 /WX /utf-8)
     else()
         target_compile_options(det-graph-driver PRIVATE
@@ -1929,6 +1975,8 @@ install(FILES
     abi/c-abi-v1-candidate.json
     abi/runtime-contract-v1.json
     abi/c-abi-v1-layout.json
+    abi/lwm-v0.1-layout.json
+    abi/web-abi-v1-candidate.json
     abi/exports-v1-candidate.txt
     DESTINATION docs/abi)
 install(FILES
@@ -1939,6 +1987,9 @@ install(FILES
     dependencies.lock.json
     sbom.cdx.json
     DESTINATION .)
+install(FILES
+    ci/stable-release-scope.json
+    DESTINATION ci)
 if(LW_BUILD_ENVIRONMENT_FILE)
     if(NOT EXISTS "${LW_BUILD_ENVIRONMENT_FILE}")
         message(FATAL_ERROR

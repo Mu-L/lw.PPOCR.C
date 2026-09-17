@@ -1,7 +1,9 @@
-# Development package
+# Development and stable package
 
-The `0.x` preview archives are development packages, not ABI-frozen 1.0
-releases. Platform and architecture archives are separate and must not be mixed.
+The `v1.0.0` archive is the first ABI-frozen stable release. Platform and
+architecture archives are separate and must not be mixed. Small, Medium,
+Android, Java/JNI, ARM64, and LoongArch64 assets remain explicitly Preview
+attachments to the Tiny/C/WASM stable scope.
 
 ## Contents
 
@@ -251,21 +253,23 @@ hardware.
 ## Publish a tagged release
 
 Pushing a tag whose base version matches the CMake project version starts the
-release workflow. Stable and prerelease suffixes are accepted.
-`v0.2.0-preview.1` has already been published and must not be recreated or
-moved. Before creating another preview, update every product-version metadata
-location and run `python -m unittest tests.test_versioning`. Then configure a
-GPG, SSH, or S/MIME signing key recognized by GitHub and create the new version
-as a signed tag. For example, after preparing `preview.2`:
+release workflow. Stable and prerelease suffixes are accepted. Before creating
+the stable release, run `python -m unittest tests.test_versioning` and
+`python tools/check_release_readiness.py --mode stable --version 1.0.0`. Then
+configure a GPG, SSH, or S/MIME signing key recognized by GitHub and create the
+annotated signed tag:
 
 ```bash
-git tag -s v0.2.0-preview.2 -m "lw.PPOCR.C v0.2.0 preview 2"
-git verify-tag v0.2.0-preview.2
-git push origin v0.2.0-preview.2
+git tag -s v1.0.0 -m "lw.PPOCR.C v1.0.0 stable release"
+git verify-tag v1.0.0
+git push origin v1.0.0
 ```
 
 Do not fall back to replacing an existing public tag when signing is not
 configured correctly. Fix the local signing setup and create the next version.
+The Release workflow enforces a GitHub-verified annotated signature for a
+stable tag without a prerelease suffix; unsigned tags remain acceptable only
+for Preview releases.
 
 The tag rebuilds and tests native Windows/Linux packages, browser/Node WASM,
 Android ARM64, Desktop Java/JNI, and the Tiny/Small/Medium runtime model packs.
@@ -276,6 +280,11 @@ marked latest.
 The release asset contract is machine-readable in
 [`ci/release-assets.json`](../ci/release-assets.json). It currently contains 18
 primary downloads:
+
+The separate 1.0 support proposal is machine-readable in
+[`ci/stable-release-scope.json`](../ci/stable-release-scope.json); assets listed
+as Small, Medium, Android, or Java/JNI remain Preview until that scope is
+approved and the corresponding contracts are frozen.
 
 - Windows x64 and Linux x86_64 native archives;
 - Tiny, Small, and Medium standalone HTML and browser SDK files;
@@ -300,10 +309,10 @@ gh attestation verify PATH/TO/DOWNLOADED-ASSET \
   --repo lxw112190/lw.PPOCR.C
 ```
 
-The published `v0.2.0-preview.1` tag predates this workflow enhancement and
-continues to rely on its SHA-256 records and existing CI build history. An
-attestation proves repository/workflow provenance; it does not replace the
-checksum, SBOM review, malware scanning, or target-machine validation.
+The earlier preview tags predate this stable workflow contract and continue to
+rely on their SHA-256 records and CI build history. An attestation proves
+repository/workflow provenance; it does not replace the checksum, SBOM review,
+malware scanning, or target-machine validation.
 
 Small and Medium are opt-in preview variants. Their runtime model packs are
 published only when Windows and Linux produce byte-identical archives. Their
