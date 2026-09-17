@@ -256,20 +256,19 @@ Pushing a tag whose base version matches the CMake project version starts the
 release workflow. Stable and prerelease suffixes are accepted. Before creating
 the stable release, run `python -m unittest tests.test_versioning` and
 `python tools/check_release_readiness.py --mode stable --version 1.0.0`. Then
-configure a GPG, SSH, or S/MIME signing key recognized by GitHub and create the
-annotated signed tag:
+create an annotated tag:
 
 ```bash
-git tag -s v1.0.0 -m "lw.PPOCR.C v1.0.0 stable release"
-git verify-tag v1.0.0
+git tag -a v1.0.0 -m "lw.PPOCR.C v1.0.0 stable release"
+git show --no-patch v1.0.0
 git push origin v1.0.0
 ```
 
-Do not fall back to replacing an existing public tag when signing is not
-configured correctly. Fix the local signing setup and create the next version.
-The Release workflow enforces a GitHub-verified annotated signature for a
-stable tag without a prerelease suffix; unsigned tags remain acceptable only
-for Preview releases.
+Do not replace or move an existing public tag. If a release must be corrected,
+fix the issue and create the next version. The Release workflow requires an
+annotated tag for a stable version and rejects lightweight tags. Cryptographic
+tag signing is optional; strict asset validation, SHA-256 records, and GitHub
+build-provenance attestations remain release gates.
 
 The tag rebuilds and tests native Windows/Linux packages, browser/Node WASM,
 Android ARM64, Desktop Java/JNI, and the Tiny/Small/Medium runtime model packs.

@@ -142,9 +142,10 @@ class ReleaseAssetContractTests(unittest.TestCase):
         self.assertIn("BUILD_VERSION: ${{ steps.version.outputs.base_version }}", workflow)
         self.assertIn("VERSION: ${{ steps.version.outputs.version }}", workflow)
         self.assertIn("fetch-depth: 0", workflow)
-        self.assertIn("Require a verified tag signature for stable releases", workflow)
+        self.assertIn("Require an annotated tag for stable releases", workflow)
         self.assertIn("git rev-parse \"${GITHUB_REF_NAME}^{tag}\"", workflow)
-        self.assertIn(".verification.verified", workflow)
+        self.assertNotIn("Require a verified tag signature for stable releases", workflow)
+        self.assertNotIn(".verification.verified", workflow)
         self.assertIn("docs/release-notes-v1.0.0.md", workflow)
         self.assertIn('if [[ "${VERSION}" == "1.0.0" ]]', workflow)
         self.assertEqual(

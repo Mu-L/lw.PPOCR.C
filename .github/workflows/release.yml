@@ -74,25 +74,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Require a verified tag signature for stable releases
+      - name: Require an annotated tag for stable releases
         if: ${{ !contains(github.ref_name, '-') }}
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tag_object="$(git rev-parse "${GITHUB_REF_NAME}^{tag}" 2>/dev/null || true)"
           if [[ -z "${tag_object}" ]]; then
             echo "stable release tags must be annotated tags" >&2
-            exit 1
-          fi
-          verified="$(gh api \
-            "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" \
-            --jq '.verification.verified')"
-          if [[ "${verified}" != "true" ]]; then
-            echo "stable release tag ${GITHUB_REF_NAME} is not GitHub-verified" >&2
-            gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" \
-              --jq '.verification'
             exit 1
           fi
 

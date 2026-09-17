@@ -29,7 +29,8 @@ performance claims must be evaluated independently.
 LWM v0.1 remains an internal Preview model format, not a stable interchange
 format. Every primary download has a SHA-256 record; the publish workflow also
 creates GitHub build-provenance attestations. The `v1.0.0` tag must be an
-annotated tag whose signature is reported as verified by GitHub.
+annotated tag. A cryptographic tag signature is optional and is not a release
+gate.
 
 The stable Tiny model inputs and generated LWM assets are identified by these
 SHA-256 values:

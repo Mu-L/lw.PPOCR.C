@@ -66,11 +66,11 @@ stable interchange contract until the policy is changed to `frozen`.
 6. Run the installed-package smoke tests and at least one external consumer
    build for each stable binding (CMake/C, Java/JNI, browser SDK, and Android
    if promoted). Confirm that the documented examples use the final filenames.
-7. Create a signed annotated tag and record the release commit, model checksums,
-   ABI manifest checksum, LWM policy, and supported platform baselines in the
-   release notes. The Release workflow now rejects a stable tag unless GitHub
-   reports its annotated tag signature as verified. Unsigned tags are
-   acceptable for previews but not the target 1.0 supply-chain claim.
+7. Create an annotated tag and record the release commit, model checksums, ABI
+   manifest checksum, LWM policy, and supported platform baselines in the
+   release notes. The Release workflow rejects lightweight tags for stable
+   releases. Cryptographic tag signing is optional; SHA-256 records, strict
+   asset validation, and GitHub build-provenance attestations remain mandatory.
 
 ## Recommended release scope
 
