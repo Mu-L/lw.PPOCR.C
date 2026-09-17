@@ -48,6 +48,17 @@ class VersionConsistencyTest(unittest.TestCase):
         dependency_refs = {item["ref"] for item in sbom["dependencies"]}
         self.assertIn(component["bom-ref"], dependency_refs)
 
+    def test_android_workflow_does_not_request_removed_tools_package(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "android.yml").read_text(
+            encoding="utf-8"
+        )
+        setup_start = workflow.index("uses: android-actions/setup-android@v3")
+        pinned_start = workflow.index("- name: Install pinned SDK components")
+        setup_block = workflow[setup_start:pinned_start]
+        self.assertIn('packages: "platform-tools"', setup_block)
+        self.assertNotIn('packages: "tools platform-tools"', setup_block)
+        self.assertNotIn('"tools"', setup_block)
+
     def test_runtime_contract_snapshot_matches_sources(self) -> None:
         snapshot = json.loads(
             (ROOT / "abi" / "runtime-contract-v1.json").read_text(encoding="utf-8")

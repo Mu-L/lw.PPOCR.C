@@ -66,6 +66,11 @@ jobs:
 
       - name: Install Android toolchain
         uses: android-actions/setup-android@v3
+        with:
+          # setup-android@v3 still defaults to the removed legacy `tools`
+          # package. Keep only the package that remains valid; the exact
+          # platform/build-tools/CMake/NDK revisions are installed below.
+          packages: "platform-tools"
 
       - name: Install pinned SDK components
         run: |

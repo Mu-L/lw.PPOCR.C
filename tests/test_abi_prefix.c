@@ -15,6 +15,10 @@ static int tail_is_unchanged(const unsigned char* bytes, size_t begin, size_t en
     return 1;
 }
 
+static int allocation_fits(uint64_t count, size_t element_size) {
+    return element_size != 0u && count <= (uint64_t)(SIZE_MAX / element_size);
+}
+
 static int check_model_prefix(const char* path) {
     lw_model* model = NULL;
     lw_model_info info;
@@ -130,7 +134,7 @@ static int check_recognizer_result_prefix(const char* model_path, const char* di
     }
     lw_recognizer_info_init(&info);
     if (lw_recognizer_get_info(recognizer, &info) != LW_STATUS_OK ||
-        info.max_text_capacity == 0u || info.max_text_capacity > SIZE_MAX) {
+        info.max_text_capacity == 0u || !allocation_fits(info.max_text_capacity, 1u)) {
         lw_recognizer_free(recognizer);
         return 0;
     }
@@ -297,7 +301,7 @@ static int check_detector_result_prefix(const char* model_path) {
     }
     lw_detector_info_init(&info);
     if (lw_detector_get_info(detector, &info) != LW_STATUS_OK || info.max_candidates == 0u ||
-        info.max_candidates > SIZE_MAX / sizeof(*boxes)) {
+        !allocation_fits(info.max_candidates, sizeof(*boxes))) {
         lw_detector_free(detector);
         return 0;
     }

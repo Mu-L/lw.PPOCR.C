@@ -12,8 +12,8 @@
 #include <stdint.h>
 #include <string.h>
 
-static int lw_abi_copy_output_prefix(void* destination, uint32_t supplied_size,
-                                     const void* source, size_t current_size) {
+static inline int lw_abi_copy_output_prefix(void* destination, uint32_t supplied_size,
+                                            const void* source, size_t current_size) {
     size_t copy_size;
     if (destination == NULL || source == NULL || supplied_size < sizeof(uint32_t)) {
         return 0;
@@ -27,8 +27,8 @@ static int lw_abi_copy_output_prefix(void* destination, uint32_t supplied_size,
     return 1;
 }
 
-static int lw_abi_copy_input_prefix(void* destination, size_t current_size,
-                                    const void* source) {
+static inline int lw_abi_copy_input_prefix(void* destination, size_t current_size,
+                                           const void* source) {
     uint32_t supplied_size;
     size_t copy_size;
     if (destination == NULL || source == NULL) {
@@ -46,8 +46,8 @@ static int lw_abi_copy_input_prefix(void* destination, size_t current_size,
     return 1;
 }
 
-static int lw_abi_copy_nested_input_prefix(void* destination, size_t current_size,
-                                           const void* source, size_t available_size) {
+static inline int lw_abi_copy_nested_input_prefix(void* destination, size_t current_size,
+                                                  const void* source, size_t available_size) {
     uint32_t supplied_size;
     size_t copy_size;
     if (destination == NULL || source == NULL) {
