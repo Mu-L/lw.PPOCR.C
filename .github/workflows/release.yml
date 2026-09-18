@@ -108,12 +108,23 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "base_version=${base_version}" >> "${GITHUB_OUTPUT}"
 
-      - name: Download tested build artifacts
+      - name: Download tested Windows native package
         uses: actions/download-artifact@v8
         with:
+          name: lw.PPOCR.C-Windows-X64
           path: release-assets
-          pattern: lw.PPOCR.C-*
-          merge-multiple: true
+
+      - name: Download tested Linux native package
+        uses: actions/download-artifact@v8
+        with:
+          name: lw.PPOCR.C-Linux-X64
+          path: release-assets
+
+      - name: Download tested modern browser package
+        uses: actions/download-artifact@v8
+        with:
+          name: lw.PPOCR.C-browser-${{ github.sha }}
+          path: release-assets
 
       - name: Download tested Android artifacts
         uses: actions/download-artifact@v8
