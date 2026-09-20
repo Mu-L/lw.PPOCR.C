@@ -33,6 +33,9 @@ static const nhwc_case k_cases[] = {
 };
 
 enum { k_measure_rounds = 9, k_warmup_rounds = 2 };
+static const uint32_t k_group_sizes[] = {1u, 2u, 4u, 8u, 16u, 0u};
+static const char* k_scheduler_names[] = {"medium-rec-512x1024-h6-w240", "medium-rec-1536x768-h3-w240"};
+static double g_scheduler_ms[2][sizeof(k_group_sizes) / sizeof(k_group_sizes[0])];
 typedef struct nhwc_chain_case {
     const char* name;
     uint32_t input_channels;
@@ -205,9 +208,9 @@ static void run_nchw(const float* input, const float* weights, const float* bias
                           output_dimensions);
 }
 
-static void run_nhwc(const float* input, const float* weights, const float* bias,
-                     float* output, uint32_t pixels, uint32_t input_channels,
-                     uint32_t output_channels) {
+static void run_nhwc_group(const float* input, const float* weights, const float* bias,
+                           float* output, uint32_t pixels, uint32_t input_channels,
+                           uint32_t output_channels, uint32_t group_tiles) {
     lw_nhwc_epilogue epilogue;
     epilogue.bias = bias;
     epilogue.residual = NULL;
@@ -215,10 +218,146 @@ static void run_nhwc(const float* input, const float* weights, const float* bias
     epilogue.reserved = 0u;
     epilogue.alpha = 0.0f;
     epilogue.beta = 0.0f;
-    lw_avx2_fma_nhwc_pointwise_f32(input, weights, &epilogue, output, pixels,
-                                   input_channels, output_channels);
+    lw_avx2_fma_nhwc_pointwise_grouped_f32(input, weights, &epilogue, output, pixels,
+                                           input_channels, output_channels, group_tiles);
 }
 
+static void run_nhwc(const float* input, const float* weights, const float* bias,
+                     float* output, uint32_t pixels, uint32_t input_channels,
+                     uint32_t output_channels) {
+    run_nhwc_group(input, weights, bias, output, pixels, input_channels,
+                   output_channels, LW_NHWC_POINTWISE_GROUP_TILES);
+}
+
+static double measure_nhwc_group(const float* input, const float* weights,
+                                 const float* bias, float* output, uint32_t pixels,
+                                 uint32_t input_channels, uint32_t output_channels,
+                                 uint32_t group_tiles) {
+    double samples[k_measure_rounds];
+    uint32_t round;
+    for (round = 0u; round < k_warmup_rounds; ++round) {
+        run_nhwc_group(input, weights, bias, output, pixels, input_channels,
+                       output_channels, group_tiles);
+    }
+    for (round = 0u; round < k_measure_rounds; ++round) {
+        double start = monotonic_seconds();
+        run_nhwc_group(input, weights, bias, output, pixels, input_channels,
+                       output_channels, group_tiles);
+        samples[round] = (monotonic_seconds() - start) * 1000.0;
+    }
+    return median(samples, k_measure_rounds);
+}
+static float reference_epilogue_value(float value, uint16_t activation) {
+    if (activation == LW_NHWC_ACT_RELU) {
+        return value > 0.0f ? value : 0.0f;
+    }
+    if (activation == LW_NHWC_ACT_HARDSWISH) {
+        float gate = value + 3.0f;
+        if (gate < 0.0f) {
+            gate = 0.0f;
+        } else if (gate > 6.0f) {
+            gate = 6.0f;
+        }
+        return value * gate / 6.0f;
+    }
+    return value;
+}
+
+static void reference_epilogue(const float* input, const float* packed_weights,
+                               const float* bias, const float* residual,
+                               float* output, uint32_t pixels,
+                               uint32_t input_channels, uint32_t output_channels,
+                               uint16_t activation) {
+    for (uint32_t pixel = 0u; pixel < pixels; ++pixel) {
+        for (uint32_t output_channel = 0u; output_channel < output_channels;
+             ++output_channel) {
+            uint32_t block = output_channel / LW_NHWC_OC_BLOCK;
+            uint32_t lane = output_channel % LW_NHWC_OC_BLOCK;
+            const float* packed = packed_weights +
+                (size_t)block * input_channels * LW_NHWC_OC_BLOCK;
+            float sum = bias == NULL ? 0.0f : bias[output_channel];
+            for (uint32_t input_channel = 0u; input_channel < input_channels;
+                 ++input_channel) {
+                sum += input[(size_t)pixel * input_channels + input_channel] *
+                    packed[(size_t)input_channel * LW_NHWC_OC_BLOCK + lane];
+            }
+            if (residual != NULL) {
+                sum += residual[(size_t)pixel * output_channels + output_channel];
+            }
+            output[(size_t)pixel * output_channels + output_channel] =
+                reference_epilogue_value(sum, activation);
+        }
+    }
+}
+
+static int run_epilogue_parity(void) {
+    const uint32_t pixels = 17u;
+    const uint32_t input_channels = 37u;
+    const uint32_t output_channels = 32u;
+    const uint64_t input_count = (uint64_t)pixels * input_channels;
+    const uint64_t output_count = (uint64_t)pixels * output_channels;
+    const uint64_t canonical_count = (uint64_t)input_channels * output_channels;
+    uint64_t weight_count = 0u;
+    float* input = (float*)malloc((size_t)input_count * sizeof(float));
+    float* canonical = (float*)malloc((size_t)canonical_count * sizeof(float));
+    float* packed = NULL;
+    float* bias = (float*)malloc((size_t)output_channels * sizeof(float));
+    float* residual = (float*)malloc((size_t)output_count * sizeof(float));
+    float* expected = (float*)malloc((size_t)output_count * sizeof(float));
+    float* actual = (float*)malloc((size_t)output_count * sizeof(float));
+    const uint16_t activations[] = {LW_NHWC_ACT_NONE, LW_NHWC_ACT_RELU,
+                                    LW_NHWC_ACT_HARDSWISH, LW_NHWC_ACT_RELU};
+    int success = 0;
+    if (input == NULL || canonical == NULL || bias == NULL || residual == NULL ||
+        expected == NULL || actual == NULL ||
+        !lw_nhwc_dense_packed_weight_count(input_channels, output_channels, 1u, 1u,
+                                           &weight_count)) {
+        goto cleanup;
+    }
+    packed = (float*)malloc((size_t)canonical_count * sizeof(float));
+    if (packed == NULL) {
+        goto cleanup;
+    }
+    fill_values(input, input_count, 9109u);
+    fill_values(canonical, canonical_count, 9113u);
+    fill_values(bias, output_channels, 9117u);
+    fill_values(residual, output_count, 9121u);
+    scale_values(input, input_count, 2.0f);
+    scale_values(canonical, canonical_count, 0.05f);
+    scale_values(bias, output_channels, 0.2f);
+    scale_values(residual, output_count, 0.25f);
+    lw_pack_nhwc_dense_f32(canonical, input_channels, output_channels, 1u, 1u, packed);
+    for (size_t test = 0u; test < sizeof(activations) / sizeof(activations[0]); ++test) {
+        lw_nhwc_epilogue epilogue;
+        epilogue.bias = bias;
+        epilogue.residual = test >= 2u ? residual : NULL;
+        epilogue.activation = activations[test];
+        epilogue.reserved = 0u;
+        epilogue.alpha = 0.0f;
+        epilogue.beta = 0.0f;
+        reference_epilogue(input, packed, bias, epilogue.residual, expected, pixels,
+                           input_channels, output_channels, activations[test]);
+        lw_avx2_fma_nhwc_pointwise_grouped_f32(
+            input, packed, &epilogue, actual, pixels, input_channels,
+            output_channels, test == 0u ? 1u : 8u);
+        if (max_abs_difference(expected, actual, output_count) > 1.0e-4f ||
+            max_rel_difference(expected, actual, output_count) > 1.0e-4f ||
+            count_mismatches(expected, actual, output_count) != 0u) {
+            fprintf(stderr, "NHWC epilogue parity failed for test %zu\n", test);
+            goto cleanup;
+        }
+    }
+    success = 1;
+cleanup:
+    free(input);
+    free(canonical);
+    free(packed);
+    free(bias);
+    free(residual);
+    free(expected);
+    free(actual);
+    return success;
+}
 static int run_case(const nhwc_case* item, uint32_t case_index) {
     uint32_t pixels = item->height * item->width;
     uint64_t input_count = (uint64_t)pixels * item->input_channels;
@@ -238,6 +377,7 @@ static int run_case(const nhwc_case* item, uint32_t case_index) {
     float* reference_nhwc = NULL;
     double nchw_samples[k_measure_rounds];
     double nhwc_samples[k_measure_rounds];
+    double group_ms[sizeof(k_group_sizes) / sizeof(k_group_sizes[0])];
     int32_t input_dimensions[4] = {1, (int32_t)item->input_channels,
                                    (int32_t)item->height, (int32_t)item->width};
     int32_t output_dimensions[4] = {1, (int32_t)item->output_channels,
@@ -335,14 +475,40 @@ static int run_case(const nhwc_case* item, uint32_t case_index) {
     }
     nchw_checksum = checksum_bytes(output_nchw, (size_t)output_count * sizeof(float));
     nhwc_checksum = checksum_bytes(output_nhwc, (size_t)output_count * sizeof(float));
-    printf("    {\"name\":\"%s\",\"input_channels\":%u,\"output_channels\":%u,\"height\":%u,\"width\":%u,\"nchw_ms\":%.6f,\"nhwc_ms\":%.6f,\"speedup\":%.6f,\"max_abs\":%.9g,\"max_rel\":%.9g,\"output_mismatch_count\":%" PRIu64 ",\"argmax_mismatch_count\":%" PRIu64 ",\"nchw_checksum\":\"%016" PRIx64 "\",\"nhwc_checksum\":\"%016" PRIx64 "\"}%s\n",
-           item->name, item->input_channels, item->output_channels, item->height,
-           item->width, median(nchw_samples, k_measure_rounds),
-           median(nhwc_samples, k_measure_rounds),
-           median(nchw_samples, k_measure_rounds) / median(nhwc_samples, k_measure_rounds),
-           max_abs, max_rel, mismatches, argmax_mismatches, nchw_checksum, nhwc_checksum,
-           case_index + 1u < sizeof(k_cases) / sizeof(k_cases[0]) ? "," : "");
-    success = 1;
+    for (size_t group_index = 0u;
+         group_index < sizeof(k_group_sizes) / sizeof(k_group_sizes[0]);
+         ++group_index) {
+        group_ms[group_index] = measure_nhwc_group(
+            input_nhwc, nhwc_weights, bias, output_nhwc, pixels,
+            item->input_channels, item->output_channels, k_group_sizes[group_index]);
+    }
+    {
+        double nchw_ms = median(nchw_samples, k_measure_rounds);
+        double nhwc_ms = median(nhwc_samples, k_measure_rounds);
+        printf("    {\"name\":\"%s\",\"input_channels\":%u,\"output_channels\":%u,\"height\":%u,\"width\":%u,\"nchw_ms\":%.6f,\"nhwc_ms\":%.6f,\"speedup\":%.6f,\"max_abs\":%.9g,\"max_rel\":%.9g,\"output_mismatch_count\":%" PRIu64 ",\"argmax_mismatch_count\":%" PRIu64 ",\"nchw_checksum\":\"%016" PRIx64 "\",\"nhwc_checksum\":\"%016" PRIx64 "\",\"group_results\":[",
+               item->name, item->input_channels, item->output_channels, item->height,
+               item->width, nchw_ms, nhwc_ms, nchw_ms / nhwc_ms,
+               max_abs, max_rel, mismatches, argmax_mismatches, nchw_checksum,
+               nhwc_checksum);
+        for (size_t group_index = 0u;
+             group_index < sizeof(k_group_sizes) / sizeof(k_group_sizes[0]);
+             ++group_index) {
+            uint32_t group = k_group_sizes[group_index];
+            printf("%s{\"group_tiles\":%u,\"nhwc_ms\":%.6f,\"speedup\":%.6f}",
+                   group_index == 0u ? "" : ",", group, group_ms[group_index],
+                   nchw_ms / group_ms[group_index]);
+        }
+        printf("]}%s\n",
+               case_index + 1u < sizeof(k_cases) / sizeof(k_cases[0]) ? "," : "");
+    }
+        if (case_index == 2u || case_index == 4u) {
+            size_t scheduler_index = case_index == 2u ? 0u : 1u;
+            for (size_t group_index = 0u;
+                 group_index < sizeof(k_group_sizes) / sizeof(k_group_sizes[0]);
+                 ++group_index) {
+                g_scheduler_ms[scheduler_index][group_index] = group_ms[group_index];
+            }
+        }    success = 1;
 
 cleanup:
     free(input_nhwc);
@@ -388,7 +554,7 @@ static int run_chain_case(const nhwc_chain_case* item, uint32_t case_index) {
     float* second_bias = NULL;
     double nchw_samples[k_measure_rounds];
     double nhwc_samples[k_measure_rounds];
-    int32_t input_dimensions[4] = {1, (int32_t)item->input_channels,
+        int32_t input_dimensions[4] = {1, (int32_t)item->input_channels,
                                    (int32_t)item->height, (int32_t)item->width};
     int32_t middle_dimensions[4] = {1, (int32_t)item->middle_channels,
                                     (int32_t)item->height, (int32_t)item->width};
@@ -571,7 +737,21 @@ int main(void) {
             return 1;
         }
     }
-    printf("],\"promotion_gate\":\"each major hot shape must reach >=3x\"}\n");
+    printf("],\"scheduler_cases\":[");
+    for (size_t scheduler_index = 0u; scheduler_index < 2u; ++scheduler_index) {
+        printf("%s{\"name\":\"%s\",\"groups\":[",
+               scheduler_index == 0u ? "" : ",", k_scheduler_names[scheduler_index]);
+        for (size_t group_index = 0u;
+             group_index < sizeof(k_group_sizes) / sizeof(k_group_sizes[0]);
+             ++group_index) {
+            printf("%s{\"group_tiles\":%u,\"ms\":%.6f}",
+                   group_index == 0u ? "" : ",", k_group_sizes[group_index],
+                   g_scheduler_ms[scheduler_index][group_index]);
+        }
+        printf("]}");
+    }    if (!run_epilogue_parity()) {
+        return 1;
+    }
+    printf("],\"epilogue_parity\":true,\"promotion_gate\":\"each major hot shape must reach >=3x\"}\n");
     return 0;
 }
-

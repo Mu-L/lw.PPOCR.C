@@ -1135,6 +1135,15 @@ endif()
 endif()
 
 if(BUILD_TESTING AND NOT EMSCRIPTEN)
+
+    add_test(
+        NAME source_final_newline_contract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_source_newlines.py"
+                --root "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(source_final_newline_contract PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        TIMEOUT 30)
     set(LW_RESHAPE_FIXTURE_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-fixtures")
     set(LW_RESHAPE_FIXTURES
         "${LW_RESHAPE_FIXTURE_DIR}/valid.lwm"

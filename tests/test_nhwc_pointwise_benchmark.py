@@ -35,6 +35,11 @@ def main() -> int:
         assert case["argmax_mismatch_count"] == 0, case
         assert case["nchw_ms"] > 0.0, case
         assert case["nhwc_ms"] > 0.0, case
+        group_results = case["group_results"]
+        assert [item["group_tiles"] for item in group_results] == [1, 2, 4, 8, 16, 0]
+        for result in group_results:
+            assert result["nhwc_ms"] > 0.0, (case, result)
+            assert result["speedup"] > 0.0, (case, result)
     chain_cases = report["chain_cases"]
     assert len(chain_cases) == 2
     for case in chain_cases:
@@ -44,6 +49,13 @@ def main() -> int:
         assert case["argmax_mismatch_count"] == 0, case
         assert case["nchw_ms"] > 0.0, case
         assert case["nhwc_ms"] > 0.0, case
+    scheduler_cases = report["scheduler_cases"]
+    assert len(scheduler_cases) == 2
+    for case in scheduler_cases:
+        groups = case["groups"]
+        assert [item["group_tiles"] for item in groups] == [1, 2, 4, 8, 16, 0]
+        for item in groups:
+            assert item["ms"] > 0.0, (case, item)
     assert "promotion_gate" in report
     return 0
 

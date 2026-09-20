@@ -5,7 +5,7 @@ executor dispatch, the public C ABI, or the LWM format. It answers one narrow
 question: which REC graph nodes could form a future NHWC fast-path island at
 `[1, 3, 48, 960]` under the conservative capability rules?
 
-The checked-in contract is [`ci/nhwc-layout-planner.json`](../ci/nhwc-layout-planner.json).
+The checked-in contract is [`ci/nhwc-layout-planner.json`](../ci/nhwc-layout-planner.json). The planner now treats layout availability as a physical twin cache: requiring an already available NCHW/NHWC twin does not increment the conversion count twice. Neutral rank-4 tensors (`C == 1` or `H == W == 1`) do not start islands or require conversions. Resize eligibility reads IEEE-754 float scales and only accepts unchanged N/C dimensions with positive integer spatial scales. ReduceMean is limited to keepdims H/W reduction, and Concat is limited to non-constant rank-4 channel concatenation. Direct NHWC graph input is enabled only when the first consumer can start a dense Conv or ConvTranspose NHWC segment.
 The report tool invokes the private `layout-plan-driver`, validates the exact
 summary counters, and stores every node's selected layout in JSON:
 

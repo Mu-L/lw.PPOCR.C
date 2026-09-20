@@ -1,21 +1,23 @@
-# Experimental NHWC 6x16 pointwise benchmark
+# Experimental NHWC pointwise benchmark
 
-This checkpoint implements the first A2 kernel from the NHWC fast-path design:
+This checkpoint measures an AVX2/FMA NHWC pointwise Conv1x1 candidate without
+changing the production runtime. It is intentionally isolated behind
+`LW_EXPERIMENTAL_AVX2_FAST_PATH=ON` and remains default-off.
 
-- `src/kernels/nhwc_pack.c` packs `[OC][IC][KH][KW]` weights as
+The experiment contains:
+
+- `src/kernels/nhwc_pack.c`: packs `[OC][IC][KH][KW]` weights as
   `[OC/16][KH][KW][IC][16]`;
-- `src/simd/avx2_nhwc_pointwise.c` provides a six-pixel by sixteen-output
-  AVX2/FMA microkernel;
-- `tests/nhwc_pointwise_driver.c` compares it with the existing production
-  NCHW packed Conv1x1 implementation in one process using alternating AB/BA
-  rounds and the real Medium REC pointwise shapes.
+- `src/simd/avx2_nhwc_pointwise.c`: six-row by sixteen-channel AVX2/FMA tiles,
+  residual/ReLU/HardSwish epilogues, and a grouped tile scheduler;
+- `tests/nhwc_pointwise_driver.c`: single-layer and persistent two-layer
+  comparisons against the production NCHW packed Conv1x1 path;
+- `tests/test_nhwc_pointwise_benchmark.py`: JSON parity and calibration contract;
+- `tests/test_source_newlines.py`: cross-compiler source hygiene contract.
 
-The same driver also measures two consecutive pointwise layers while keeping each candidate layout persistent between layers. This is diagnostic only: it tests whether avoiding an intermediate layout conversion can amortize the NHWC cost.
-
-The experiment is isolated behind `LW_EXPERIMENTAL_AVX2_FAST_PATH=ON`. It is
-x86/x64-only, default-off, and is not part of `lw_ppocr_c`, the shared library,
-WASM, Android, ARM64, LoongArch64, or any release package. It does not change
-the C ABI, LWM format, model assets, or production dispatch.
+The target is x86/x64-only and is not linked into `lw_ppocr_c`, the shared
+library, WASM, Android, ARM64, LoongArch64, or any release package. It does not
+change the C ABI, LWM format, model assets, or production dispatch.
 
 ## Build and run
 
@@ -26,21 +28,36 @@ cmake -S . -B build-nhwc-a2 `
   -DLW_BUILD_HTTP_DEMO=OFF `
   -DLW_EXPERIMENTAL_AVX2_FAST_PATH=ON
 cmake --build build-nhwc-a2 --config Release --target nhwc-pointwise-benchmark-driver
+ctest --test-dir build-nhwc-a2 -C Release -R "source_final_newline_contract|nhwc_pointwise_benchmark" --output-on-failure
 .\build-nhwc-a2\Release\nhwc-pointwise-benchmark-driver.exe
 ```
 
 On a host without AVX2+FMA the driver prints a JSON `status` of `skipped` and
 returns success. On a supported host it checks:
 
-- `max_abs <= 1e-4`;
-- `max_rel <= 1e-4`;
-- zero output mismatches above `1e-4`;
-- median timings from nine alternating AB/BA measurements.
+- NCHW/NHWC max absolute and relative error `<= 1e-4`;
+- zero output and argmax mismatches;
+- nine alternating AB/BA timing rounds;
+- `group_tiles` calibration for `1`, `2`, `4`, `8`, `16`, and `all` (`0`) on every case, with representative `scheduler_cases` exported for 512→1024 and 1536→768;
+- independent parity for bias-only, ReLU, HardSwish, and residual+ReLU.
 
-The promotion rule is intentionally stricter than the correctness test:
-every major hot shape must reach at least `3x` against the current NCHW packed
-baseline before any graph integration is considered.
+## Current diagnostic result
 
-The first Windows x64 run passed all single-layer and two-layer-chain parity checks, but the NHWC candidate was slower than the existing NCHW packed path on every measured shape. Single-layer ratios were roughly `0.56x` to `0.76x` of the NCHW speed, where `1.0x` would be equal. The persistent two-layer chains also measured only about `0.70x` to `0.72x`, so layout reuse did not reverse the result.
+The first grouped-scheduler run on Windows x64 passed all parity checks. The
+candidate is now faster than the previous ungrouped implementation and reached
+about `1.18x`–`1.62x` of the NCHW packed baseline on the five single-layer
+shapes. The two persistent-layout chains reached about `1.53x`–`1.57x` in the
+same run. These are diagnostic measurements, not a production claim; absolute
+latency varies by CPU and build.
 
-Therefore this A2 kernel is retained as an experimental measurement target only. The next phase must change the bottleneck hypothesis before adding more NHWC kernels or enabling production execution.
+The scheduler calibration is deliberately informational. A future promotion
+must still satisfy a reproducible multi-run gate: all major hot shapes at least
+`1.0x`, at least two at `1.10x`, five-shape average at least `1.08x`, and both
+persistent chains at least `1.05x` with one at least `1.10x`. Correctness and
+contract checks remain mandatory. The existing `3x` promotion text is retained
+only as a conservative long-term target and does not enable graph integration.
+
+No production executor or layout planner path is changed in this checkpoint.
+Keep `LW_EXPERIMENTAL_AVX2_FAST_PATH=OFF` for normal builds until calibration is
+repeated on the supported CI runners and a separate runtime integration review
+is completed.
