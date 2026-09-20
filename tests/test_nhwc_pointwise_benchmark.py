@@ -35,6 +35,15 @@ def main() -> int:
         assert case["argmax_mismatch_count"] == 0, case
         assert case["nchw_ms"] > 0.0, case
         assert case["nhwc_ms"] > 0.0, case
+    chain_cases = report["chain_cases"]
+    assert len(chain_cases) == 2
+    for case in chain_cases:
+        assert case["max_abs"] <= 1.0e-4, case
+        assert case["max_rel"] <= 1.0e-4, case
+        assert case["output_mismatch_count"] == 0, case
+        assert case["argmax_mismatch_count"] == 0, case
+        assert case["nchw_ms"] > 0.0, case
+        assert case["nhwc_ms"] > 0.0, case
     assert "promotion_gate" in report
     return 0
 

@@ -33,6 +33,19 @@ static const nhwc_case k_cases[] = {
 };
 
 enum { k_measure_rounds = 9, k_warmup_rounds = 2 };
+typedef struct nhwc_chain_case {
+    const char* name;
+    uint32_t input_channels;
+    uint32_t middle_channels;
+    uint32_t output_channels;
+    uint32_t height;
+    uint32_t width;
+} nhwc_chain_case;
+
+static const nhwc_chain_case k_chain_cases[] = {
+    {"medium-rec-chain-512x1024x512-h6-w240", 512u, 1024u, 512u, 6u, 240u},
+    {"medium-rec-chain-1024x512x768-h6-w240", 1024u, 512u, 768u, 6u, 240u},
+};
 
 static double monotonic_seconds(void) {
 #if defined(_WIN32)
@@ -344,6 +357,200 @@ cleanup:
     return success;
 }
 
+
+static int run_chain_case(const nhwc_chain_case* item, uint32_t case_index) {
+    uint32_t pixels = item->height * item->width;
+    uint64_t input_count = (uint64_t)pixels * item->input_channels;
+    uint64_t middle_count = (uint64_t)pixels * item->middle_channels;
+    uint64_t output_count = (uint64_t)pixels * item->output_channels;
+    uint64_t first_canonical_count =
+        (uint64_t)item->input_channels * item->middle_channels;
+    uint64_t second_canonical_count =
+        (uint64_t)item->middle_channels * item->output_channels;
+    uint64_t first_nhwc_count = 0u;
+    uint64_t second_nhwc_count = 0u;
+    uint64_t first_nchw_count = 0u;
+    uint64_t second_nchw_count = 0u;
+    float* input_nhwc = NULL;
+    float* input_nchw = NULL;
+    float* nhwc_middle = NULL;
+    float* nhwc_output = NULL;
+    float* nchw_middle = NULL;
+    float* nchw_output = NULL;
+    float* reference_nhwc = NULL;
+    float* first_canonical = NULL;
+    float* second_canonical = NULL;
+    float* first_nhwc_weights = NULL;
+    float* second_nhwc_weights = NULL;
+    float* first_nchw_weights = NULL;
+    float* second_nchw_weights = NULL;
+    float* first_bias = NULL;
+    float* second_bias = NULL;
+    double nchw_samples[k_measure_rounds];
+    double nhwc_samples[k_measure_rounds];
+    int32_t input_dimensions[4] = {1, (int32_t)item->input_channels,
+                                   (int32_t)item->height, (int32_t)item->width};
+    int32_t middle_dimensions[4] = {1, (int32_t)item->middle_channels,
+                                    (int32_t)item->height, (int32_t)item->width};
+    int32_t output_dimensions[4] = {1, (int32_t)item->output_channels,
+                                    (int32_t)item->height, (int32_t)item->width};
+    uint32_t round;
+    float max_abs;
+    float max_rel;
+    uint64_t output_mismatches;
+    uint64_t argmax_mismatches;
+    uint64_t nchw_checksum;
+    uint64_t nhwc_checksum;
+    int success = 0;
+
+    if (!lw_nhwc_dense_packed_weight_count(item->input_channels, item->middle_channels,
+                                           1u, 1u, &first_nhwc_count) ||
+        !lw_nhwc_dense_packed_weight_count(item->middle_channels, item->output_channels,
+                                           1u, 1u, &second_nhwc_count) ||
+        !lw_packed_conv1x1_weight_count(item->input_channels, item->middle_channels,
+                                         &first_nchw_count) ||
+        !lw_packed_conv1x1_weight_count(item->middle_channels, item->output_channels,
+                                         &second_nchw_count)) {
+        return 0;
+    }
+    input_nhwc = (float*)malloc((size_t)input_count * sizeof(float));
+    input_nchw = (float*)malloc((size_t)input_count * sizeof(float));
+    nhwc_middle = (float*)malloc((size_t)middle_count * sizeof(float));
+    nhwc_output = (float*)malloc((size_t)output_count * sizeof(float));
+    nchw_middle = (float*)malloc((size_t)middle_count * sizeof(float));
+    nchw_output = (float*)malloc((size_t)output_count * sizeof(float));
+    reference_nhwc = (float*)malloc((size_t)output_count * sizeof(float));
+    first_canonical = (float*)malloc((size_t)first_canonical_count * sizeof(float));
+    second_canonical = (float*)malloc((size_t)second_canonical_count * sizeof(float));
+    first_nhwc_weights = (float*)malloc((size_t)first_nhwc_count * sizeof(float));
+    second_nhwc_weights = (float*)malloc((size_t)second_nhwc_count * sizeof(float));
+    first_nchw_weights = (float*)malloc((size_t)first_nchw_count * sizeof(float));
+    second_nchw_weights = (float*)malloc((size_t)second_nchw_count * sizeof(float));
+    first_bias = (float*)malloc((size_t)item->middle_channels * sizeof(float));
+    second_bias = (float*)malloc((size_t)item->output_channels * sizeof(float));
+    if (input_nhwc == NULL || input_nchw == NULL || nhwc_middle == NULL ||
+        nhwc_output == NULL || nchw_middle == NULL || nchw_output == NULL ||
+        reference_nhwc == NULL || first_canonical == NULL || second_canonical == NULL ||
+        first_nhwc_weights == NULL || second_nhwc_weights == NULL ||
+        first_nchw_weights == NULL || second_nchw_weights == NULL ||
+        first_bias == NULL || second_bias == NULL) {
+        goto cleanup;
+    }
+    fill_values(input_nhwc, input_count, 4001u + case_index * 13u);
+    fill_values(first_canonical, first_canonical_count, 5003u + case_index * 17u);
+    fill_values(second_canonical, second_canonical_count, 6007u + case_index * 19u);
+    fill_values(first_bias, item->middle_channels, 7001u + case_index * 23u);
+    fill_values(second_bias, item->output_channels, 8009u + case_index * 29u);
+    scale_values(input_nhwc, input_count, 0.25f);
+    scale_values(first_canonical, first_canonical_count, 0.025f);
+    scale_values(second_canonical, second_canonical_count, 0.025f);
+    scale_values(first_bias, item->middle_channels, 0.025f);
+    scale_values(second_bias, item->output_channels, 0.025f);
+    nhwc_to_nchw(input_nhwc, input_nchw, pixels, item->input_channels);
+    lw_pack_nhwc_dense_f32(first_canonical, item->input_channels, item->middle_channels,
+                           1u, 1u, first_nhwc_weights);
+    lw_pack_nhwc_dense_f32(second_canonical, item->middle_channels, item->output_channels,
+                           1u, 1u, second_nhwc_weights);
+    lw_pack_conv1x1_weights_f32(first_canonical, item->input_channels,
+                                item->middle_channels, first_nchw_weights);
+    lw_pack_conv1x1_weights_f32(second_canonical, item->middle_channels,
+                                item->output_channels, second_nchw_weights);
+
+    run_nchw(input_nchw, first_nchw_weights, first_bias, nchw_middle,
+             input_dimensions, middle_dimensions);
+    run_nchw(nchw_middle, second_nchw_weights, second_bias, nchw_output,
+             middle_dimensions, output_dimensions);
+    nchw_to_nhwc(nchw_output, reference_nhwc, pixels, item->output_channels);
+    run_nhwc(input_nhwc, first_nhwc_weights, first_bias, nhwc_middle, pixels,
+             item->input_channels, item->middle_channels);
+    run_nhwc(nhwc_middle, second_nhwc_weights, second_bias, nhwc_output, pixels,
+             item->middle_channels, item->output_channels);
+    max_abs = max_abs_difference(reference_nhwc, nhwc_output, output_count);
+    max_rel = max_rel_difference(reference_nhwc, nhwc_output, output_count);
+    output_mismatches = count_mismatches(reference_nhwc, nhwc_output, output_count);
+    argmax_mismatches = count_argmax_mismatches(reference_nhwc, nhwc_output, pixels,
+                                                item->output_channels);
+    if (max_abs > 1.0e-4f || max_rel > 1.0e-4f || output_mismatches != 0u ||
+        argmax_mismatches != 0u) {
+        fprintf(stderr, "NHWC chain parity failed for %s: max_abs=%.9g max_rel=%.9g output_mismatches=%" PRIu64 " argmax_mismatches=%" PRIu64 "\n",
+                item->name, max_abs, max_rel, output_mismatches, argmax_mismatches);
+        goto cleanup;
+    }
+    for (round = 0u; round < k_warmup_rounds; ++round) {
+        run_nchw(input_nchw, first_nchw_weights, first_bias, nchw_middle,
+                 input_dimensions, middle_dimensions);
+        run_nchw(nchw_middle, second_nchw_weights, second_bias, nchw_output,
+                 middle_dimensions, output_dimensions);
+        run_nhwc(input_nhwc, first_nhwc_weights, first_bias, nhwc_middle, pixels,
+                 item->input_channels, item->middle_channels);
+        run_nhwc(nhwc_middle, second_nhwc_weights, second_bias, nhwc_output, pixels,
+                 item->middle_channels, item->output_channels);
+    }
+    for (round = 0u; round < k_measure_rounds; ++round) {
+        double start;
+        double end;
+        if ((round & 1u) == 0u) {
+            start = monotonic_seconds();
+            run_nchw(input_nchw, first_nchw_weights, first_bias, nchw_middle,
+                     input_dimensions, middle_dimensions);
+            run_nchw(nchw_middle, second_nchw_weights, second_bias, nchw_output,
+                     middle_dimensions, output_dimensions);
+            end = monotonic_seconds();
+            nchw_samples[round] = (end - start) * 1000.0;
+            start = monotonic_seconds();
+            run_nhwc(input_nhwc, first_nhwc_weights, first_bias, nhwc_middle, pixels,
+                     item->input_channels, item->middle_channels);
+            run_nhwc(nhwc_middle, second_nhwc_weights, second_bias, nhwc_output, pixels,
+                     item->middle_channels, item->output_channels);
+            end = monotonic_seconds();
+            nhwc_samples[round] = (end - start) * 1000.0;
+        } else {
+            start = monotonic_seconds();
+            run_nhwc(input_nhwc, first_nhwc_weights, first_bias, nhwc_middle, pixels,
+                     item->input_channels, item->middle_channels);
+            run_nhwc(nhwc_middle, second_nhwc_weights, second_bias, nhwc_output, pixels,
+                     item->middle_channels, item->output_channels);
+            end = monotonic_seconds();
+            nhwc_samples[round] = (end - start) * 1000.0;
+            start = monotonic_seconds();
+            run_nchw(input_nchw, first_nchw_weights, first_bias, nchw_middle,
+                     input_dimensions, middle_dimensions);
+            run_nchw(nchw_middle, second_nchw_weights, second_bias, nchw_output,
+                     middle_dimensions, output_dimensions);
+            end = monotonic_seconds();
+            nchw_samples[round] = (end - start) * 1000.0;
+        }
+    }
+    nchw_checksum = checksum_bytes(nchw_output, (size_t)output_count * sizeof(float));
+    nhwc_checksum = checksum_bytes(nhwc_output, (size_t)output_count * sizeof(float));
+    printf("    {\"name\":\"%s\",\"nchw_ms\":%.6f,\"nhwc_ms\":%.6f,\"speedup\":%.6f,\"max_abs\":%.9g,\"max_rel\":%.9g,\"output_mismatch_count\":%" PRIu64 ",\"argmax_mismatch_count\":%" PRIu64 ",\"nchw_checksum\":\"%016" PRIx64 "\",\"nhwc_checksum\":\"%016" PRIx64 "\"}%s\n",
+           item->name, median(nchw_samples, k_measure_rounds),
+           median(nhwc_samples, k_measure_rounds),
+           median(nchw_samples, k_measure_rounds) / median(nhwc_samples, k_measure_rounds),
+           max_abs, max_rel, output_mismatches, argmax_mismatches,
+           nchw_checksum, nhwc_checksum,
+           case_index + 1u < sizeof(k_chain_cases) / sizeof(k_chain_cases[0]) ? "," : "");
+    success = 1;
+
+cleanup:
+    free(input_nhwc);
+    free(input_nchw);
+    free(nhwc_middle);
+    free(nhwc_output);
+    free(nchw_middle);
+    free(nchw_output);
+    free(reference_nhwc);
+    free(first_canonical);
+    free(second_canonical);
+    free(first_nhwc_weights);
+    free(second_nhwc_weights);
+    free(first_nchw_weights);
+    free(second_nchw_weights);
+    free(first_bias);
+    free(second_bias);
+    return success;
+}
+
 int main(void) {
     const lw_cpu_capabilities capabilities = lw_get_cpu_capabilities();
     size_t index;
@@ -358,7 +565,13 @@ int main(void) {
             return 1;
         }
     }
-    printf("] ,\"promotion_gate\":\"each major hot shape must reach >=3x\"}\n");
+    printf("],\"chain_cases\":[\n");
+    for (index = 0u; index < sizeof(k_chain_cases) / sizeof(k_chain_cases[0]); ++index) {
+        if (!run_chain_case(&k_chain_cases[index], (uint32_t)index)) {
+            return 1;
+        }
+    }
+    printf("],\"promotion_gate\":\"each major hot shape must reach >=3x\"}\n");
     return 0;
 }
 

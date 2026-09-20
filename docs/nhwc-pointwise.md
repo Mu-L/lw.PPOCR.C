@@ -10,6 +10,8 @@ This checkpoint implements the first A2 kernel from the NHWC fast-path design:
   NCHW packed Conv1x1 implementation in one process using alternating AB/BA
   rounds and the real Medium REC pointwise shapes.
 
+The same driver also measures two consecutive pointwise layers while keeping each candidate layout persistent between layers. This is diagnostic only: it tests whether avoiding an intermediate layout conversion can amortize the NHWC cost.
+
 The experiment is isolated behind `LW_EXPERIMENTAL_AVX2_FAST_PATH=ON`. It is
 x86/x64-only, default-off, and is not part of `lw_ppocr_c`, the shared library,
 WASM, Android, ARM64, LoongArch64, or any release package. It does not change
@@ -39,12 +41,6 @@ The promotion rule is intentionally stricter than the correctness test:
 every major hot shape must reach at least `3x` against the current NCHW packed
 baseline before any graph integration is considered.
 
-## Current checkpoint
+The first Windows x64 run passed all single-layer and two-layer-chain parity checks, but the NHWC candidate was slower than the existing NCHW packed path on every measured shape. Single-layer ratios were roughly `0.56x` to `0.76x` of the NCHW speed, where `1.0x` would be equal. The persistent two-layer chains also measured only about `0.70x` to `0.72x`, so layout reuse did not reverse the result.
 
-The first Windows x64 run passed all parity checks, but the NHWC candidate was
-slower than the existing NCHW packed path on every measured shape (roughly
-`0.56x` to `0.70x` of the NCHW speed, where `1.0x` would be equal). Therefore
-this A2 kernel is retained as an experimental measurement target only. The
-next phase must change the bottleneck hypothesis—such as measuring fused
-multi-node NHWC reuse—before adding more NHWC kernels or enabling production
-execution.
+Therefore this A2 kernel is retained as an experimental measurement target only. The next phase must change the bottleneck hypothesis before adding more NHWC kernels or enabling production execution.
