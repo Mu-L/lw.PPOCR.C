@@ -11,12 +11,11 @@ the combined full-OCR API are not part of this milestone.
 - Deployment model: deterministic `cls.lwm`, fixed input `[1,3,80,160]`, FP32.
 - Source pixels: caller-owned interleaved BGR8 with explicit byte count and row
   stride; encoded image files are outside the runtime.
-- Resize: height 80, aspect-ratio-preserving width rounded upward and capped at
-  160, followed by black right padding.
+- Resize: select the left `min(source_width, 4 * source_height)` pixels, then bilinearly stretch that window directly to `160 x 80`; no right padding is used. Pixels beyond the left `4H` window are ignored by CLS.
 - Normalize/layout: `(value / 255 - 0.5) * 2`, planar BGR CHW.
-- Output: label `0`/`1`, orientation `0`/`180` degrees, selected Softmax score,
-  and the actual resized width.
+- Output: label `0`/`1`, orientation `0`/`180` degrees, selected Softmax score, and `resized_width=160` for the fixed classifier input.
 - The API reports orientation but never mutates or rotates caller-owned pixels.
+- The left-`4H` window is only a CLS view; REC still receives the complete crop. When orientation is `180`, the caller-level pipeline rotates the complete crop, not only the classifier window.
 
 The converter specializes batch size to one, removes the fixed metadata-only
 Shape/Slice/Concat chain, rewrites GlobalAveragePool to the existing ReduceMean

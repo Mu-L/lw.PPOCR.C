@@ -26,8 +26,8 @@ def make_bgr_source(width: int, height: int, stride: int) -> tuple[np.ndarray, b
 
 def preprocess_reference(source: np.ndarray) -> tuple[np.ndarray, int]:
     source_height, source_width, _ = source.shape
-    resized_width = min(160, (80 * source_width + source_height - 1) // source_height)
-    output = np.full((3, 80, 160), np.float32(-1.0))
+    source_window_width = min(source_width, 4 * source_height)
+    output = np.empty((3, 80, 160), dtype=np.float32)
     for output_y in range(80):
         source_y = (output_y + 0.5) * source_height / 80.0 - 0.5
         source_y0_raw = int(np.floor(source_y))
@@ -35,12 +35,12 @@ def preprocess_reference(source: np.ndarray) -> tuple[np.ndarray, int]:
         source_y0 = min(max(source_y0_raw, 0), source_height - 1)
         source_y1 = min(max(source_y1_raw, 0), source_height - 1)
         weight_y = source_y - source_y0_raw
-        for output_x in range(resized_width):
-            source_x = (output_x + 0.5) * source_width / resized_width - 0.5
+        for output_x in range(160):
+            source_x = (output_x + 0.5) * source_window_width / 160.0 - 0.5
             source_x0_raw = int(np.floor(source_x))
             source_x1_raw = source_x0_raw + 1
-            source_x0 = min(max(source_x0_raw, 0), source_width - 1)
-            source_x1 = min(max(source_x1_raw, 0), source_width - 1)
+            source_x0 = min(max(source_x0_raw, 0), source_window_width - 1)
+            source_x1 = min(max(source_x1_raw, 0), source_window_width - 1)
             weight_x = source_x - source_x0_raw
             top = source[source_y0, source_x0].astype(np.float64) + (
                 source[source_y0, source_x1].astype(np.float64)
@@ -54,8 +54,7 @@ def preprocess_reference(source: np.ndarray) -> tuple[np.ndarray, int]:
             output[:, output_y, output_x] = (
                 value * (2.0 / 255.0) - 1.0
             ).astype(np.float32)
-    return output, resized_width
-
+    return output, 160
 
 class ClsPipelineReferenceTest(unittest.TestCase):
     driver: Path
@@ -136,6 +135,42 @@ class ClsPipelineReferenceTest(unittest.TestCase):
         self.assertAlmostEqual(float(match.group(2)), expected_score, places=5)
         self.assertEqual(int(match.group(3)), expected_label * 180)
         self.assertEqual(int(match.group(4)), expected_width)
+
+    def test_left_four_h_window_ignores_tail_pixels(self) -> None:
+        width, height, stride = 64, 8, 64 * 3
+        pixels, raw = make_bgr_source(width, height, stride)
+        altered = bytearray(raw)
+        for y in range(height):
+            for x in range(4 * height, width):
+                for channel in range(3):
+                    altered[y * stride + x * 3 + channel] ^= 0xFF
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_path = root / "first.bgr"
+            second_path = root / "second.bgr"
+            first_output = root / "first.f32"
+            second_output = root / "second.f32"
+            first_path.write_bytes(raw)
+            second_path.write_bytes(altered)
+            for source_path, output_path in (
+                (first_path, first_output),
+                (second_path, second_output),
+            ):
+                result = self.run_driver(
+                    [
+                        "preprocess",
+                        str(source_path),
+                        str(width),
+                        str(height),
+                        str(stride),
+                        str(output_path),
+                    ]
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            np.testing.assert_array_equal(
+                np.fromfile(first_output, dtype="<f4"),
+                np.fromfile(second_output, dtype="<f4"),
+            )
 
 
 def parse_args() -> argparse.Namespace:

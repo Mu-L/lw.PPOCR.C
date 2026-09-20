@@ -10,6 +10,7 @@
 #define LW_CLS_INPUT_HEIGHT 80u
 #define LW_CLS_INPUT_WIDTH 160u
 #define LW_CLS_CLASS_COUNT 2u
+#define LW_CLS_SOURCE_WINDOW_MAX_WIDTH_PER_HEIGHT 4u
 
 lw_status lw_cls_preprocess_bgr_u8(const uint8_t* source, uint64_t source_byte_count,
                                    uint32_t source_width, uint32_t source_height,
