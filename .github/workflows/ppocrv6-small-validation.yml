@@ -25,6 +25,7 @@ on:
       - "models/**"
       - "requirements-converter.txt"
       - "ci/ppocrv6-small-validation.json"
+      - "ci/nhwc-layout-planner.json"
       - ".github/workflows/ppocrv6-small-validation.yml"
   schedule:
     - cron: "0 3 * * 1"
@@ -99,7 +100,7 @@ jobs:
           cmake --build build --config Release --parallel 2 --target
           det-graph-driver rec-graph-driver lw-ocr-ppm test-dynamic-reshape
           conv-reference-driver packed-conv1x1-benchmark-driver
-          conv3x3-stride2-benchmark-driver simd-backend-driver
+          conv3x3-stride2-benchmark-driver simd-backend-driver layout-plan-driver
       - name: Run standard contract tests
         run: >-
           ctest --test-dir build -C Release --output-on-failure
@@ -117,6 +118,14 @@ jobs:
           --rec-max-width "${{ steps.contract.outputs.rec_max_width }}"
           --expected-lines "${{ steps.contract.outputs.expected_lines }}"
           --expected-full-text-sha256 "${{ steps.contract.outputs.expected_full_text_sha256 }}"
+      - name: Snapshot Small REC960 layout plan
+        run: >-
+          python tools/run_layout_plan_snapshot.py
+          --build-dir build
+          --model build/small-validation-run/converted-runtime/rec.lwm
+          --variant small
+          --contract ci/nhwc-layout-planner.json
+          --output build/small-validation-run/layout-plan.json
       - name: Upload Small validation report
         uses: actions/upload-artifact@v7
         with:

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "input": [1, 3, 48, 960],
+  "variants": {
+    "tiny": {
+      "tensor_count": 274,
+      "node_count": 159,
+      "nhwc_nodes": 121,
+      "nchw_nodes": 38,
+      "conversions": 10,
+      "islands": 5,
+      "width": 960
+    },
+    "small": {
+      "tensor_count": 563,
+      "node_count": 336,
+      "nhwc_nodes": 200,
+      "nchw_nodes": 136,
+      "conversions": 18,
+      "islands": 8,
+      "width": 960
+    },
+    "medium": {
+      "tensor_count": 595,
+      "node_count": 355,
+      "nhwc_nodes": 238,
+      "nchw_nodes": 117,
+      "conversions": 19,
+      "islands": 9,
+      "width": 960
+    }
+  }
+}

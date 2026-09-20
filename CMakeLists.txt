@@ -1184,6 +1184,7 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
                 tests.test_collect_det_shape_profile
                 tests.test_compare_ocr_dataset_reports
                 tests.test_build_engine_comparison_report
+                tests.test_layout_plan_snapshot
                 tests.test_summarize_ocr_dataset_reports
                 tests.test_check_ocr_dataset_regression
                 tests.test_experimental_ops tests.test_small_ocr_baseline
