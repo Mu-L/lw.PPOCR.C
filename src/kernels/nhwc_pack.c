@@ -47,35 +47,31 @@ void lw_pack_nhwc_dense_f32(const float* weights,
                             uint32_t kernel_h,
                             uint32_t kernel_w,
                             float* packed_weights) {
-    uint32_t output_blocks = output_channels / LW_NHWC_OC_BLOCK +
-                             (output_channels % LW_NHWC_OC_BLOCK == 0u ? 0u : 1u);
+    const uint32_t output_blocks =
+        output_channels / LW_NHWC_OC_BLOCK +
+        (output_channels % LW_NHWC_OC_BLOCK == 0u ? 0u : 1u);
+    const uint32_t taps = kernel_h * kernel_w;
     uint32_t output_block;
-    uint32_t kh;
-    uint32_t kw;
 
     for (output_block = 0u; output_block < output_blocks; ++output_block) {
-        for (kh = 0u; kh < kernel_h; ++kh) {
-            for (kw = 0u; kw < kernel_w; ++kw) {
-                uint32_t input_channel;
-                for (input_channel = 0u; input_channel < input_channels;
-                     ++input_channel) {
-                    uint32_t lane;
-                    for (lane = 0u; lane < LW_NHWC_OC_BLOCK; ++lane) {
-                        uint64_t output_channel =
-                            (uint64_t)output_block * LW_NHWC_OC_BLOCK + lane;
-                        uint64_t packed_index =
-                            (((((uint64_t)output_block * kernel_h + kh) * kernel_w + kw) *
-                              input_channels + input_channel) *
-                             LW_NHWC_OC_BLOCK) +
-                            lane;
-                        packed_weights[(size_t)packed_index] =
-                            output_channel < output_channels
-                                ? weights[((((output_channel * input_channels +
-                                             input_channel) * kernel_h + kh) *
-                                            kernel_w) +
-                                           kw)]
-                                : 0.0f;
-                    }
+        uint32_t input_channel;
+        for (input_channel = 0u; input_channel < input_channels; ++input_channel) {
+            uint32_t tap;
+            for (tap = 0u; tap < taps; ++tap) {
+                const uint32_t kh = tap / kernel_w;
+                const uint32_t kw = tap - kh * kernel_w;
+                uint32_t lane;
+                for (lane = 0u; lane < LW_NHWC_OC_BLOCK; ++lane) {
+                    const uint64_t output_channel =
+                        (uint64_t)output_block * LW_NHWC_OC_BLOCK + lane;
+                    const uint64_t packed_index =
+                        ((((uint64_t)output_block * input_channels + input_channel) * taps +
+                          tap) * LW_NHWC_OC_BLOCK) + lane;
+                    packed_weights[(size_t)packed_index] =
+                        output_channel < output_channels
+                            ? weights[((((output_channel * input_channels + input_channel) *
+                                         kernel_h + kh) * kernel_w) + kw)]
+                            : 0.0f;
                 }
             }
         }

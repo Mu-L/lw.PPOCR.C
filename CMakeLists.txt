@@ -2097,6 +2097,30 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_nhwc_pointwise_benchmark.py"
                     --driver "$<TARGET_FILE:nhwc-pointwise-benchmark-driver>")
         set_tests_properties(nhwc_pointwise_benchmark PROPERTIES TIMEOUT 120)
+        add_executable(nhwc-dense-benchmark-driver
+            tests/nhwc_dense_driver.c
+            src/kernels/nhwc_pack.c
+            src/simd/avx2_nhwc_dense.c)
+        target_link_libraries(nhwc-dense-benchmark-driver PRIVATE lw_ppocr_c)
+        target_include_directories(nhwc-dense-benchmark-driver PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/simd")
+        target_compile_features(nhwc-dense-benchmark-driver PRIVATE c_std_11)
+        target_compile_definitions(nhwc-dense-benchmark-driver PRIVATE
+            LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+        if(MSVC)
+            set_property(SOURCE src/simd/avx2_nhwc_dense.c APPEND PROPERTY
+                COMPILE_OPTIONS /arch:AVX2 /fp:strict)
+            target_compile_definitions(nhwc-dense-benchmark-driver PRIVATE
+                _CRT_SECURE_NO_WARNINGS)
+            target_compile_options(nhwc-dense-benchmark-driver PRIVATE /W4 /WX /utf-8)
+        else()
+            target_compile_options(nhwc-dense-benchmark-driver PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+        endif()
+        add_test(NAME nhwc_dense_benchmark
+            COMMAND "$<TARGET_FILE:nhwc-dense-benchmark-driver>")
+        set_tests_properties(nhwc_dense_benchmark PROPERTIES TIMEOUT 120)
     elseif(LW_EXPERIMENTAL_AVX2_FAST_PATH)
         message(WARNING
             "LW_EXPERIMENTAL_AVX2_FAST_PATH requires an x86/x64 build; benchmark target skipped")

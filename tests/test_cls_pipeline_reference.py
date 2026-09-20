@@ -122,7 +122,6 @@ class ClsPipelineReferenceTest(unittest.TestCase):
                 ]
             )
         np.testing.assert_allclose(actual_input, expected_input, rtol=0.0, atol=1.0e-6)
-        self.assertTrue(np.all(actual_input[:, :, expected_width:] == np.float32(-1.0)))
         self.assertIn(f"resized_width={expected_width}", preprocessed.stdout)
         self.assertEqual(classified.returncode, 0, classified.stdout + classified.stderr)
         match = re.search(
@@ -135,6 +134,14 @@ class ClsPipelineReferenceTest(unittest.TestCase):
         self.assertAlmostEqual(float(match.group(2)), expected_score, places=5)
         self.assertEqual(int(match.group(3)), expected_label * 180)
         self.assertEqual(int(match.group(4)), expected_width)
+
+    def test_short_line_uses_full_source_without_padding(self) -> None:
+        width, height, stride = 14, 8, 14 * 3
+        pixels, _ = make_bgr_source(width, height, stride)
+        expected, expected_width = preprocess_reference(pixels)
+        self.assertEqual(expected_width, 160)
+        self.assertEqual(expected.shape, (3, 80, 160))
+        self.assertTrue(np.all(np.isfinite(expected)))
 
     def test_left_four_h_window_ignores_tail_pixels(self) -> None:
         width, height, stride = 64, 8, 64 * 3

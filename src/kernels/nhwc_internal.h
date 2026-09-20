@@ -8,6 +8,8 @@
 #define LW_NHWC_OC_BLOCK 16u
 #define LW_NHWC_PIXEL_TILE 6u
 #define LW_NHWC_POINTWISE_GROUP_TILES 8u
+#define LW_NHWC_DENSE_KC 512u
+#define LW_NHWC_PARTIAL_FLOATS (LW_NHWC_PIXEL_TILE * LW_NHWC_OC_BLOCK)
 
 typedef enum lw_nhwc_activation {
     LW_NHWC_ACT_NONE = 0,
@@ -38,6 +40,32 @@ void lw_pack_nhwc_dense_f32(const float* weights,
                             uint32_t kernel_w,
                             float* packed_weights);
 
+typedef struct lw_nhwc_dense_desc {
+    uint32_t batch;
+    uint32_t input_channels;
+    uint32_t input_height;
+    uint32_t input_width;
+    uint32_t output_channels;
+    uint32_t output_height;
+    uint32_t output_width;
+    uint32_t kernel_h;
+    uint32_t kernel_w;
+    uint32_t stride_h;
+    uint32_t stride_w;
+    uint32_t pad_top;
+    uint32_t pad_left;
+    uint32_t dense_kc;
+} lw_nhwc_dense_desc;
+
+int lw_nhwc_dense_scratch_bytes(const lw_nhwc_dense_desc* desc, uint64_t* scratch_bytes);
+
+lw_status lw_avx2_fma_nhwc_dense_f32(const float* input,
+                                     const float* packed_weights,
+                                     const lw_nhwc_epilogue* epilogue,
+                                     float* output,
+                                     const lw_nhwc_dense_desc* desc,
+                                     void* scratch,
+                                     uint64_t scratch_bytes);
 /* Input/output are NHWC. This API is experimental and production-disabled. */
 void lw_avx2_fma_nhwc_pointwise_grouped_f32(const float* input,
                                              const float* packed_weights,

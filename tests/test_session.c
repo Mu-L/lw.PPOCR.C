@@ -319,6 +319,56 @@ static int check_prepared_constant_sharing_stress(const lw_model* model) {
     lw_session_free(source);
     return 1;
 }
+static int check_prepared_source_release_order(const lw_model* model) {
+    lw_tensor_desc source_input;
+    lw_tensor_desc child_input;
+    lw_session* source = NULL;
+    lw_session* child = NULL;
+    lw_shared_prepared_constants* shared = NULL;
+    lw_error error;
+    lw_status status;
+
+    make_rec_input(&source_input, 1, 320);
+    make_rec_input(&child_input, 1, 960);
+    lw_error_init(&error);
+    status = lw_session_create(model, &source_input, 1u, NULL, &source, &error);
+    if (status != LW_STATUS_OK || source == NULL) {
+        fprintf(stderr, "source-release test: source create failed: %s\n", error.message);
+        return 0;
+    }
+    if (source->shared_prepared_constants == NULL) {
+        lw_session_free(source);
+        return 1;
+    }
+    lw_error_init(&error);
+    status = lw_session_create_with_prepared_source(
+        model, &child_input, 1u, NULL, 0u, source, &child, &error);
+    if (status != LW_STATUS_OK || child == NULL) {
+        fprintf(stderr, "source-release test: child create failed: %s\n", error.message);
+        lw_session_free(child);
+        lw_session_free(source);
+        return 0;
+    }
+    shared = child->shared_prepared_constants;
+    if (shared == NULL || shared != source->shared_prepared_constants ||
+        lw_atomic_u32_load_acquire(&shared->ref_count) != 2u) {
+        fprintf(stderr, "source-release test: arena/refcount mismatch\n");
+        lw_session_free(child);
+        lw_session_free(source);
+        return 0;
+    }
+    lw_session_free(source);
+    source = NULL;
+    if (lw_atomic_u32_load_acquire(&shared->ref_count) != 1u ||
+        child->prepared_constants != shared->constants ||
+        child->packed_weights != shared->packed_weights) {
+        fprintf(stderr, "source-release test: child bindings became invalid\n");
+        lw_session_free(child);
+        return 0;
+    }
+    lw_session_free(child);
+    return 1;
+}
 int main(int argc, char** argv) {
     lw_model* model = NULL;
     lw_error error;
@@ -343,6 +393,7 @@ int main(int argc, char** argv) {
     }
     if (!check_plan_determinism(model) || !check_prepared_constant_sharing(model) ||
         !check_prepared_constant_sharing_stress(model) ||
+        !check_prepared_source_release_order(model) ||
         !create_and_check(model, 1, 7, 1, &workspace_minimum) ||
         !create_and_check(model, 1, 320, 40, &workspace_320) ||
         !create_and_check(model, 1, 321, 40, &workspace_odd) ||
