@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from tools.compare_ocr_dataset_runtime import load_manifest, summarize, summarize_paired
+from tools.compare_ocr_dataset_runtime import (
+    load_manifest,
+    run_process_with_heartbeat,
+    summarize,
+    summarize_paired,
+)
 
 
 def report(mean: float, p95: float, rss: int, checksum: str = "abc") -> dict:
@@ -26,6 +32,26 @@ def report(mean: float, p95: float, rss: int, checksum: str = "abc") -> dict:
 
 
 class CompareOcrDatasetRuntimeTests(unittest.TestCase):
+    def test_process_heartbeat_returns_completed_process(self) -> None:
+        returncode, stdout, stderr, elapsed = run_process_with_heartbeat(
+            [sys.executable, "-c", "print('ok')"],
+            label="heartbeat-smoke",
+            timeout_seconds=10,
+            heartbeat_seconds=10,
+        )
+        self.assertEqual(returncode, 0)
+        self.assertEqual(stdout.strip(), "ok")
+        self.assertEqual(stderr, "")
+        self.assertGreaterEqual(elapsed, 0.0)
+
+    def test_process_heartbeat_enforces_timeout(self) -> None:
+        with self.assertRaises(RuntimeError):
+            run_process_with_heartbeat(
+                [sys.executable, "-c", "import time; time.sleep(2)"],
+                label="heartbeat-timeout",
+                timeout_seconds=1,
+                heartbeat_seconds=10,
+            )
     def test_summary_checks_contract_and_calculates_deltas(self) -> None:
         compact = report(100.0, 140.0, 100 * 1048576)
         resident = report(90.0, 120.0, 110 * 1048576)

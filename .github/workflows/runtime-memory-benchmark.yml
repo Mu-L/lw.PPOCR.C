@@ -3,6 +3,14 @@ name: runtime-memory-benchmark
 on:
   workflow_dispatch:
     inputs:
+      profile:
+        description: "Benchmark profile"
+        required: false
+        default: "quick"
+        type: choice
+        options:
+          - quick
+          - full
       model:
         description: "Models to benchmark"
         required: false
@@ -23,14 +31,14 @@ on:
           - "1"
           - "4"
       paired_rounds:
-        description: "AB/BA paired rounds"
+        description: "0 uses profile default"
         required: false
-        default: "3"
+        default: "0"
         type: string
       image_count:
-        description: "Generated benchmark image count"
+        description: "0 uses profile default"
         required: false
-        default: "100"
+        default: "0"
         type: string
   schedule:
     - cron: "0 4 * * 6"
@@ -43,10 +51,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  benchmark:
-    name: Streaming crop memory/latency benchmark
+  prepare:
+    name: Prepare runtime-memory benchmark package
     runs-on: windows-2022
-    timeout-minutes: 240
+    timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      image_count: ${{ steps.plan.outputs.image_count }}
+      paired_rounds: ${{ steps.plan.outputs.paired_rounds }}
+      profile: ${{ steps.plan.outputs.profile }}
     steps:
       - uses: actions/checkout@v7
 
@@ -55,6 +68,54 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements-converter.txt
+
+      - name: Resolve benchmark plan
+        id: plan
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_PROFILE: ${{ inputs.profile || 'quick' }}
+          REQUESTED_MODEL: ${{ inputs.model || 'all' }}
+          REQUESTED_WORKERS: ${{ inputs.workers || 'both' }}
+          REQUESTED_ROUNDS: ${{ inputs.paired_rounds || '0' }}
+          REQUESTED_IMAGES: ${{ inputs.image_count || '0' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:EVENT_NAME -eq 'schedule') {
+            $profile = 'full'
+            $requestedModel = 'all'
+            $requestedWorkers = 'both'
+          } else {
+            $profile = $env:REQUESTED_PROFILE
+            $requestedModel = $env:REQUESTED_MODEL
+            $requestedWorkers = $env:REQUESTED_WORKERS
+          }
+          if ($profile -notin @('quick', 'full')) { throw "invalid profile: $profile" }
+          if ($requestedModel -notin @('all', 'tiny', 'small', 'medium')) { throw "invalid model: $requestedModel" }
+          if ($requestedWorkers -notin @('both', '1', '4')) { throw "invalid workers: $requestedWorkers" }
+          $imageCount = [int]$env:REQUESTED_IMAGES
+          if ($imageCount -eq 0) { $imageCount = if ($profile -eq 'full') { 100 } else { 30 } }
+          $pairedRounds = [int]$env:REQUESTED_ROUNDS
+          if ($pairedRounds -eq 0) { $pairedRounds = if ($profile -eq 'full') { 3 } else { 1 } }
+          if ($imageCount -lt 1 -or $imageCount -gt 1000) { throw 'invalid image_count' }
+          if ($pairedRounds -lt 1 -or $pairedRounds -gt 10) { throw 'invalid paired_rounds' }
+          $models = if ($requestedModel -eq 'all') { @('tiny', 'small', 'medium') } else { @($requestedModel) }
+          $workerSet = if ($requestedWorkers -eq 'both') { @(1, 4) } else { @([int]$requestedWorkers) }
+          $include = @()
+          foreach ($model in $models) {
+            foreach ($workers in $workerSet) {
+              $include += [ordered]@{ model = $model; workers = [int]$workers }
+            }
+          }
+          $matrixJson = ([ordered]@{ include = @($include) } | ConvertTo-Json -Depth 4 -Compress)
+          "matrix=$matrixJson" >> $env:GITHUB_OUTPUT
+          "image_count=$imageCount" >> $env:GITHUB_OUTPUT
+          "paired_rounds=$pairedRounds" >> $env:GITHUB_OUTPUT
+          "profile=$profile" >> $env:GITHUB_OUTPUT
+          Write-Host "Profile: $profile"
+          Write-Host "Images: $imageCount"
+          Write-Host "Paired rounds: $pairedRounds"
+          Write-Host "Matrix: $matrixJson"
 
       - name: Install converter and dataset dependencies
         run: python -m pip install -r requirements-converter.txt
@@ -76,7 +137,7 @@ jobs:
           cmake @common -B build-benchmark-streaming -DLW_EXPERIMENTAL_STREAMING_CROPS=ON
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build benchmark drivers and Tiny assets
+      - name: Build benchmark drivers
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -85,108 +146,118 @@ jobs:
           cmake --build build-benchmark-streaming --config Release --parallel 2 --target full-ocr-dataset-benchmark
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Generate deterministic benchmark corpus
+      - name: Generate corpus
         shell: pwsh
         env:
-          IMAGE_COUNT: ${{ inputs.image_count || '100' }}
+          IMAGE_COUNT: ${{ steps.plan.outputs.image_count }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $count = [int]$env:IMAGE_COUNT
-          if ($count -lt 1 -or $count -gt 1000) { throw 'image_count must be in 1..1000' }
-          python tools/generate_ocr_dataset.py `
-            --output build-local-data/ocr-dataset `
-            --count $count `
-            --seed 20260907 `
-            --format png `
-            --force
+          python tools/generate_ocr_dataset.py --output build-local-data/ocr-dataset --count $env:IMAGE_COUNT --seed 20260907 --format png --force
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python tools/prepare_ocr_dataset_ppm.py `
-            --dataset build-local-data/ocr-dataset `
-            --output build-local-data/ocr-dataset-ppm `
-            --force
+          python tools/prepare_ocr_dataset_ppm.py --dataset build-local-data/ocr-dataset --output runtime-memory-package/dataset --force
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Prepare Tiny, Small and Medium runtime assets
+      - name: Prepare runtime assets and executables
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path build-local-data/runtime-assets | Out-Null
           function Find-Asset([string]$root, [string]$name) {
             $match = Get-ChildItem -LiteralPath $root -Recurse -File -Filter $name | Select-Object -First 1
             if ($null -eq $match) { throw "asset not found: $name under $root" }
             return $match.FullName
           }
-          $tinyRoot = 'build-local-data/runtime-assets/tiny'
-          New-Item -ItemType Directory -Force -Path $tinyRoot | Out-Null
+          New-Item -ItemType Directory -Force -Path runtime-memory-package/assets/tiny | Out-Null
           foreach ($name in @('det.lwm', 'cls.lwm', 'rec.lwm')) {
-            Copy-Item -LiteralPath (Find-Asset 'build-benchmark-compact' $name) -Destination "$tinyRoot/$name"
+            Copy-Item -LiteralPath (Find-Asset 'build-benchmark-compact' $name) -Destination "runtime-memory-package/assets/tiny/$name"
           }
-          Copy-Item -LiteralPath 'models/ppocrv6-tiny/ppocr_keys.txt' -Destination "$tinyRoot/ppocr_keys.txt"
-          python tools/prepare_ppocrv6_runtime_variant.py `
-            --variant small `
-            --build-dir build-benchmark-compact `
-            --output-dir build-local-data/runtime-assets/small
+          Copy-Item -LiteralPath models/ppocrv6-tiny/ppocr_keys.txt -Destination runtime-memory-package/assets/tiny/ppocr_keys.txt
+          python tools/prepare_ppocrv6_runtime_variant.py --variant small --build-dir build-benchmark-compact --output-dir runtime-memory-package/assets/small
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python tools/prepare_ppocrv6_runtime_variant.py `
-            --variant medium `
-            --build-dir build-benchmark-compact `
-            --output-dir build-local-data/runtime-assets/medium
+          python tools/prepare_ppocrv6_runtime_variant.py --variant medium --build-dir build-benchmark-compact --output-dir runtime-memory-package/assets/medium
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force -Path runtime-memory-package/bin/compact, runtime-memory-package/bin/streaming | Out-Null
+          Copy-Item build-benchmark-compact/Release/full-ocr-dataset-benchmark.exe runtime-memory-package/bin/compact/
+          Copy-Item build-benchmark-streaming/Release/full-ocr-dataset-benchmark.exe runtime-memory-package/bin/streaming/
 
-      - name: Run paired dataset benchmarks
+      - uses: actions/upload-artifact@v7
+        with:
+          name: runtime-memory-benchmark-package-${{ github.sha }}
+          path: runtime-memory-package/
+          if-no-files-found: error
+          retention-days: 7
+
+  benchmark:
+    name: Streaming crop ${{ matrix.model }} / W${{ matrix.workers }}
+    needs: prepare
+    runs-on: windows-2022
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: runtime-memory-benchmark-package-${{ github.sha }}
+          path: .ci/runtime-memory-package
+
+      - name: Rebuild runner-local image list
         shell: pwsh
-        env:
-          REQUESTED_MODEL: ${{ inputs.model || 'all' }}
-          REQUESTED_WORKERS: ${{ inputs.workers || 'both' }}
-          PAIRED_ROUNDS: ${{ inputs.paired_rounds || '3' }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $models = if ($env:REQUESTED_MODEL -eq 'all') { @('tiny', 'small', 'medium') } else { @($env:REQUESTED_MODEL) }
-          $workerSet = if ($env:REQUESTED_WORKERS -eq 'both') { @(1, 4) } else { @([int]$env:REQUESTED_WORKERS) }
-          $rounds = [int]$env:PAIRED_ROUNDS
-          if ($rounds -lt 1 -or $rounds -gt 10) { throw 'paired_rounds must be in 1..10' }
-          $compact = (Resolve-Path 'build-benchmark-compact/Release/full-ocr-dataset-benchmark.exe').Path
-          $streaming = (Resolve-Path 'build-benchmark-streaming/Release/full-ocr-dataset-benchmark.exe').Path
-          $manifest = 'build-local-data/ocr-dataset-ppm/benchmark-manifest.json'
-          $list = 'build-local-data/ocr-dataset-ppm/images.txt'
-          foreach ($model in $models) {
-            $assetRoot = "build-local-data/runtime-assets/$model"
-            foreach ($workers in $workerSet) {
-              $output = "runtime-memory-results/$model/w$workers"
-              New-Item -ItemType Directory -Force -Path $output | Out-Null
-              python tools/compare_ocr_dataset_runtime.py `
-                --compact-driver $compact `
-                --resident-driver $streaming `
-                --candidate-resident-widths false `
-                --candidate-label "Streaming Crop" `
-                --det "$assetRoot/det.lwm" `
-                --cls "$assetRoot/cls.lwm" `
-                --rec "$assetRoot/rec.lwm" `
-                --dictionary "$assetRoot/ppocr_keys.txt" `
-                --image-list $list `
-                --benchmark-manifest $manifest `
-                --warmup 1 `
-                --iterations 1 `
-                --workers $workers `
-                --target-width 960 `
-                --paired-rounds $rounds `
-                --json-output "$output/compact-vs-streaming.json" `
-                --markdown-output "$output/compact-vs-streaming.md"
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            }
-          }
-          Get-ChildItem runtime-memory-results -Recurse -Filter '*.md' | ForEach-Object {
-            Get-Content -LiteralPath $_.FullName | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            '' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          }
+          $datasetRoot = (Resolve-Path '.ci/runtime-memory-package/dataset').Path
+          $manifest = Get-Content -LiteralPath "$datasetRoot/benchmark-manifest.json" -Raw | ConvertFrom-Json
+          $images = @(Get-ChildItem -LiteralPath $datasetRoot -File -Filter '*.ppm' | Sort-Object Name)
+          if ($images.Count -ne @($manifest.images).Count) { throw "PPM count mismatch: $($images.Count) != $(@($manifest.images).Count)" }
+          $images | ForEach-Object { $_.FullName } | Set-Content -LiteralPath "$datasetRoot/images-runner.txt" -Encoding utf8
+          Write-Host "Runner image list: $($images.Count) images"
+
+      - name: Run paired dataset benchmark
+        shell: pwsh
+        env:
+          MODEL: ${{ matrix.model }}
+          WORKERS: ${{ matrix.workers }}
+          PAIRED_ROUNDS: ${{ needs.prepare.outputs.paired_rounds }}
+          PROFILE: ${{ needs.prepare.outputs.profile }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packageRoot = (Resolve-Path '.ci/runtime-memory-package').Path
+          $compact = "$packageRoot/bin/compact/full-ocr-dataset-benchmark.exe"
+          $streaming = "$packageRoot/bin/streaming/full-ocr-dataset-benchmark.exe"
+          $assetRoot = "$packageRoot/assets/$env:MODEL"
+          $datasetRoot = "$packageRoot/dataset"
+          $output = "runtime-memory-results/$env:MODEL/w$env:WORKERS"
+          New-Item -ItemType Directory -Force -Path $output | Out-Null
+          Write-Host "Profile: $env:PROFILE; Model: $env:MODEL; Workers: $env:WORKERS; Rounds: $env:PAIRED_ROUNDS"
+          python tools/compare_ocr_dataset_runtime.py `
+            --compact-driver $compact `
+            --resident-driver $streaming `
+            --candidate-resident-widths false `
+            --candidate-label "Streaming Crop" `
+            --case-label "$env:MODEL/w$env:WORKERS" `
+            --det "$assetRoot/det.lwm" `
+            --cls "$assetRoot/cls.lwm" `
+            --rec "$assetRoot/rec.lwm" `
+            --dictionary "$assetRoot/ppocr_keys.txt" `
+            --image-list "$datasetRoot/images-runner.txt" `
+            --benchmark-manifest "$datasetRoot/benchmark-manifest.json" `
+            --warmup 1 --iterations 1 --workers $env:WORKERS --target-width 960 `
+            --paired-rounds $env:PAIRED_ROUNDS --process-timeout-seconds 3600 --heartbeat-seconds 60 `
+            --json-output "$output/compact-vs-streaming.json" `
+            --markdown-output "$output/compact-vs-streaming.md"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Content -LiteralPath "$output/compact-vs-streaming.md" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
-          name: lw-ppocr-runtime-memory-benchmark-${{ github.sha }}
-          path: |
-            runtime-memory-results/
-            build-local-data/ocr-dataset/metadata.json
-            build-local-data/ocr-dataset-ppm/benchmark-manifest.json
+          name: runtime-memory-${{ matrix.model }}-w${{ matrix.workers }}-${{ github.sha }}
+          path: runtime-memory-results/${{ matrix.model }}/w${{ matrix.workers }}/
           if-no-files-found: error
           retention-days: 30

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import time
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -39,6 +40,49 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return report
 
 
+
+def run_process_with_heartbeat(
+    command: list[str],
+    *,
+    label: str,
+    timeout_seconds: int,
+    heartbeat_seconds: int,
+) -> tuple[int, str, str, float]:
+    print(f"[benchmark] START {label}", flush=True)
+    started = time.monotonic()
+    next_heartbeat = started + heartbeat_seconds
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    while True:
+        returncode = process.poll()
+        if returncode is not None:
+            break
+        now = time.monotonic()
+        elapsed = now - started
+        if elapsed >= timeout_seconds:
+            process.kill()
+            stdout, stderr = process.communicate()
+            raise RuntimeError(
+                f"dataset benchmark timed out after {elapsed:.1f}s: {label}\n"
+                f"stdout tail:\n{stdout[-4000:]}\n"
+                f"stderr tail:\n{stderr[-4000:]}"
+            )
+        if now >= next_heartbeat:
+            print(
+                f"[benchmark] RUNNING {label}: {elapsed / 60.0:.1f} min elapsed",
+                flush=True,
+            )
+            next_heartbeat = now + heartbeat_seconds
+        time.sleep(1.0)
+    stdout, stderr = process.communicate()
+    return process.returncode, stdout, stderr, time.monotonic() - started
+
 def run_benchmark(
     executable: Path,
     arguments: list[str],
@@ -46,28 +90,34 @@ def run_benchmark(
     expected_images: int,
     expected_workers: int,
     expected_width: int,
+    *,
+    label: str,
+    timeout_seconds: int,
+    heartbeat_seconds: int,
 ) -> dict[str, Any]:
-    completed = subprocess.run(
+    returncode, stdout, stderr, elapsed = run_process_with_heartbeat(
         [str(executable), *arguments],
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=7200,
+        label=label,
+        timeout_seconds=timeout_seconds,
+        heartbeat_seconds=heartbeat_seconds,
     )
-    if completed.returncode != 0:
+    if returncode != 0:
         raise RuntimeError(
             f"dataset benchmark failed: {executable}\n"
-            f"{completed.stdout[-4000:]}\n{completed.stderr[-4000:]}"
+            f"case: {label}\n"
+            f"stdout tail:\n{stdout[-4000:]}\n"
+            f"stderr tail:\n{stderr[-4000:]}"
         )
-    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
     if not lines:
         raise RuntimeError(f"dataset benchmark produced no JSON: {executable}")
     try:
         report = json.loads(lines[-1])
     except json.JSONDecodeError as error:
-        raise RuntimeError(f"dataset benchmark output is not JSON: {executable}") from error
+        raise RuntimeError(
+            f"dataset benchmark output is not JSON: {executable}\n"
+            f"stdout tail:\n{stdout[-4000:]}"
+        ) from error
     if not isinstance(report, dict) or report.get("schema_version") != 1:
         raise RuntimeError(f"unsupported dataset benchmark JSON: {executable}")
     expected = {
@@ -102,8 +152,14 @@ def run_benchmark(
         raise RuntimeError("dataset benchmark has invalid min_sampled_rss_bytes")
     if not isinstance(max_sampled, int) or max_sampled < min_sampled:
         raise RuntimeError("dataset benchmark has invalid max_sampled_rss_bytes")
+    print(
+        f"[benchmark] DONE {label}: {elapsed:.1f}s wall, "
+        f"mean={float(report['ocr_ms']['mean']):.3f} ms/image, "
+        f"p95={float(report['ocr_ms']['p95']):.3f} ms/image, "
+        f"peak_rss={peak / 1048576.0:.2f} MiB",
+        flush=True,
+    )
     return report
-
 
 def summarize(compact: dict[str, Any], resident: dict[str, Any]) -> dict[str, Any]:
     if compact["lines"] != resident["lines"] or compact["output_checksum"] != resident["output_checksum"]:
@@ -237,6 +293,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Expected resident_widths field for the candidate driver (default: true)",
     )
     parser.add_argument("--candidate-label", default="Resident")
+    parser.add_argument("--case-label", default="dataset", help="Human-readable label used in progress logs")
+    parser.add_argument("--process-timeout-seconds", type=int, default=3600, help="Timeout for one benchmark executable invocation")
+    parser.add_argument("--heartbeat-seconds", type=int, default=60, help="Progress heartbeat interval while a benchmark process runs")
     parser.add_argument("--det", type=Path, required=True)
     parser.add_argument("--cls", type=Path, required=True)
     parser.add_argument("--rec", type=Path, required=True)
@@ -254,6 +313,10 @@ def main(argv: list[str] | None = None) -> int:
     candidate_resident_widths = args.candidate_resident_widths == "true"
     if args.warmup <= 0 or args.iterations <= 0 or args.paired_rounds <= 0:
         parser.error("warmup, iterations and paired-rounds must be positive")
+    if args.process_timeout_seconds <= 0:
+        parser.error("process-timeout-seconds must be positive")
+    if args.heartbeat_seconds < 10:
+        parser.error("heartbeat-seconds must be at least 10")
     manifest = load_manifest(args.benchmark_manifest)
     expected_images = len(manifest["images"])
     benchmark_args = [
@@ -264,14 +327,55 @@ def main(argv: list[str] | None = None) -> int:
     resident_runs: list[dict[str, Any]] = []
     orders: list[str] = []
     for round_index in range(args.paired_rounds):
+        round_number = round_index + 1
         compact_first = round_index % 2 == 0
-        orders.append("compact-first" if compact_first else "resident-first")
+        order = "compact-first" if compact_first else "resident-first"
+        orders.append(order)
+        print(
+            f"[benchmark] ROUND {round_number}/{args.paired_rounds}: "
+            f"{args.case_label}, order={order}",
+            flush=True,
+        )
+        compact_label = (
+            f"{args.case_label} round {round_number}/{args.paired_rounds} Compact"
+        )
+        candidate_label = (
+            f"{args.case_label} round {round_number}/{args.paired_rounds} "
+            f"{args.candidate_label}"
+        )
+
+        def run_compact() -> dict[str, Any]:
+            return run_benchmark(
+                args.compact_driver,
+                benchmark_args,
+                False,
+                expected_images,
+                args.workers,
+                args.target_width,
+                label=compact_label,
+                timeout_seconds=args.process_timeout_seconds,
+                heartbeat_seconds=args.heartbeat_seconds,
+            )
+
+        def run_candidate() -> dict[str, Any]:
+            return run_benchmark(
+                args.resident_driver,
+                benchmark_args,
+                candidate_resident_widths,
+                expected_images,
+                args.workers,
+                args.target_width,
+                label=candidate_label,
+                timeout_seconds=args.process_timeout_seconds,
+                heartbeat_seconds=args.heartbeat_seconds,
+            )
+
         if compact_first:
-            compact_runs.append(run_benchmark(args.compact_driver, benchmark_args, False, expected_images, args.workers, args.target_width))
-            resident_runs.append(run_benchmark(args.resident_driver, benchmark_args, candidate_resident_widths, expected_images, args.workers, args.target_width))
+            compact_runs.append(run_compact())
+            resident_runs.append(run_candidate())
         else:
-            resident_runs.append(run_benchmark(args.resident_driver, benchmark_args, candidate_resident_widths, expected_images, args.workers, args.target_width))
-            compact_runs.append(run_benchmark(args.compact_driver, benchmark_args, False, expected_images, args.workers, args.target_width))
+            resident_runs.append(run_candidate())
+            compact_runs.append(run_compact())
     summary = summarize_paired(compact_runs, resident_runs, orders)
     markdown = render_markdown(summary, manifest, args.candidate_label)
     if args.json_output:

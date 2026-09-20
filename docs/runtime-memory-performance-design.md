@@ -1180,6 +1180,33 @@ gh workflow run runtime-memory-benchmark.yml `
 若只想快速检查某个模型，可将 `model` 设为 `tiny`、`small` 或 `medium`，将 `workers` 设为
 `1` 或 `4`。结果会同时写入 Job Summary，并上传为保留 30 天的 artifact；未下载报告前不要把
 远端耗时或 RSS 解读成跨 runner 的绝对基线。
+## 18.3 Quick/full matrix profile
+
+长基准现在拆成 `prepare` 和 `model × workers` 两阶段。Prepare runner 只构建一次
+Compact/Streaming、生成一次数据集并上传公共 package；随后 Tiny/Small/Medium × W1/W4
+在最多 6 个 Windows x64 runner 上并行执行。每个 matrix case 内的 Compact 与 Streaming
+仍在同一 runner 上交替执行，避免跨主机 CPU 差异污染 AB/BA 结果。
+
+- `quick`：30 张图、1 个 paired round，适合开发中手动检查。
+- `full`：100 张图、3 个 paired round，适合发布前或性能确认。
+- 周期任务强制使用 `full`。
+- matrix runner 下载 package 后重新生成 `images-runner.txt`；不能复用 Prepare runner
+  生成的绝对路径列表。
+- 每个子进程默认 3600 秒超时，每 60 秒输出 heartbeat；报告 schema、warm-up=1 和
+  REC 960 口径保持不变。
+
+手动触发示例：
+
+```powershell
+gh workflow run runtime-memory-benchmark.yml `
+  --ref main `
+  -f profile=quick `
+  -f model=tiny `
+  -f workers=1
+```
+
+正式确认使用 `-f profile=full -f model=all -f workers=both`。单个 matrix job 的报告会
+单独上传，便于先查看 Medium/W1 等慢 case，不必等待全部 case 串行结束。
 ## 19. 参考链接
 
 - [SimdPaddleOCR README（当前主线）](https://github.com/sdcb/SimdPaddleOCR)
