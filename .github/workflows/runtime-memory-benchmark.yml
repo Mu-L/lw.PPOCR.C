@@ -157,6 +157,8 @@ jobs:
               python tools/compare_ocr_dataset_runtime.py `
                 --compact-driver $compact `
                 --resident-driver $streaming `
+                --candidate-resident-widths false `
+                --candidate-label "Streaming Crop" `
                 --det "$assetRoot/det.lwm" `
                 --cls "$assetRoot/cls.lwm" `
                 --rec "$assetRoot/rec.lwm" `

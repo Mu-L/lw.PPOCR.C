@@ -194,7 +194,9 @@ def summarize_paired(
     }
 
 
-def render_markdown(summary: dict[str, Any], manifest: dict[str, Any]) -> str:
+def render_markdown(
+    summary: dict[str, Any], manifest: dict[str, Any], candidate_label: str = "Resident"
+) -> str:
     compact = summary["compact"]
     resident = summary["resident"]
     comparison = summary["comparison"]
@@ -202,7 +204,7 @@ def render_markdown(summary: dict[str, Any], manifest: dict[str, Any]) -> str:
     paired = summary.get("paired", {})
     return "\n".join(
         [
-            "# Compact vs resident OCR dataset runtime",
+            f"# Compact vs {candidate_label} OCR dataset runtime",
             "",
             f"Manifest SHA-256: `{manifest['source_manifest_sha256']}`",
             f"Images: `{contract['images']}`; workers: `{contract['workers']}`; REC width: `{contract['rec_target_width']}`",
@@ -210,7 +212,7 @@ def render_markdown(summary: dict[str, Any], manifest: dict[str, Any]) -> str:
             "| Profile | OCR mean (ms/image) | OCR P95 (ms/image) | Peak RSS (MiB) | Max sampled RSS (MiB) |",
             "|---|---:|---:|---:|---:|",
             f"| Compact | {compact['ocr_mean_ms']:.3f} | {compact['ocr_p95_ms']:.3f} | {compact['peak_rss_mib']:.3f} | {compact['max_sampled_rss_mib']:.3f} |",
-            f"| Resident | {resident['ocr_mean_ms']:.3f} | {resident['ocr_p95_ms']:.3f} | {resident['peak_rss_mib']:.3f} | {resident['max_sampled_rss_mib']:.3f} |",
+            f"| {candidate_label} | {resident['ocr_mean_ms']:.3f} | {resident['ocr_p95_ms']:.3f} | {resident['peak_rss_mib']:.3f} | {resident['max_sampled_rss_mib']:.3f} |",
             "",
             f"Mean speedup: **{comparison['mean_speedup']:.3f}x**",
             f"Mean latency change: **{comparison['mean_latency_change_percent']:+.2f}%**",
@@ -228,6 +230,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compact-driver", type=Path, required=True)
     parser.add_argument("--resident-driver", type=Path, required=True)
+    parser.add_argument(
+        "--candidate-resident-widths",
+        choices=("true", "false"),
+        default="true",
+        help="Expected resident_widths field for the candidate driver (default: true)",
+    )
+    parser.add_argument("--candidate-label", default="Resident")
     parser.add_argument("--det", type=Path, required=True)
     parser.add_argument("--cls", type=Path, required=True)
     parser.add_argument("--rec", type=Path, required=True)
@@ -242,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json-output", type=Path)
     parser.add_argument("--markdown-output", type=Path)
     args = parser.parse_args(argv)
+    candidate_resident_widths = args.candidate_resident_widths == "true"
     if args.warmup <= 0 or args.iterations <= 0 or args.paired_rounds <= 0:
         parser.error("warmup, iterations and paired-rounds must be positive")
     manifest = load_manifest(args.benchmark_manifest)
@@ -258,12 +268,12 @@ def main(argv: list[str] | None = None) -> int:
         orders.append("compact-first" if compact_first else "resident-first")
         if compact_first:
             compact_runs.append(run_benchmark(args.compact_driver, benchmark_args, False, expected_images, args.workers, args.target_width))
-            resident_runs.append(run_benchmark(args.resident_driver, benchmark_args, True, expected_images, args.workers, args.target_width))
+            resident_runs.append(run_benchmark(args.resident_driver, benchmark_args, candidate_resident_widths, expected_images, args.workers, args.target_width))
         else:
-            resident_runs.append(run_benchmark(args.resident_driver, benchmark_args, True, expected_images, args.workers, args.target_width))
+            resident_runs.append(run_benchmark(args.resident_driver, benchmark_args, candidate_resident_widths, expected_images, args.workers, args.target_width))
             compact_runs.append(run_benchmark(args.compact_driver, benchmark_args, False, expected_images, args.workers, args.target_width))
     summary = summarize_paired(compact_runs, resident_runs, orders)
-    markdown = render_markdown(summary, manifest)
+    markdown = render_markdown(summary, manifest, args.candidate_label)
     if args.json_output:
         args.json_output.parent.mkdir(parents=True, exist_ok=True)
         args.json_output.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
