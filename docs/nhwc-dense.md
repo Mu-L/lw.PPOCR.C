@@ -43,3 +43,8 @@ ctest --test-dir build-nhwc-a2 -C Release -R nhwc_dense_benchmark --output-on-fa
 The driver checks packed indices, interior and border tiles, stride 1/2,
 batches, and `dense_kc` values 128/256/512/1024/auto against a scalar
 reference with a `1e-4` maximum absolute error gate.
+Each run also emits `perf_case` records for the representative `medium-rec-3x3-h6-w240`
+shape and the smaller border fixtures. `scalar_ms` is the deliberately simple
+reference loop, while `dense_ms` is the experimental kernel; these numbers are
+local diagnostics, not a production OCR speed claim. A promotion decision still
+requires an end-to-end REC960 A/B on a fixed runner.

@@ -8,6 +8,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
 typedef struct dense_case {
     const char* name;
     uint32_t input_channels;
@@ -86,6 +93,32 @@ static void reference(const float* input, const float* weights, const float* bia
     }
 }
 
+static double monotonic_seconds(void) {
+#if defined(_WIN32)
+    LARGE_INTEGER counter;
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart / (double)frequency.QuadPart;
+#else
+    struct timespec value;
+    clock_gettime(CLOCK_MONOTONIC, &value);
+    return (double)value.tv_sec + (double)value.tv_nsec * 1.0e-9;
+#endif
+}
+
+static double median(double* values, size_t count) {
+    for (size_t i = 0u; i < count; ++i) {
+        for (size_t j = i + 1u; j < count; ++j) {
+            if (values[j] < values[i]) {
+                double temporary = values[i];
+                values[i] = values[j];
+                values[j] = temporary;
+            }
+        }
+    }
+    return values[count / 2u];
+}
 static float max_abs(const float* left, const float* right, uint64_t count) {
     float result = 0.0f;
     for (uint64_t i = 0u; i < count; ++i) {
@@ -183,6 +216,42 @@ int main(void) {
                    test->name, dense_kc_values[kc_index], difference, scratch_bytes);
             free(scratch);
             if (difference > 1.0e-4f) return 1;
+        }
+        {
+            lw_nhwc_dense_desc desc = {batch, test->input_channels, test->input_height,
+                test->input_width, test->output_channels, output_height, output_width,
+                test->kernel_h, test->kernel_w, test->stride_h, test->stride_w,
+                test->pad_top, test->pad_left, 512u};
+            lw_nhwc_epilogue epilogue = {bias, NULL, LW_NHWC_ACT_RELU, 0u, 0.0f, 0.0f};
+            uint64_t scratch_bytes = 0u;
+            double scalar_samples[5];
+            double dense_samples[5];
+            void* scratch;
+            if (!lw_nhwc_dense_scratch_bytes(&desc, &scratch_bytes)) return 1;
+            scratch = malloc((size_t)scratch_bytes);
+            if (scratch == NULL) return 1;
+            reference(input, weights, bias, expected, test, batch);
+            (void)lw_avx2_fma_nhwc_dense_f32(input, packed, &epilogue, actual, &desc,
+                                             scratch, scratch_bytes);
+            for (size_t round = 0u; round < 5u; ++round) {
+                double start = monotonic_seconds();
+                reference(input, weights, bias, expected, test, batch);
+                scalar_samples[round] = (monotonic_seconds() - start) * 1000.0;
+                start = monotonic_seconds();
+                if (lw_avx2_fma_nhwc_dense_f32(input, packed, &epilogue, actual, &desc,
+                                               scratch, scratch_bytes) != LW_STATUS_OK) {
+                    free(scratch);
+                    return 1;
+                }
+                dense_samples[round] = (monotonic_seconds() - start) * 1000.0;
+            }
+            {
+                double scalar_ms = median(scalar_samples, 5u);
+                double dense_ms = median(dense_samples, 5u);
+                printf("{\"perf_case\":\"%s\",\"kc\":512,\"scalar_ms\":%.6f,\"dense_ms\":%.6f,\"speedup\":%.6f,\"scratch_bytes\":%" PRIu64 "}\n",
+                       test->name, scalar_ms, dense_ms, scalar_ms / dense_ms, scratch_bytes);
+            }
+            free(scratch);
         }
         free(input);
         free(weights);

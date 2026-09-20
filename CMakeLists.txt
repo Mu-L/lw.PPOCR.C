@@ -2119,7 +2119,9 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
                 -Wall -Wextra -Wpedantic -Werror)
         endif()
         add_test(NAME nhwc_dense_benchmark
-            COMMAND "$<TARGET_FILE:nhwc-dense-benchmark-driver>")
+            COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_nhwc_dense_benchmark.py"
+                    --driver "$<TARGET_FILE:nhwc-dense-benchmark-driver>")
         set_tests_properties(nhwc_dense_benchmark PROPERTIES TIMEOUT 120)
     elseif(LW_EXPERIMENTAL_AVX2_FAST_PATH)
         message(WARNING
