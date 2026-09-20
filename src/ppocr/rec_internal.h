@@ -22,6 +22,11 @@ uint32_t lw_recognizer_target_width_for_image(const lw_recognizer* recognizer,
                                               uint32_t source_width, uint32_t source_height);
 uint32_t lw_recognizer_current_target_width(const lw_recognizer* recognizer);
 
+lw_status lw_rec_preprocess_bgr_u8_nhwc(const uint8_t* source, uint64_t source_byte_count,
+                                        uint32_t source_width, uint32_t source_height,
+                                        uint32_t source_stride, uint32_t target_width, float* output,
+                                        uint64_t output_element_count, uint32_t* resized_width);
+
 lw_status lw_rec_preprocess_bgr_u8(const uint8_t* source, uint64_t source_byte_count,
                                    uint32_t source_width, uint32_t source_height,
                                    uint32_t source_stride, uint32_t target_width, float* output,

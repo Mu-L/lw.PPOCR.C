@@ -13,6 +13,7 @@
 #include <stdint.h>
 
 #define LW_WORKSPACE_ALIGNMENT 64u
+#define LW_SESSION_PLAN_CTC_GREEDY UINT32_C(1)
 
 typedef enum lw_prepared_constant_kind {
     LW_PREPARED_CONSTANT_NONE = 0,
@@ -103,6 +104,14 @@ typedef struct lw_runtime_tensor {
     int workspace_live;
 } lw_runtime_tensor;
 
+/* Semantic match shared by the physical plan and the executor.  Keeping the
+ * graph pattern in one helper prevents the planner from dropping a temporary
+ * that the runtime would still materialize (or vice versa). */
+typedef struct lw_fused_gelu_match {
+    uint32_t inputs[5][2];
+    uint32_t outputs[5];
+} lw_fused_gelu_match;
+
 struct lw_session {
     const lw_model* model;
     lw_cpu_capabilities cpu;
@@ -115,6 +124,13 @@ struct lw_session {
     lw_shared_prepared_constants* shared_prepared_constants;
     lw_bound_node* execution_nodes;
     uint32_t execution_node_count;
+    uint8_t* fused_gelu_start_nodes;
+    uint8_t* fused_gelu_skip_tensors;
+    uint8_t ctc_greedy_plan_enabled;
+    uint32_t ctc_greedy_skip_tensor;
+    float* ctc_logits_scratch;
+    uint32_t ctc_logits_scratch_rows;
+    uint64_t ctc_logits_scratch_elements;
     lw_thread_pool* thread_pool;
     uint32_t intra_op_thread_count;
     lw_session_info info;
@@ -126,7 +142,24 @@ void lw_session_set_intra_op_thread_count(lw_session* session, uint32_t thread_c
 lw_status lw_session_share_prepared_constants(lw_session* destination,
                                                const lw_session* source,
                                                lw_error* error);
+int lw_session_prepared_constants_compatible(const lw_session* destination,
+                                             const lw_session* source);
 lw_status lw_prepare_execution_nodes(lw_session* session, lw_error* error);
 void lw_free_execution_nodes(lw_session* session);
+lw_status lw_prepare_execution_plan(lw_session* session, lw_error* error);
+void lw_free_execution_plan(lw_session* session);
+lw_status lw_session_create_ctc_greedy(const lw_model* model, const lw_tensor_desc* inputs,
+                                        uint32_t input_count, const lw_session_options* options,
+                                        lw_session** out_session, lw_error* error);
+lw_status lw_session_create_with_prepared_source(
+    const lw_model* model, const lw_tensor_desc* inputs, uint32_t input_count,
+    const lw_session_options* options, uint32_t plan_flags, const lw_session* prepared_source,
+    lw_session** out_session, lw_error* error);
+int lw_match_fused_gelu(const lw_session* session, uint32_t node_index,
+                        lw_fused_gelu_match* match);
+int lw_execution_plan_is_fused_gelu_start(const lw_session* session, uint32_t node_index);
+int lw_execution_plan_is_fused_gelu_skip(const lw_session* session, uint32_t tensor_index);
+int lw_execution_plan_is_ctc_greedy_skip(const lw_session* session, uint32_t tensor_index);
+int lw_execution_plan_is_skipped_tensor(const lw_session* session, uint32_t tensor_index);
 
 #endif

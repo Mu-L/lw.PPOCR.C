@@ -213,7 +213,7 @@ jobs:
             "- slowest shapes: $($summary.slowest_cases)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             "- fastest shapes: $($summary.fastest_cases)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           }
-      - name: Build experimental FMA OCR driver
+      - name: Build experimental Conv1x1-only FMA OCR driver
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -230,7 +230,8 @@ jobs:
             '-DBUILD_TESTING=ON',
             '-DLW_BUILD_HTTP_DEMO=OFF',
             '-DLW_BUILD_CSHARP_DEMOS=OFF',
-            '-DLW_EXPERIMENTAL_AVX2_FMA_DISPATCH=ON',
+            '-DLW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH=ON',
+            '-DLW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH=OFF',
             "-DLW_PRECONVERTED_ASSETS_DIR=$env:GITHUB_WORKSPACE/.ci/preconverted"
           )
           cmake @configureArgs
@@ -264,7 +265,7 @@ jobs:
             "- AVX2/FMA: $([double]$comparison.baseline_over_candidate_packed)x" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             "- checksum: $($comparison.checksum)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           }
-      - name: Compare default and experimental FMA OCR
+      - name: Compare default and experimental Conv1x1-only FMA OCR
         shell: pwsh
         env:
           FMA_WARMUP: ${{ inputs.warmup }}
@@ -305,7 +306,7 @@ jobs:
             Get-Content -LiteralPath $markdownOutput |
               Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           }
-      - name: Check FMA quality on generated corpus
+      - name: Check Conv1x1-only FMA quality on generated corpus
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'

@@ -7,6 +7,7 @@ import argparse
 import json
 import pathlib
 import subprocess
+from statistics import median
 from typing import Any
 
 SCHEMA_VERSION = 1
@@ -93,13 +94,66 @@ def summarize(compact: dict[str, Any], performance: dict[str, Any]) -> dict[str,
     }
 
 
+def summarize_paired(
+    compact_runs: list[dict[str, Any]], performance_runs: list[dict[str, Any]],
+    orders: list[str],
+) -> dict[str, Any]:
+    """Summarize fresh-process AB/BA runs without pooling runner state."""
+    if not compact_runs or len(compact_runs) != len(performance_runs) or \
+            len(orders) != len(compact_runs):
+        raise RuntimeError("paired runs must contain equal non-zero sample counts")
+    paired_summaries = [
+        summarize(compact, performance)
+        for compact, performance in zip(compact_runs, performance_runs)
+    ]
+    base = summarize(
+        {
+            "ocr_ms": {
+                "mean": median([item["compact"]["ocr_mean_ms"] for item in paired_summaries]),
+                "p95": median([item["compact"]["ocr_p95_ms"] for item in paired_summaries]),
+            },
+            "peak_rss_bytes": int(
+                median([item["compact"]["peak_rss_mib"] for item in paired_summaries])
+                * (1024.0 * 1024.0)
+            ),
+            "output_checksum": paired_summaries[0]["contract"]["compact_checksum"],
+            "lines": paired_summaries[0]["contract"]["compact_lines"],
+        },
+        {
+            "ocr_ms": {
+                "mean": median([item["performance"]["ocr_mean_ms"] for item in paired_summaries]),
+                "p95": median([item["performance"]["ocr_p95_ms"] for item in paired_summaries]),
+            },
+            "peak_rss_bytes": int(
+                median([item["performance"]["peak_rss_mib"] for item in paired_summaries])
+                * (1024.0 * 1024.0)
+            ),
+            "output_checksum": paired_summaries[0]["contract"]["performance_checksum"],
+            "lines": paired_summaries[0]["contract"]["performance_lines"],
+        },
+    )
+    base["paired"] = {
+        "rounds": len(paired_summaries),
+        "orders": orders,
+        "samples": [
+            {
+                "order": order,
+                "compact": item["compact"],
+                "performance": item["performance"],
+                "comparison": item["comparison"],
+            }
+            for order, item in zip(orders, paired_summaries)
+        ],
+    }
+    return base
+
+
 def render_markdown(summary: dict[str, Any]) -> str:
     compact = summary["compact"]
     performance = summary["performance"]
     comparison = summary["comparison"]
     contract = summary["contract"]
-    return "\n".join(
-        [
+    lines = [
             "# Compact vs Performance OCR runtime",
             "",
             "| Profile | OCR mean (ms) | OCR P95 (ms) | Peak RSS (MiB) |",
@@ -114,9 +168,15 @@ def render_markdown(summary: dict[str, Any]) -> str:
             "",
             f"Checksum: `{contract['compact_checksum']}` vs `{contract['performance_checksum']}`",
             f"Lines: `{contract['compact_lines']}` vs `{contract['performance_lines']}`",
-            "",
         ]
-    )
+    paired = summary.get("paired")
+    if isinstance(paired, dict):
+        lines.extend([
+            "",
+            f"Paired rounds: `{paired['rounds']}` (fresh-process AB/BA)",
+        ])
+    lines.append("")
+    return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -133,6 +193,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--target-width", type=int, default=960)
     parser.add_argument("--det-threads", type=int, default=0)
+    parser.add_argument(
+        "--paired-rounds", type=int, default=1,
+        help="Run fresh-process AB/BA rounds and summarize medians (default: 1)",
+    )
     parser.add_argument("--json-output", type=pathlib.Path)
     parser.add_argument("--markdown-output", type=pathlib.Path)
     args = parser.parse_args(argv)
@@ -142,10 +206,27 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if args.det_threads:
         benchmark_args.append(str(args.det_threads))
-    summary = summarize(
-        run_benchmark(args.compact_driver, benchmark_args),
-        run_benchmark(args.performance_driver, benchmark_args),
-    )
+    if args.paired_rounds < 1:
+        parser.error("--paired-rounds must be positive")
+    if args.paired_rounds == 1:
+        summary = summarize(
+            run_benchmark(args.compact_driver, benchmark_args),
+            run_benchmark(args.performance_driver, benchmark_args),
+        )
+    else:
+        compact_runs = []
+        performance_runs = []
+        orders = []
+        for round_index in range(args.paired_rounds):
+            compact_first = round_index % 2 == 0
+            orders.append("compact-first" if compact_first else "performance-first")
+            if compact_first:
+                compact_runs.append(run_benchmark(args.compact_driver, benchmark_args))
+                performance_runs.append(run_benchmark(args.performance_driver, benchmark_args))
+            else:
+                performance_runs.append(run_benchmark(args.performance_driver, benchmark_args))
+                compact_runs.append(run_benchmark(args.compact_driver, benchmark_args))
+        summary = summarize_paired(compact_runs, performance_runs, orders)
     markdown = render_markdown(summary)
     if args.json_output:
         args.json_output.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

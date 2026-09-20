@@ -268,7 +268,7 @@ static const float* constant_f32_data(const lw_session* session, uint32_t tensor
     return (const float*)(const void*)(model->bytes + (size_t)data_offset);
 }
 
-static lw_status prepare_constant_weights(lw_session* session, lw_error* error) {
+static lw_status prepare_constant_layout(lw_session* session, lw_error* error) {
     const lw_model* model = session->model;
     const lw_simd_level simd_level = session->cpu.simd;
     uint64_t total_bytes = 0u;
@@ -332,14 +332,24 @@ static lw_status prepare_constant_weights(lw_session* session, lw_error* error) 
         lw_set_error(error, LW_STATUS_OUT_OF_BOUNDS, "packed weight allocation overflows");
         return LW_STATUS_OUT_OF_BOUNDS;
     }
-    session->packed_weights = (uint8_t*)workspace_allocate((size_t)total_bytes);
+    session->packed_weight_bytes = (size_t)total_bytes;
+    session->shared_prepared_constants->packed_weight_bytes = session->packed_weight_bytes;
+    return LW_STATUS_OK;
+}
+
+static lw_status pack_prepared_constants(lw_session* session, lw_error* error) {
+    const lw_model* model = session->model;
+    const lw_simd_level simd_level = session->cpu.simd;
+    uint32_t node_index;
+    if (session->packed_weight_bytes == 0u) {
+        return LW_STATUS_OK;
+    }
+    session->packed_weights = (uint8_t*)workspace_allocate(session->packed_weight_bytes);
     if (session->packed_weights == NULL) {
         lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "unable to allocate packed weights");
         return LW_STATUS_OUT_OF_MEMORY;
     }
-    session->packed_weight_bytes = (size_t)total_bytes;
     session->shared_prepared_constants->packed_weights = session->packed_weights;
-    session->shared_prepared_constants->packed_weight_bytes = session->packed_weight_bytes;
     for (node_index = 0u; node_index < model->info.node_count; ++node_index) {
         lw_prepared_constant* prepared = &session->prepared_constants[node_index];
         uint32_t weight_tensor_index;
@@ -386,6 +396,33 @@ static lw_status prepare_constant_weights(lw_session* session, lw_error* error) 
         }
     }
     return LW_STATUS_OK;
+}
+
+static lw_status prepare_constant_weights(lw_session* session, lw_error* error) {
+    lw_status status = prepare_constant_layout(session, error);
+    if (status != LW_STATUS_OK) {
+        return status;
+    }
+    return pack_prepared_constants(session, error);
+}
+
+static lw_status prepare_or_share_constant_weights(lw_session* session,
+                                                   const lw_session* source,
+                                                   lw_error* error) {
+    lw_status status;
+    if (source == NULL) {
+        return prepare_constant_weights(session, error);
+    }
+    status = prepare_constant_layout(session, error);
+    if (status != LW_STATUS_OK) {
+        return status;
+    }
+    if (lw_session_prepared_constants_compatible(session, source)) {
+        /* The candidate has only a descriptor table at this point. Replace it
+         * with the source's immutable arena before any packed allocation. */
+        return lw_session_share_prepared_constants(session, source, error);
+    }
+    return pack_prepared_constants(session, error);
 }
 
 static uint32_t runtime_dtype_size(uint32_t dtype) {
@@ -461,9 +498,13 @@ void lw_session_info_init(lw_session_info* info) {
     info->struct_size = (uint32_t)sizeof(*info);
 }
 
-lw_status lw_session_create(const lw_model* model, const lw_tensor_desc* inputs,
-                            uint32_t input_count, const lw_session_options* options,
-                            lw_session** out_session, lw_error* error) {
+static lw_status lw_session_create_with_plan_flags(const lw_model* model,
+                                                   const lw_tensor_desc* inputs,
+                                                   uint32_t input_count,
+                                                   const lw_session_options* options,
+                                                   uint32_t plan_flags,
+                                                   const lw_session* prepared_source,
+                                                   lw_session** out_session, lw_error* error) {
     uint64_t max_workspace_size = LW_DEFAULT_MAX_WORKSPACE_SIZE;
     uint64_t max_tensor_size = LW_DEFAULT_MAX_TENSOR_SIZE;
     lw_session* session;
@@ -498,6 +539,9 @@ lw_status lw_session_create(const lw_model* model, const lw_tensor_desc* inputs,
     session->intra_op_thread_count = 1u;
     session->model = model;
     session->cpu = lw_get_cpu_capabilities();
+    session->ctc_greedy_plan_enabled =
+        (plan_flags & LW_SESSION_PLAN_CTC_GREEDY) != 0u ? 1u : 0u;
+    session->ctc_greedy_skip_tensor = UINT32_MAX;
     session->tensors =
         (lw_runtime_tensor*)calloc(model->info.tensor_count, sizeof(*session->tensors));
     if (session->tensors == NULL) {
@@ -569,6 +613,11 @@ lw_status lw_session_create(const lw_model* model, const lw_tensor_desc* inputs,
         lw_session_free(session);
         return status;
     }
+    status = lw_prepare_execution_plan(session, error);
+    if (status != LW_STATUS_OK) {
+        lw_session_free(session);
+        return status;
+    }
     status = lw_plan_workspace(session, max_workspace_size, error);
     if (status != LW_STATUS_OK) {
         lw_session_free(session);
@@ -583,7 +632,7 @@ lw_status lw_session_create(const lw_model* model, const lw_tensor_desc* inputs,
             return LW_STATUS_OUT_OF_MEMORY;
         }
     }
-    status = prepare_constant_weights(session, error);
+    status = prepare_or_share_constant_weights(session, prepared_source, error);
     if (status != LW_STATUS_OK) {
         lw_session_free(session);
         return status;
@@ -602,6 +651,29 @@ lw_status lw_session_create(const lw_model* model, const lw_tensor_desc* inputs,
     *out_session = session;
     lw_set_error(error, LW_STATUS_OK, "");
     return LW_STATUS_OK;
+}
+
+lw_status lw_session_create(const lw_model* model, const lw_tensor_desc* inputs,
+                            uint32_t input_count, const lw_session_options* options,
+                            lw_session** out_session, lw_error* error) {
+    return lw_session_create_with_plan_flags(model, inputs, input_count, options, 0u, NULL,
+                                             out_session, error);
+}
+
+lw_status lw_session_create_ctc_greedy(const lw_model* model, const lw_tensor_desc* inputs,
+                                        uint32_t input_count, const lw_session_options* options,
+                                        lw_session** out_session, lw_error* error) {
+    return lw_session_create_with_plan_flags(model, inputs, input_count, options,
+                                             LW_SESSION_PLAN_CTC_GREEDY, NULL, out_session,
+                                             error);
+}
+
+lw_status lw_session_create_with_prepared_source(
+    const lw_model* model, const lw_tensor_desc* inputs, uint32_t input_count,
+    const lw_session_options* options, uint32_t plan_flags, const lw_session* prepared_source,
+    lw_session** out_session, lw_error* error) {
+    return lw_session_create_with_plan_flags(model, inputs, input_count, options, plan_flags,
+                                             prepared_source, out_session, error);
 }
 
 void lw_session_set_intra_op_thread_count(lw_session* session, uint32_t thread_count) {
@@ -629,6 +701,7 @@ void lw_session_free(lw_session* session) {
     lw_thread_pool_free(session->thread_pool);
     session->thread_pool = NULL;
     lw_free_execution_nodes(session);
+    lw_free_execution_plan(session);
     workspace_release(session->workspace);
     session->workspace = NULL;
     release_shared_prepared_constants(session->shared_prepared_constants);
@@ -672,6 +745,31 @@ lw_status lw_session_share_prepared_constants(lw_session* destination,
     }
     lw_set_error(error, LW_STATUS_OK, "");
     return LW_STATUS_OK;
+}
+
+int lw_session_prepared_constants_compatible(const lw_session* destination,
+                                             const lw_session* source) {
+    uint32_t node_index;
+    if (destination == NULL || source == NULL || destination == source ||
+        destination->model != source->model || destination->cpu.simd != source->cpu.simd ||
+        destination->model->info.node_count != source->model->info.node_count ||
+        destination->shared_prepared_constants == NULL ||
+        source->shared_prepared_constants == NULL ||
+        destination->packed_weight_bytes != source->packed_weight_bytes) {
+        return 0;
+    }
+    if (destination->prepared_constants == NULL || source->prepared_constants == NULL) {
+        return 0;
+    }
+    for (node_index = 0u; node_index < destination->model->info.node_count; ++node_index) {
+        const lw_prepared_constant* left = &destination->prepared_constants[node_index];
+        const lw_prepared_constant* right = &source->prepared_constants[node_index];
+        if (left->kind != right->kind || left->packed_weight_offset != right->packed_weight_offset ||
+            left->packed_weight_count != right->packed_weight_count) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 lw_status lw_session_get_info(const lw_session* session, lw_session_info* info) {

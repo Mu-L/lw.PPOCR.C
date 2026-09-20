@@ -103,16 +103,20 @@ python tools/compare_rec_runtime_profiles.py `
   --rec build/models/rec.lwm --dictionary models/ppocrv6-tiny/ppocr_keys.txt `
   --image build/models/sample.ppm --warmup 1 --iterations 5 `
   --workers 4 --target-width 960 --det-threads 4 `
+  --paired-rounds 5 `
   --json-output build/compact-vs-performance.json `
   --markdown-output build/compact-vs-performance.md
 ```
 
-The local Tiny/AVX2 4-worker smoke comparison measured 122.460 ms versus
-112.691 ms (1.087x speedup, -7.98% mean latency, -8.43% P95) and an additional
-45.949 MiB peak RSS. Both runs returned 16 lines with checksum
-`0ebf8b448ab7df47`. The numbers are a reproducibility check, not a cross-machine
-claim; the resident option remains opt-in until the 100-image paired corpus
-clears the same contract and memory gates.
+The local Tiny/AVX2 4-worker smoke comparison (single compact/performance pair)
+measured 122.460 ms versus 112.691 ms (1.087x speedup, -7.98% mean latency,
+-8.43% P95) and an additional 45.949 MiB peak RSS. Both runs returned 16 lines
+with checksum `0ebf8b448ab7df47`. For a stricter report, pass
+`--paired-rounds 5`; the tool alternates fresh-process compact-first and
+performance-first rounds and preserves per-round samples in JSON. The numbers
+are reproducibility checks, not cross-machine claims; the resident option
+remains opt-in until the 100-image paired corpus clears the same contract and
+memory gates.
 
 When `LW_REC_RESIDENT_WIDTHS=ON`, the existing `full_ocr_operator_profile` CTest
 is additionally run with `--expect-resident`; it requires zero REC session-cache misses

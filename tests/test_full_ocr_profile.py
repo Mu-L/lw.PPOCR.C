@@ -167,6 +167,14 @@ class FullOcrProfileTest(unittest.TestCase):
                     sum(item["percentage"] for item in operators), 100.0, places=3
                 )
 
+                layout = report["layout"]
+                self.assertGreater(layout["candidate_nodes"], 0)
+                self.assertEqual(layout["selected_nodes"], 0)
+                self.assertEqual(layout["fallback_nodes"], layout["candidate_nodes"])
+                self.assertGreaterEqual(layout["transform_nanoseconds"], 0)
+                self.assertGreaterEqual(layout["transform_invocations"], 0)
+                self.assertGreaterEqual(layout["transform_bytes"], 0)
+
                 implementation_paths = report["implementation_paths"]
                 for component_name in ("detector", "classifier", "recognizer"):
                     binding = implementation_paths[component_name]["prepared_binding"]
@@ -232,6 +240,7 @@ class FullOcrProfileTest(unittest.TestCase):
                     sum(item["invocations"] for item in rec_nodes),
                     sum(item["rec_invocations"] for item in operators),
                 )
+                convolution_shape_count = 0
                 for item in rec_nodes:
                     self.assertIn(
                         item["operation"],
@@ -246,6 +255,38 @@ class FullOcrProfileTest(unittest.TestCase):
                         [width["max_width"] for width in item["by_width"]],
                         [192, 256, 320, 480, 640, 800, 960, None],
                     )
+                    if item["operation"] in ("Conv", "ConvTranspose"):
+                        convolution_shape_count += 1
+                        for field in ("input", "weights", "output"):
+                            self.assertIn(field, item)
+                            self.assertEqual(len(item[field]), 4)
+                            self.assertTrue(
+                                all(dimension > 0 for dimension in item[field])
+                            )
+                        self.assertIn("group", item)
+                        self.assertGreater(item["group"], 0)
+                        for field, length in (
+                            ("kernel", 2),
+                            ("strides", 2),
+                            ("dilations", 2),
+                            ("pads", 4),
+                        ):
+                            self.assertIn(field, item)
+                            self.assertEqual(len(item[field]), length)
+                            self.assertTrue(all(value >= 0 for value in item[field]))
+                    else:
+                        for field in (
+                            "input",
+                            "weights",
+                            "output",
+                            "group",
+                            "kernel",
+                            "strides",
+                            "dilations",
+                            "pads",
+                        ):
+                            self.assertNotIn(field, item)
+                self.assertGreater(convolution_shape_count, 0)
                 rec_width = report["rec_width"]
                 self.assertEqual(rec_width["samples"], report["lines"])
                 self.assertGreater(rec_width["resized_width_sum"], 0)

@@ -187,6 +187,12 @@ int main(int argc, char** argv) {
     uint64_t graph_work_nanoseconds = 0u;
     uint64_t conv_nanoseconds = 0u;
     uint64_t conv_invocations = 0u;
+    uint64_t layout_transform_nanoseconds = 0u;
+    uint64_t layout_transform_invocations = 0u;
+    uint64_t layout_transform_bytes = 0u;
+    uint64_t layout_candidate_nodes = 0u;
+    uint64_t layout_selected_nodes = 0u;
+    uint64_t layout_fallback_nodes = 0u;
     uint64_t det_serial_conv_invocations = 0u;
     uint64_t det_parallel_conv_invocations = 0u;
     uint64_t det_serial_conv_transpose_invocations = 0u;
@@ -359,6 +365,12 @@ int main(int argc, char** argv) {
             : 1.0 - (double)profile.rec_resized_width_sum / (double)profile.rec_target_width_sum;
 
     det_serial_conv_invocations = profile.detector.execution.conv_thread_histogram[1];
+    layout_transform_nanoseconds = add_saturated(profile.detector.execution.layout_transform_nanoseconds, add_saturated(profile.classifier.execution.layout_transform_nanoseconds, profile.recognizer.execution.layout_transform_nanoseconds));
+    layout_transform_invocations = add_saturated(profile.detector.execution.layout_transform_invocations, add_saturated(profile.classifier.execution.layout_transform_invocations, profile.recognizer.execution.layout_transform_invocations));
+    layout_transform_bytes = add_saturated(profile.detector.execution.layout_transform_bytes, add_saturated(profile.classifier.execution.layout_transform_bytes, profile.recognizer.execution.layout_transform_bytes));
+    layout_candidate_nodes = add_saturated(profile.detector.execution.layout_candidate_nodes, add_saturated(profile.classifier.execution.layout_candidate_nodes, profile.recognizer.execution.layout_candidate_nodes));
+    layout_selected_nodes = add_saturated(profile.detector.execution.layout_selected_nodes, add_saturated(profile.classifier.execution.layout_selected_nodes, profile.recognizer.execution.layout_selected_nodes));
+    layout_fallback_nodes = add_saturated(profile.detector.execution.layout_fallback_nodes, add_saturated(profile.classifier.execution.layout_fallback_nodes, profile.recognizer.execution.layout_fallback_nodes));
     for (index = 2u; index < LW_EXECUTION_PROFILE_THREAD_HISTOGRAM_CAPACITY; ++index) {
         det_parallel_conv_invocations += profile.detector.execution.conv_thread_histogram[index];
     }
@@ -439,7 +451,13 @@ int main(int argc, char** argv) {
     printf(",\"recognizer\":");
     print_execution_path_counters(&profile.recognizer.execution);
     printf("},");
-    printf("\"prepared_execution\":{\"prepared_nodes\":%llu,\"generic_nodes\":%llu,\"conv1x1\":%llu,\"conv3x3\":%llu},",
+    printf("\"layout\":{\"transform_nanoseconds\":%llu,\"transform_invocations\":%llu,\"transform_bytes\":%llu,\"candidate_nodes\":%llu,\"selected_nodes\":%llu,\"fallback_nodes\":%llu},\"prepared_execution\":{\"prepared_nodes\":%llu,\"generic_nodes\":%llu,\"conv1x1\":%llu,\"conv3x3\":%llu},",
+           (unsigned long long)layout_transform_nanoseconds,
+           (unsigned long long)layout_transform_invocations,
+           (unsigned long long)layout_transform_bytes,
+           (unsigned long long)layout_candidate_nodes,
+           (unsigned long long)layout_selected_nodes,
+           (unsigned long long)layout_fallback_nodes,
            (unsigned long long)(profile.detector.execution.prepared_node_invocations + profile.classifier.execution.prepared_node_invocations + profile.recognizer.execution.prepared_node_invocations),
            (unsigned long long)(profile.detector.execution.generic_node_invocations + profile.classifier.execution.generic_node_invocations + profile.recognizer.execution.generic_node_invocations),
            (unsigned long long)(profile.detector.execution.prepared_conv1x1_invocations + profile.classifier.execution.prepared_conv1x1_invocations + profile.recognizer.execution.prepared_conv1x1_invocations),
@@ -590,9 +608,27 @@ int main(int argc, char** argv) {
             uint64_t invocations = node_index < LW_EXECUTION_PROFILE_NODE_CAPACITY
                                        ? profile.recognizer.execution.node_invocations[node_index]
                                        : 0u;
+            uint32_t input_index = 0u;
+            uint32_t weight_index = 0u;
+            uint32_t output_index = 0u;
+            uint64_t param_offset = 0u;
+            const uint8_t* params = NULL;
+            const lw_runtime_tensor* input_tensor = NULL;
+            const lw_runtime_tensor* weight_tensor = NULL;
+            const lw_runtime_tensor* output_tensor = NULL;
             uint32_t bucket;
             if (invocations == 0u) {
                 continue;
+            }
+            if (operation == 1u || operation == 18u) {
+                input_index = lwm_read_u32(node + 8u);
+                weight_index = lwm_read_u32(node + 12u);
+                output_index = lwm_read_u32(node + 40u);
+                param_offset = lwm_read_u64(node + 56u);
+                params = rec_model->bytes + (size_t)param_offset;
+                input_tensor = &rec_session->tensors[input_index];
+                weight_tensor = &rec_session->tensors[weight_index];
+                output_tensor = &rec_session->tensors[output_index];
             }
             if (!first) {
                 putchar(',');
@@ -623,7 +659,24 @@ int main(int argc, char** argv) {
                                profile.recognizer.node_invocations_by_width[bucket][node_index]);
                 }
             }
-            printf("]}");
+            printf("]");
+            if (input_tensor != NULL) {
+                printf(",\"input\":");
+                print_tensor_dimensions(input_tensor);
+                printf(",\"weights\":");
+                print_tensor_dimensions(weight_tensor);
+                printf(",\"output\":");
+                print_tensor_dimensions(output_tensor);
+                printf(",\"group\":%u,\"kernel\":[%d,%d],\"strides\":[%d,%d],"
+                       "\"dilations\":[%d,%d],\"pads\":[%d,%d,%d,%d]",
+                       lwm_read_u32(params + 4u), lwm_read_i32(params + 8u),
+                       lwm_read_i32(params + 12u), lwm_read_i32(params + 16u),
+                       lwm_read_i32(params + 20u), lwm_read_i32(params + 24u),
+                       lwm_read_i32(params + 28u), lwm_read_i32(params + 32u),
+                       lwm_read_i32(params + 36u), lwm_read_i32(params + 40u),
+                       lwm_read_i32(params + 44u));
+            }
+            putchar('}');
         }
     }
     printf("]}\n");

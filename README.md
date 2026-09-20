@@ -303,6 +303,8 @@ bundles as versioned ZIP/TAR.GZ assets when the release workflow runs.
   [kernel optimization](docs/kernel-optimization.md)
 - [Correctness-gated full-OCR comparison with OpenCV DNN](docs/opencv-dnn-comparison.md)
 - [Paired C vs C# OCR engine comparison methodology](docs/engine-comparison.md)
+- [Runtime memory and performance development design (in progress, Chinese)](docs/runtime-memory-performance-design.md)
+- [Project development design and execution plan](docs/project-development-design.md)
 - [Native x64 OCR profile workflow](docs/engine-comparison.md)
 - [Browser JavaScript SDK](docs/web-sdk.md) and
   [standalone HTML usage](docs/standalone-html.md)

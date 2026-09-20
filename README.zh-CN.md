@@ -379,6 +379,8 @@ HTTP Demo 和正式发布包均不链接、加载或携带 OpenCV。
 - [性能基线与优化](docs/performance-baseline.md)
 - [完整 OCR 分阶段与算子性能分析](docs/full-ocr-profile.md)
 - [C 与 C# OCR 引擎同机配对对比方法](docs/engine-comparison.md)
+- [Runtime 内存与性能开发设计（开发中）](docs/runtime-memory-performance-design.md)
+- [项目详细开发设计与执行计划](docs/project-development-design.md)
 - [Windows x64 OCR 性能分析工作流](docs/engine-comparison.md)
 - [浏览器 JavaScript SDK](docs/web-sdk.md)
 - [单文件离线 HTML 使用与定制](docs/standalone-html.md)

@@ -5,7 +5,7 @@ import pathlib
 import tempfile
 import unittest
 
-from tools.compare_rec_runtime_profiles import render_markdown, summarize
+from tools.compare_rec_runtime_profiles import render_markdown, summarize, summarize_paired
 
 
 class CompareRecRuntimeProfilesTests(unittest.TestCase):
@@ -48,6 +48,20 @@ class CompareRecRuntimeProfilesTests(unittest.TestCase):
             path = pathlib.Path(directory) / "summary.json"
             path.write_text(json.dumps(summary, sort_keys=True), encoding="utf-8")
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), summary)
+
+    def test_paired_summary_keeps_rounds_and_uses_medians(self) -> None:
+        compact_later = dict(self.compact, ocr_ms={"mean": 150.0, "p95": 160.0})
+        performance_later = dict(self.performance, ocr_ms={"mean": 120.0, "p95": 130.0})
+        summary = summarize_paired(
+            [self.compact, compact_later],
+            [self.performance, performance_later],
+            ["compact-first", "performance-first"],
+        )
+        self.assertEqual(summary["paired"]["rounds"], 2)
+        self.assertEqual(summary["paired"]["orders"][1], "performance-first")
+        self.assertAlmostEqual(summary["compact"]["ocr_mean_ms"], (124.5 + 150.0) / 2.0)
+        self.assertAlmostEqual(summary["performance"]["ocr_mean_ms"], (111.1 + 120.0) / 2.0)
+        self.assertIn("Paired rounds: `2`", render_markdown(summary))
 
 
 if __name__ == "__main__":

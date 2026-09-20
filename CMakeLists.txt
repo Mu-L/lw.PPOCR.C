@@ -18,10 +18,24 @@ option(LW_REC_RESIDENT_WIDTHS
     "Prewarm all standard REC widths for native performance experiments" OFF)
 option(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH
     "Use experimental AVX2+FMA Conv1x1 and terminal MatMul paths in native builds" OFF)
+option(LW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH
+    "Use the experimental AVX2+FMA Conv1x1 dispatch in native builds" OFF)
+option(LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH
+    "Use the experimental AVX2+FMA terminal MatMul dispatch in native builds" OFF)
 option(LW_EXPERIMENTAL_PREPARED_EXECUTION
     "Build the experimental session-local prepared execution table" OFF)
+option(LW_EXPERIMENTAL_WORKSPACE_PLANNER_V2
+    "Use the experimental size-descending workspace interval planner" OFF)
+option(LW_EXPERIMENTAL_FUSION_MEMORY
+    "Use the experimental physical lifetime plan for fused GELU" OFF)
+option(LW_EXPERIMENTAL_CTC_TILED
+    "Use the experimental physical plan for greedy CTC output elision" OFF)
+option(LW_EXPERIMENTAL_STREAMING_CROPS
+    "Use experimental worker-local streaming crop buffers" OFF)
 option(LW_AVX2_FMA_CONV3X3_DISPATCH
     "Enable the measured AVX2+FMA Conv3x3 Node 6 dispatch" ON)
+option(LW_EXPERIMENTAL_AVX2_CONV3X3_EIGHT_OUTPUTS
+    "Use experimental AVX2 eight-output blocking for unit-stride Conv3x3" OFF)
 set(LW_WASM_HOST_ABI_VERSION "1" CACHE STRING
     "WASM Host ABI version embedded in the Web adapter and Node manifest")
 set(LW_LWM_FORMAT_VERSION "0.1" CACHE STRING
@@ -52,6 +66,14 @@ if(NOT LW_WASM_HOST_ABI_VERSION MATCHES "^[0-9]+$")
 endif()
 if(NOT LW_LWM_FORMAT_VERSION MATCHES "^[0-9]+\\.[0-9]+$")
     message(FATAL_ERROR "LW_LWM_FORMAT_VERSION must use the form major.minor")
+endif()
+if(LW_EXPERIMENTAL_FUSION_MEMORY AND NOT LW_EXPERIMENTAL_WORKSPACE_PLANNER_V2)
+    message(FATAL_ERROR
+        "LW_EXPERIMENTAL_FUSION_MEMORY requires LW_EXPERIMENTAL_WORKSPACE_PLANNER_V2")
+endif()
+if(LW_EXPERIMENTAL_CTC_TILED AND NOT LW_EXPERIMENTAL_WORKSPACE_PLANNER_V2)
+    message(FATAL_ERROR
+        "LW_EXPERIMENTAL_CTC_TILED requires LW_EXPERIMENTAL_WORKSPACE_PLANNER_V2")
 endif()
 
 if(LW_WEB_LEGACY)
@@ -233,6 +255,7 @@ set(LW_PPOCR_C_SOURCES
     src/ppocr/recognizer.c
     src/runtime/executor.c
     src/runtime/cpu_topology.c
+    src/runtime/execution_plan.c
     src/runtime/memory.c
     src/runtime/model.c
     src/runtime/parallel.c
@@ -244,6 +267,7 @@ set(LW_PPOCR_C_SOURCES
     src/simd/avx2_conv1x1.c
     src/simd/avx2_conv2x2.c
     src/simd/avx2_conv3x3.c
+    src/simd/avx2_conv3x3_eight.c
     src/simd/avx2_conv7x7.c
     src/simd/avx2_convtranspose2x2.c
     src/simd/avx2_depthwise3x3.c
@@ -275,7 +299,8 @@ set(LW_PPOCR_C_SOURCES
 if(MSVC AND MSVC_C_ARCHITECTURE_ID MATCHES "^(x64|X86)$")
     set_property(SOURCE src/simd/avx2_binary.c src/simd/avx2_conv1x1.c
         src/simd/avx2_conv2x2.c
-        src/simd/avx2_conv3x3.c src/simd/avx2_conv7x7.c
+        src/simd/avx2_conv3x3.c src/simd/avx2_conv3x3_eight.c
+        src/simd/avx2_conv7x7.c
         src/simd/avx2_convtranspose2x2.c
         src/simd/avx2_depthwise3x3.c
         src/simd/avx2_depthwise5x5.c
@@ -361,14 +386,32 @@ lw_configure_runtime_target(lw_ppocr_c)
 if(LW_REC_RESIDENT_WIDTHS AND NOT EMSCRIPTEN)
     target_compile_definitions(lw_ppocr_c PRIVATE LW_REC_RESIDENT_WIDTHS=1)
 endif()
-if(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH AND NOT EMSCRIPTEN)
-    target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_AVX2_FMA_DISPATCH=1)
+if((LW_EXPERIMENTAL_AVX2_FMA_DISPATCH OR LW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH) AND NOT EMSCRIPTEN)
+    target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH=1)
+endif()
+if((LW_EXPERIMENTAL_AVX2_FMA_DISPATCH OR LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH) AND NOT EMSCRIPTEN)
+    target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH=1)
 endif()
 if(LW_AVX2_FMA_CONV3X3_DISPATCH AND NOT EMSCRIPTEN)
     target_compile_definitions(lw_ppocr_c PRIVATE LW_AVX2_FMA_CONV3X3_DISPATCH=1)
 endif()
+if(LW_EXPERIMENTAL_AVX2_CONV3X3_EIGHT_OUTPUTS AND NOT EMSCRIPTEN)
+    target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_AVX2_CONV3X3_EIGHT_OUTPUTS=1)
+endif()
 if(LW_EXPERIMENTAL_PREPARED_EXECUTION)
     target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_PREPARED_EXECUTION=1)
+endif()
+if(LW_EXPERIMENTAL_WORKSPACE_PLANNER_V2)
+    target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_WORKSPACE_PLANNER_V2=1)
+endif()
+if(LW_EXPERIMENTAL_FUSION_MEMORY)
+    target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_FUSION_MEMORY=1)
+endif()
+if(LW_EXPERIMENTAL_CTC_TILED)
+    target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_CTC_TILED=1)
+endif()
+if(LW_EXPERIMENTAL_STREAMING_CROPS)
+    target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_STREAMING_CROPS=1)
 endif()
 
 if(NOT EMSCRIPTEN AND NOT LW_RUNTIME_ONLY)
@@ -386,14 +429,32 @@ lw_configure_runtime_target(lw_ppocr_c_shared)
 if(LW_REC_RESIDENT_WIDTHS)
     target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_REC_RESIDENT_WIDTHS=1)
 endif()
-if(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH)
-    target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_AVX2_FMA_DISPATCH=1)
+if(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH OR LW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH)
+    target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH=1)
+endif()
+if(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH OR LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH)
+    target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH=1)
 endif()
 if(LW_AVX2_FMA_CONV3X3_DISPATCH AND NOT EMSCRIPTEN)
     target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_AVX2_FMA_CONV3X3_DISPATCH=1)
 endif()
+if(LW_EXPERIMENTAL_AVX2_CONV3X3_EIGHT_OUTPUTS)
+    target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_AVX2_CONV3X3_EIGHT_OUTPUTS=1)
+endif()
 if(LW_EXPERIMENTAL_PREPARED_EXECUTION)
     target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_PREPARED_EXECUTION=1)
+endif()
+if(LW_EXPERIMENTAL_WORKSPACE_PLANNER_V2)
+    target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_WORKSPACE_PLANNER_V2=1)
+endif()
+if(LW_EXPERIMENTAL_FUSION_MEMORY)
+    target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_FUSION_MEMORY=1)
+endif()
+if(LW_EXPERIMENTAL_CTC_TILED)
+    target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_CTC_TILED=1)
+endif()
+if(LW_EXPERIMENTAL_STREAMING_CROPS)
+    target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_STREAMING_CROPS=1)
 endif()
 endif()
 
@@ -1115,6 +1176,11 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
                 tests.test_medium_contracts
                 tests.test_ocr_dataset
                 tests.test_generate_ocr_dataset
+                tests.test_prepare_ocr_dataset_ppm
+                tests.test_build_ocr_width_switch_manifest
+                tests.test_compare_ocr_dataset_runtime
+                tests.test_collect_rec_shape_profile
+                tests.test_collect_det_shape_profile
                 tests.test_compare_ocr_dataset_reports
                 tests.test_build_engine_comparison_report
                 tests.test_summarize_ocr_dataset_reports
@@ -1232,6 +1298,25 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
         target_compile_options(test-session-planner PRIVATE -Wall -Wextra -Wpedantic -Werror)
     endif()
     add_test(NAME session_planner COMMAND test-session-planner "${LW_PPOCR_C_REC_LWM}")
+
+    add_executable(workspace-report-driver tests/workspace_report_driver.c)
+    target_link_libraries(workspace-report-driver PRIVATE lw_ppocr_c)
+    target_include_directories(workspace-report-driver PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime")
+    target_compile_features(workspace-report-driver PRIVATE c_std_11)
+    add_dependencies(workspace-report-driver convert_rec_model)
+    if(MSVC)
+        target_compile_options(workspace-report-driver PRIVATE /W4 /WX /utf-8)
+    else()
+        target_compile_options(workspace-report-driver PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    if(LW_EXPERIMENTAL_CTC_TILED)
+        target_compile_definitions(workspace-report-driver PRIVATE LW_EXPERIMENTAL_CTC_TILED=1)
+    endif()
+    add_test(NAME workspace_memory_report
+        COMMAND workspace-report-driver "${LW_PPOCR_C_REC_LWM}" 320 1)
+    add_test(NAME workspace_ctc_memory_report
+        COMMAND workspace-report-driver "${LW_PPOCR_C_REC_LWM}" 320 1 --ctc-greedy)
 
     add_executable(test-cpu-topology tests/test_cpu_topology.c)
     target_link_libraries(test-cpu-topology PRIVATE lw_ppocr_c)
@@ -1477,6 +1562,46 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_conv_kernels_reference.py"
                 --driver "$<TARGET_FILE:conv-reference-driver>")
 
+    add_executable(conv3x3-benchmark-driver
+        tests/conv3x3_benchmark_driver.c)
+    target_link_libraries(conv3x3-benchmark-driver PRIVATE lw_ppocr_c)
+    target_include_directories(conv3x3-benchmark-driver PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simd")
+    target_compile_features(conv3x3-benchmark-driver PRIVATE c_std_11)
+    if(MSVC)
+        target_compile_options(conv3x3-benchmark-driver PRIVATE /W4 /WX /utf-8)
+    else()
+        target_compile_options(conv3x3-benchmark-driver PRIVATE
+            -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(
+        NAME conv3x3_benchmark_smoke
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_conv3x3_benchmark.py"
+                --driver "$<TARGET_FILE:conv3x3-benchmark-driver>")
+    set_tests_properties(conv3x3_benchmark_smoke PROPERTIES TIMEOUT 120)
+
+    add_executable(convtranspose-benchmark-driver
+        tests/convtranspose_benchmark_driver.c)
+    target_link_libraries(convtranspose-benchmark-driver PRIVATE lw_ppocr_c)
+    target_include_directories(convtranspose-benchmark-driver PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simd")
+    target_compile_features(convtranspose-benchmark-driver PRIVATE c_std_11)
+    if(MSVC)
+        target_compile_options(convtranspose-benchmark-driver PRIVATE /W4 /WX /utf-8)
+    else()
+        target_compile_options(convtranspose-benchmark-driver PRIVATE
+            -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(
+        NAME convtranspose_benchmark_smoke
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_convtranspose_benchmark.py"
+                --driver "$<TARGET_FILE:convtranspose-benchmark-driver>")
+    set_tests_properties(convtranspose_benchmark_smoke PROPERTIES TIMEOUT 120)
+
     add_executable(packed-conv1x1-benchmark-driver
         tests/packed_conv1x1_benchmark_driver.c)
     target_link_libraries(packed-conv1x1-benchmark-driver PRIVATE lw_ppocr_c)
@@ -1484,8 +1609,8 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simd")
     target_compile_features(packed-conv1x1-benchmark-driver PRIVATE c_std_11)
-    if(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH)
-        target_compile_definitions(packed-conv1x1-benchmark-driver PRIVATE LW_EXPERIMENTAL_AVX2_FMA_DISPATCH=1)
+    if(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH OR LW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH)
+        target_compile_definitions(packed-conv1x1-benchmark-driver PRIVATE LW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH=1)
     endif()
     if(MSVC)
         target_compile_options(packed-conv1x1-benchmark-driver PRIVATE /W4 /WX /utf-8)
@@ -1507,8 +1632,8 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/simd")
     target_compile_features(packed-matmul-benchmark-driver PRIVATE c_std_11)
-    if(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH)
-        target_compile_definitions(packed-matmul-benchmark-driver PRIVATE LW_EXPERIMENTAL_AVX2_FMA_DISPATCH=1)
+    if(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH OR LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH)
+        target_compile_definitions(packed-matmul-benchmark-driver PRIVATE LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH=1)
     endif()
     if(MSVC)
         target_compile_options(packed-matmul-benchmark-driver PRIVATE /W4 /WX /utf-8)
@@ -1843,6 +1968,65 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
             -Wall -Wextra -Wpedantic -Werror)
     endif()
 
+    # Same-process dataset benchmark used to measure resident/compact memory
+    # and latency without restarting the OCR runtime for every image.
+    if(NOT EMSCRIPTEN)
+        add_executable(full-ocr-dataset-benchmark examples/ocr_dataset_benchmark.c)
+        target_link_libraries(full-ocr-dataset-benchmark PRIVATE lw_ppocr_c)
+        target_include_directories(full-ocr-dataset-benchmark PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/simd")
+        target_compile_features(full-ocr-dataset-benchmark PRIVATE c_std_11)
+        add_dependencies(full-ocr-dataset-benchmark convert_det_model convert_cls_model
+            convert_rec_model det_demo_fixture)
+        if(LW_REC_RESIDENT_WIDTHS)
+            target_compile_definitions(full-ocr-dataset-benchmark PRIVATE LW_REC_RESIDENT_WIDTHS=1)
+        endif()
+        if(WIN32)
+            target_link_libraries(full-ocr-dataset-benchmark PRIVATE shell32 psapi)
+        endif()
+        if(MSVC)
+            target_compile_definitions(full-ocr-dataset-benchmark PRIVATE _CRT_SECURE_NO_WARNINGS)
+            target_compile_options(full-ocr-dataset-benchmark PRIVATE /W4 /WX /utf-8)
+        else()
+            target_compile_options(full-ocr-dataset-benchmark PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+        endif()
+    endif()
+
+    add_executable(rec-preprocess-layout-driver tests/rec_preprocess_layout_driver.c)
+    target_link_libraries(rec-preprocess-layout-driver PRIVATE lw_ppocr_c)
+    target_include_directories(rec-preprocess-layout-driver PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/ppocr")
+    target_compile_features(rec-preprocess-layout-driver PRIVATE c_std_11)
+    if(MSVC)
+        target_compile_definitions(rec-preprocess-layout-driver PRIVATE _CRT_SECURE_NO_WARNINGS)
+        target_compile_options(rec-preprocess-layout-driver PRIVATE /W4 /WX /utf-8)
+    else()
+        target_compile_options(rec-preprocess-layout-driver PRIVATE
+            -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(NAME rec_preprocess_layout COMMAND rec-preprocess-layout-driver)
+    set_tests_properties(rec_preprocess_layout PROPERTIES TIMEOUT 30)
+    add_executable(nhwc-conv1x1-driver tests/nhwc_conv1x1_driver.c)
+    target_link_libraries(nhwc-conv1x1-driver PRIVATE lw_ppocr_c)
+    target_include_directories(nhwc-conv1x1-driver PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simd")
+    target_compile_features(nhwc-conv1x1-driver PRIVATE c_std_11)
+    if(MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|x86_64|amd64|X86)")
+        target_compile_options(nhwc-conv1x1-driver PRIVATE /arch:AVX2)
+    endif()
+    if(MSVC)
+        target_compile_definitions(nhwc-conv1x1-driver PRIVATE _CRT_SECURE_NO_WARNINGS)
+        target_compile_options(nhwc-conv1x1-driver PRIVATE /W4 /WX /utf-8)
+    else()
+        target_compile_options(nhwc-conv1x1-driver PRIVATE
+            -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(NAME nhwc_conv1x1_layout COMMAND nhwc-conv1x1-driver)
+    set_tests_properties(nhwc_conv1x1_layout PROPERTIES TIMEOUT 30)
     add_executable(rec-pipeline-driver tests/rec_pipeline_driver.c)
     target_link_libraries(rec-pipeline-driver PRIVATE lw_ppocr_c)
     if(WIN32)

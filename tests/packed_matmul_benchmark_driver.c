@@ -81,7 +81,7 @@ static uint64_t checksum_bytes(const void* data, size_t bytes) {
     return hash;
 }
 
-#if defined(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH)
+#if defined(LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH)
 static float max_abs_difference(const float* expected, const float* actual, uint64_t count) {
     uint64_t index;
     float maximum = 0.0f;
@@ -194,7 +194,7 @@ int main(int argc, char** argv) {
     lw_avx2_packed_matmul_bias_argmax_f32(
         input, packed_weights, bias, avx2_output, avx2_indices, 1u, TERMINAL_ROWS,
         TERMINAL_INNER, TERMINAL_COLUMNS);
-#if defined(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH)
+#if defined(LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH)
     if (!isfinite(max_abs_difference(scalar_output, avx2_output, output_count)) ||
         max_abs_difference(scalar_output, avx2_output, output_count) > 1.0e-2f ||
         memcmp(scalar_indices, avx2_indices, (size_t)TERMINAL_ROWS * sizeof(uint32_t)) != 0) {
@@ -230,7 +230,7 @@ int main(int argc, char** argv) {
     avx2_finished = monotonic_seconds();
     if (scalar_started <= 0.0 || scalar_finished <= scalar_started || avx2_started <= 0.0 ||
         avx2_finished <= avx2_started ||
-#if defined(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH)
+#if defined(LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH)
         !isfinite(max_abs_difference(scalar_output, avx2_output, output_count)) ||
         max_abs_difference(scalar_output, avx2_output, output_count) > 1.0e-2f ||
 #else

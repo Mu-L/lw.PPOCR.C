@@ -1,6 +1,6 @@
 #include "simd_kernels.h"
 
-#if defined(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH)
+#if defined(LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH)
 #  include "cpu_features.h"
 #endif
 
@@ -335,7 +335,7 @@ void lw_avx2_packed_matmul_bias_argmax_f32(
     const float* input, const float* packed_weights, const float* bias, float* output,
     uint32_t* best_indices, uint32_t batch_count, uint32_t rows,
     uint32_t inner_dimension, uint32_t columns) {
-#if defined(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH)
+#if defined(LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH)
     const lw_cpu_capabilities capabilities = lw_get_cpu_capabilities();
     if (capabilities.has_avx2_fma && batch_count == 1u && rows == 40u &&
         inner_dimension == 80u && columns == 6906u) {

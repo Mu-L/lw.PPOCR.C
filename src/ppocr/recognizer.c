@@ -317,8 +317,9 @@ static lw_status configure_session(lw_recognizer* recognizer, uint32_t target_wi
     input_desc.dimensions[1] = 3;
     input_desc.dimensions[2] = (int32_t)LW_REC_INPUT_HEIGHT;
     input_desc.dimensions[3] = (int32_t)target_width;
-    status = lw_session_create(recognizer->model, &input_desc, 1u, &recognizer->session_options,
-                               &session, error);
+    status = lw_session_create_with_prepared_source(
+        recognizer->model, &input_desc, 1u, &recognizer->session_options, 0u,
+        recognizer->session, &session, error);
     if (status != LW_STATUS_OK) {
         return status;
     }
@@ -345,6 +346,21 @@ static lw_status configure_session(lw_recognizer* recognizer, uint32_t target_wi
      * Keep the full probability buffer only for models that need the generic
      * graph-output contract; official REC models use two values per step. */
     use_ctc_greedy = lw_session_supports_ctc_greedy_f32(session, time_steps, class_count);
+#if defined(LW_EXPERIMENTAL_CTC_TILED)
+    if (use_ctc_greedy) {
+        /* Recreate the session with the internal physical CTC plan selected at
+         * construction time.  The public session ABI remains generic; only
+         * the recognizer's private greedy path may elide terminal Softmax. */
+        lw_session_free(session);
+        session = NULL;
+        status = lw_session_create_with_prepared_source(
+            recognizer->model, &input_desc, 1u, &recognizer->session_options,
+            LW_SESSION_PLAN_CTC_GREEDY, recognizer->session, &session, error);
+        if (status != LW_STATUS_OK) {
+            return status;
+        }
+    }
+#endif
     if (!allocation_fits(input_element_count, sizeof(*input)) ||
         !allocation_fits(probability_element_count, sizeof(*probabilities)) ||
         !allocation_fits(time_steps, sizeof(*best_indices)) ||
@@ -476,6 +492,12 @@ lw_status lw_recognizer_enable_resident_widths(lw_recognizer* recognizer, lw_err
         temporary.current_target_width = 0u;
         temporary.current_time_steps = 0u;
         temporary.resident_widths_enabled = 0u;
+        /* Keep the active session as a prepared-source reference while the
+         * temporary recognizer constructs this resident width.  The active
+         * session remains owned by the real recognizer; the temporary copy
+         * only publishes the newly created slot below. */
+        temporary.session = recognizer->session;
+        temporary.current_target_width = recognizer->current_target_width;
         lw_session_info_init(&session_info);
         status = configure_session(&temporary, resident_widths[index], &session_info, error);
         if (status != LW_STATUS_OK) {

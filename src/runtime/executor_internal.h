@@ -55,6 +55,14 @@ typedef struct lw_execution_profile {
     uint64_t ctc_greedy_invocations;
     uint64_t ctc_packed_projection_invocations;
     uint64_t ctc_generic_projection_invocations;
+    /* Layout telemetry is internal and does not change the public C ABI. */
+    uint64_t layout_transform_nanoseconds;
+    uint64_t layout_transform_invocations;
+    uint64_t layout_transform_bytes;
+    uint64_t layout_candidate_nodes;
+    uint64_t layout_selected_nodes;
+    uint64_t layout_fallback_nodes;
+    uint64_t layout_analysis_runs;
 } lw_execution_profile;
 
 lw_status lw_execute_session_f32(lw_session* session, const float* input,

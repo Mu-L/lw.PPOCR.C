@@ -16,6 +16,44 @@ static void make_rec_input(lw_tensor_desc* input, int32_t batch, int32_t width) 
     input->dimensions[3] = width;
 }
 
+static uint64_t aligned_tensor_bytes(uint64_t bytes) {
+    if (bytes > UINT64_MAX - (LW_WORKSPACE_ALIGNMENT - 1u)) {
+        return UINT64_MAX;
+    }
+    return (bytes + (LW_WORKSPACE_ALIGNMENT - 1u)) &
+           ~(uint64_t)(LW_WORKSPACE_ALIGNMENT - 1u);
+}
+
+static uint64_t semantic_workspace_lower_bound(const lw_model* model,
+                                               const lw_session* session) {
+    uint64_t maximum = 0u;
+    uint32_t node;
+    for (node = 0u; node <= model->info.node_count; ++node) {
+        uint64_t live = 0u;
+        uint32_t tensor_index;
+        for (tensor_index = 0u; tensor_index < model->info.tensor_count; ++tensor_index) {
+            const lw_runtime_tensor* tensor = &session->tensors[tensor_index];
+            uint64_t bytes;
+            if (tensor->birth_node < 0 || tensor->birth_node > (int32_t)node ||
+                tensor->last_use_node < (int32_t)node) {
+                continue;
+            }
+            if (lw_execution_plan_is_skipped_tensor(session, tensor_index)) {
+                continue;
+            }
+            bytes = aligned_tensor_bytes(tensor->byte_size);
+            if (bytes == UINT64_MAX || live > UINT64_MAX - bytes) {
+                return UINT64_MAX;
+            }
+            live += bytes;
+        }
+        if (live > maximum) {
+            maximum = live;
+        }
+    }
+    return maximum;
+}
+
 static int check_execution_table(const lw_model* model, const lw_session* session) {
     uint32_t node_index;
 #if defined(LW_EXPERIMENTAL_PREPARED_EXECUTION)
@@ -61,6 +99,7 @@ static int create_and_check(const lw_model* model, int32_t batch, int32_t width,
     lw_session* session = NULL;
     lw_error error;
     lw_status status;
+    uint64_t lower_bound;
     make_rec_input(&input, batch, width);
     lw_error_init(&error);
     status = lw_session_create(model, &input, 1u, NULL, &session, &error);
@@ -76,18 +115,120 @@ static int create_and_check(const lw_model* model, int32_t batch, int32_t width,
     }
     lw_session_info_init(&info);
     lw_tensor_desc_init(&output);
+    lower_bound = semantic_workspace_lower_bound(model, session);
     if (lw_session_get_info(session, &info) != LW_STATUS_OK ||
         lw_session_get_output_desc(session, 0u, &output) != LW_STATUS_OK ||
         info.tensor_count != 274u || info.input_count != 1u || info.output_count != 1u ||
         info.workspace_size == 0u || (info.workspace_size & 63u) != 0u ||
         output.dtype != LW_DTYPE_F32 || output.rank != 3u || output.dimensions[0] != batch ||
-        output.dimensions[1] != expected_steps || output.dimensions[2] != 6906) {
+        output.dimensions[1] != expected_steps || output.dimensions[2] != 6906 ||
+        lower_bound == UINT64_MAX || info.workspace_size < lower_bound) {
         fprintf(stderr, "unexpected session plan or output shape for width %" PRId32 "\n", width);
         lw_session_free(session);
         return 0;
     }
     *workspace_size = info.workspace_size;
     lw_session_free(session);
+    return 1;
+}
+
+static int check_plan_determinism(const lw_model* model) {
+    lw_tensor_desc input;
+    lw_session* first = NULL;
+    lw_session* second = NULL;
+    lw_error error;
+    lw_status status;
+    uint32_t i;
+    make_rec_input(&input, 1, 320);
+    lw_error_init(&error);
+    status = lw_session_create(model, &input, 1u, NULL, &first, &error);
+    if (status != LW_STATUS_OK) {
+        fprintf(stderr, "first deterministic session create failed: %s\n", error.message);
+        return 0;
+    }
+    lw_error_init(&error);
+    status = lw_session_create(model, &input, 1u, NULL, &second, &error);
+    if (status != LW_STATUS_OK) {
+        fprintf(stderr, "second deterministic session create failed: %s\n", error.message);
+        lw_session_free(first);
+        return 0;
+    }
+    if (first->workspace_bytes != second->workspace_bytes) {
+        fprintf(stderr, "workspace planner is not deterministic\n");
+        lw_session_free(second);
+        lw_session_free(first);
+        return 0;
+    }
+    for (i = 0u; i < model->info.tensor_count; ++i) {
+        const lw_runtime_tensor* left = &first->tensors[i];
+        const lw_runtime_tensor* right = &second->tensors[i];
+        if (left->workspace_offset != right->workspace_offset ||
+            left->birth_node != right->birth_node ||
+            left->last_use_node != right->last_use_node ||
+            left->workspace_live != right->workspace_live) {
+            fprintf(stderr, "workspace planner changed tensor %" PRIu32 " between creates\n", i);
+            lw_session_free(second);
+            lw_session_free(first);
+            return 0;
+        }
+    }
+    lw_session_free(second);
+    lw_session_free(first);
+    return 1;
+}
+
+static int check_prepared_constant_sharing(const lw_model* model) {
+    lw_tensor_desc first_input;
+    lw_tensor_desc second_input;
+    lw_session* first = NULL;
+    lw_session* second = NULL;
+    lw_error error;
+    lw_status status;
+    if (model == NULL) {
+        return 0;
+    }
+    make_rec_input(&first_input, 1, 320);
+    make_rec_input(&second_input, 1, 960);
+    lw_error_init(&error);
+    status = lw_session_create(model, &first_input, 1u, NULL, &first, &error);
+    if (status != LW_STATUS_OK) {
+        fprintf(stderr, "prepared sharing source create failed: %s\n", error.message);
+        return 0;
+    }
+    lw_error_init(&error);
+    status = lw_session_create_with_prepared_source(
+        model, &second_input, 1u, NULL, 0u, first, &second, &error);
+    if (status != LW_STATUS_OK) {
+        fprintf(stderr, "prepared sharing candidate create failed: %s\n", error.message);
+        lw_session_free(first);
+        return 0;
+    }
+    if (first->shared_prepared_constants == NULL || second->shared_prepared_constants == NULL) {
+        /* Scalar/unsupported-ISA builds legitimately have no packed arena. */
+        lw_session_free(second);
+        lw_session_free(first);
+        return 1;
+    }
+    if (!lw_session_prepared_constants_compatible(second, first)) {
+        fprintf(stderr, "prepared constants unexpectedly differ across REC widths\n");
+        lw_session_free(second);
+        lw_session_free(first);
+        return 0;
+    }
+    if (second->packed_weights != first->packed_weights ||
+        first->shared_prepared_constants->ref_count != 2u) {
+        fprintf(stderr, "prepared constants sharing during create failed\n");
+        lw_session_free(second);
+        lw_session_free(first);
+        return 0;
+    }
+    lw_session_free(second);
+    if (first->shared_prepared_constants->ref_count != 1u) {
+        fprintf(stderr, "prepared constants reference count did not release\n");
+        lw_session_free(first);
+        return 0;
+    }
+    lw_session_free(first);
     return 1;
 }
 
@@ -113,7 +254,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "%s: %s\n", lw_status_string(status), error.message);
         return 1;
     }
-    if (!create_and_check(model, 1, 7, 1, &workspace_minimum) ||
+    if (!check_plan_determinism(model) || !check_prepared_constant_sharing(model) ||
+        !create_and_check(model, 1, 7, 1, &workspace_minimum) ||
         !create_and_check(model, 1, 320, 40, &workspace_320) ||
         !create_and_check(model, 1, 321, 40, &workspace_odd) ||
         !create_and_check(model, 2, 640, 80, &workspace_640) || workspace_odd < workspace_320 ||

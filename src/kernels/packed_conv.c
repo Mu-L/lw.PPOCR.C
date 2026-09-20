@@ -100,7 +100,7 @@ void lw_scalar_packed_conv1x1_f32(const float* input, const float* packed_weight
     }
 }
 
-#if defined(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH)
+#if defined(LW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH)
 /*
  * FMA can lower the CPU frequency on some x64 hosts. Keep the measured
  * medium/late shapes on the regular AVX2 path until a wider calibration set
@@ -140,7 +140,7 @@ static int lw_experimental_fma_shape_allowed(const int32_t input_dimensions[4],
     return 0;
 }
 #endif
-#if defined(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH)
+#if defined(LW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH)
 /*
  * The 8x8 candidate keeps two packed four-output blocks live. It is useful
  * only for the large late feature maps where the extra output reuse offsets
@@ -170,7 +170,7 @@ void lw_packed_conv1x1_f32(const float* input, const float* packed_weights, cons
                            const int32_t output_dimensions[4]) {
     const lw_cpu_capabilities capabilities = lw_get_cpu_capabilities();
     const lw_simd_level simd_level = capabilities.simd;
-#if defined(LW_EXPERIMENTAL_AVX2_FMA_DISPATCH)
+#if defined(LW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH)
     if (capabilities.has_avx2_fma &&
         lw_experimental_fma_shape_allowed(input_dimensions, output_dimensions)) {
         if (lw_experimental_fma_8x8_shape_allowed(input_dimensions, output_dimensions)) {

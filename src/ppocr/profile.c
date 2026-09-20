@@ -129,6 +129,15 @@ void lw_pipeline_component_profile_accumulate(lw_pipeline_component_profile* des
                   source->execution.ctc_packed_projection_invocations);
     add_saturated(&destination->execution.ctc_generic_projection_invocations,
                   source->execution.ctc_generic_projection_invocations);
+    add_saturated(&destination->execution.layout_transform_nanoseconds, source->execution.layout_transform_nanoseconds);
+    add_saturated(&destination->execution.layout_transform_invocations, source->execution.layout_transform_invocations);
+    add_saturated(&destination->execution.layout_transform_bytes, source->execution.layout_transform_bytes);
+    if (destination->execution.layout_analysis_runs == 0u && source->execution.layout_analysis_runs != 0u) {
+        destination->execution.layout_candidate_nodes = source->execution.layout_candidate_nodes;
+        destination->execution.layout_selected_nodes = source->execution.layout_selected_nodes;
+        destination->execution.layout_fallback_nodes = source->execution.layout_fallback_nodes;
+        destination->execution.layout_analysis_runs = 1u;
+    }
 }
 
 void lw_pipeline_profile_capture_node_width_delta(
