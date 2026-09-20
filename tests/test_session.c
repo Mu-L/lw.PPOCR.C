@@ -216,14 +216,14 @@ static int check_prepared_constant_sharing(const lw_model* model) {
         return 0;
     }
     if (second->packed_weights != first->packed_weights ||
-        first->shared_prepared_constants->ref_count != 2u) {
+        lw_atomic_u32_load_acquire(&first->shared_prepared_constants->ref_count) != 2u) {
         fprintf(stderr, "prepared constants sharing during create failed\n");
         lw_session_free(second);
         lw_session_free(first);
         return 0;
     }
     lw_session_free(second);
-    if (first->shared_prepared_constants->ref_count != 1u) {
+    if (lw_atomic_u32_load_acquire(&first->shared_prepared_constants->ref_count) != 1u) {
         fprintf(stderr, "prepared constants reference count did not release\n");
         lw_session_free(first);
         return 0;
@@ -232,6 +232,93 @@ static int check_prepared_constant_sharing(const lw_model* model) {
     return 1;
 }
 
+typedef struct prepared_share_stress_context {
+    const lw_model* model;
+    const lw_session* source;
+    volatile uint32_t failures;
+} prepared_share_stress_context;
+
+static void prepared_share_stress_callback(void* opaque, uint32_t worker_index,
+                                           uint32_t worker_count) {
+    prepared_share_stress_context* context = (prepared_share_stress_context*)opaque;
+    const int32_t widths[] = {640, 960};
+    uint32_t iteration;
+    (void)worker_index;
+    (void)worker_count;
+    for (iteration = 0u; iteration < 16u; ++iteration) {
+        uint32_t width_index;
+        for (width_index = 0u; width_index < 2u; ++width_index) {
+            lw_tensor_desc input;
+            lw_session* session = NULL;
+            lw_error error;
+            lw_status status;
+            make_rec_input(&input, 1, widths[width_index]);
+            lw_error_init(&error);
+            status = lw_session_create_with_prepared_source(
+                context->model, &input, 1u, NULL, 0u, context->source, &session, &error);
+            if (status != LW_STATUS_OK || session == NULL) {
+                uint32_t expected = context->failures;
+                while (!lw_atomic_u32_compare_exchange_acq_rel(
+                    &context->failures, &expected, expected + 1u)) {
+                }
+                continue;
+            }
+            if (context->source->shared_prepared_constants != NULL &&
+                session->shared_prepared_constants != context->source->shared_prepared_constants) {
+                uint32_t expected = context->failures;
+                while (!lw_atomic_u32_compare_exchange_acq_rel(
+                    &context->failures, &expected, expected + 1u)) {
+                }
+                lw_session_free(session);
+                continue;
+            }
+            lw_session_free(session);
+        }
+    }
+}
+
+static int check_prepared_constant_sharing_stress(const lw_model* model) {
+    lw_tensor_desc input;
+    lw_session* source = NULL;
+    lw_thread_pool* pool = NULL;
+    prepared_share_stress_context context;
+    lw_error error;
+    lw_status status;
+
+    make_rec_input(&input, 1, 320);
+    lw_error_init(&error);
+    status = lw_session_create(model, &input, 1u, NULL, &source, &error);
+    if (status != LW_STATUS_OK || source == NULL) {
+        fprintf(stderr, "prepared sharing stress source create failed: %s\n", error.message);
+        return 0;
+    }
+    lw_error_init(&error);
+    status = lw_session_share_prepared_constants(source, source, &error);
+    if (status != LW_STATUS_OK) {
+        fprintf(stderr, "prepared self-share failed: %s\n", error.message);
+        lw_session_free(source);
+        return 0;
+    }
+    pool = lw_thread_pool_create(4u);
+    if (pool == NULL) {
+        lw_session_free(source);
+        return 1;
+    }
+    context.model = model;
+    context.source = source;
+    context.failures = 0u;
+    lw_thread_pool_run(pool, 4u, prepared_share_stress_callback, &context);
+    lw_thread_pool_free(pool);
+    if (context.failures != 0u ||
+        (source->shared_prepared_constants != NULL &&
+         lw_atomic_u32_load_acquire(&source->shared_prepared_constants->ref_count) != 1u)) {
+        fprintf(stderr, "prepared sharing stress failed: %" PRIu32 "\n", context.failures);
+        lw_session_free(source);
+        return 0;
+    }
+    lw_session_free(source);
+    return 1;
+}
 int main(int argc, char** argv) {
     lw_model* model = NULL;
     lw_error error;
@@ -255,6 +342,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (!check_plan_determinism(model) || !check_prepared_constant_sharing(model) ||
+        !check_prepared_constant_sharing_stress(model) ||
         !create_and_check(model, 1, 7, 1, &workspace_minimum) ||
         !create_and_check(model, 1, 320, 40, &workspace_320) ||
         !create_and_check(model, 1, 321, 40, &workspace_odd) ||

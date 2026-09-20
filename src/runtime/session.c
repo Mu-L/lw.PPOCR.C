@@ -45,12 +45,25 @@ static void workspace_release(void* pointer) {
 }
 
 static void release_shared_prepared_constants(lw_shared_prepared_constants* constants) {
+    uint32_t observed;
+
     if (constants == NULL) {
         return;
     }
-    if (constants->ref_count > 1u) {
-        --constants->ref_count;
-        return;
+    observed = lw_atomic_u32_load_acquire(&constants->ref_count);
+    for (;;) {
+        uint32_t desired;
+        if (observed == 0u) {
+            return;
+        }
+        desired = observed - 1u;
+        if (lw_atomic_u32_compare_exchange_acq_rel(&constants->ref_count, &observed,
+                                                    desired)) {
+            if (desired != 0u) {
+                return;
+            }
+            break;
+        }
     }
     workspace_release(constants->packed_weights);
     free(constants->constants);
@@ -283,7 +296,7 @@ static lw_status prepare_constant_layout(lw_session* session, lw_error* error) {
                      "unable to allocate shared prepared constants");
         return LW_STATUS_OUT_OF_MEMORY;
     }
-    session->shared_prepared_constants->ref_count = 1u;
+    lw_atomic_u32_init(&session->shared_prepared_constants->ref_count, 1u);
     session->prepared_constants =
         (lw_prepared_constant*)calloc(model->info.node_count, sizeof(*session->prepared_constants));
     if (session->prepared_constants == NULL) {
@@ -717,6 +730,9 @@ lw_status lw_session_share_prepared_constants(lw_session* destination,
                                                const lw_session* source,
                                                lw_error* error) {
     lw_status execution_status;
+    lw_shared_prepared_constants* shared;
+    uint32_t observed;
+
     if (destination == NULL || source == NULL || destination->model != source->model) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT,
                      "sessions from the same model are required");
@@ -726,18 +742,30 @@ lw_status lw_session_share_prepared_constants(lw_session* destination,
         lw_set_error(error, LW_STATUS_OK, "");
         return LW_STATUS_OK;
     }
-    if (source->shared_prepared_constants->ref_count == UINT32_MAX) {
-        lw_set_error(error, LW_STATUS_OUT_OF_BOUNDS,
-                     "prepared constants reference count overflows");
-        return LW_STATUS_OUT_OF_BOUNDS;
+    if (destination == source ||
+        destination->shared_prepared_constants == source->shared_prepared_constants) {
+        lw_set_error(error, LW_STATUS_OK, "");
+        return LW_STATUS_OK;
+    }
+    shared = source->shared_prepared_constants;
+    observed = lw_atomic_u32_load_acquire(&shared->ref_count);
+    for (;;) {
+        if (observed == 0u || observed == UINT32_MAX) {
+            lw_set_error(error, LW_STATUS_OUT_OF_BOUNDS,
+                         "prepared constants reference count overflows");
+            return LW_STATUS_OUT_OF_BOUNDS;
+        }
+        if (lw_atomic_u32_compare_exchange_acq_rel(&shared->ref_count, &observed,
+                                                    observed + 1u)) {
+            break;
+        }
     }
     lw_free_execution_nodes(destination);
     release_shared_prepared_constants(destination->shared_prepared_constants);
-    destination->shared_prepared_constants = source->shared_prepared_constants;
-    ++destination->shared_prepared_constants->ref_count;
-    destination->prepared_constants = destination->shared_prepared_constants->constants;
-    destination->packed_weights = source->packed_weights;
-    destination->packed_weight_bytes = source->packed_weight_bytes;
+    destination->shared_prepared_constants = shared;
+    destination->prepared_constants = shared->constants;
+    destination->packed_weights = shared->packed_weights;
+    destination->packed_weight_bytes = shared->packed_weight_bytes;
     execution_status = lw_prepare_execution_nodes(destination, error);
     if (execution_status != LW_STATUS_OK) {
         return execution_status;
@@ -745,7 +773,6 @@ lw_status lw_session_share_prepared_constants(lw_session* destination,
     lw_set_error(error, LW_STATUS_OK, "");
     return LW_STATUS_OK;
 }
-
 int lw_session_prepared_constants_compatible(const lw_session* destination,
                                              const lw_session* source) {
     uint32_t node_index;

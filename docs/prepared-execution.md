@@ -8,6 +8,12 @@
   table. Its constant pointer refers to the shared metadata; it does not copy
   model weights.
 
+The shared constant reference count uses an internal acquire/release CAS counter.
+Sessions may be created from one prepared source concurrently; each retained
+reference is released exactly once, and the source session must remain alive until
+all derived sessions have been freed. This is an internal lifetime guarantee and
+does not add symbols to the public C ABI.
+
 The first phase is structural and conservative. Generic operator inputs and
 parameters still come from the validated LWM node, while prepared Conv1x1,
 Conv3x3, and MatMul paths consult the session-local binding table only when

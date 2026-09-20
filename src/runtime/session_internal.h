@@ -5,6 +5,7 @@
 
 #include "model_internal.h"
 #include "parallel_internal.h"
+#include "atomic_internal.h"
 #include "../simd/cpu_features.h"
 #include "../kernels/packed_conv_internal.h"
 #include "../kernels/packed_conv3x3_internal.h"
@@ -30,7 +31,7 @@ typedef struct lw_prepared_constant {
 } lw_prepared_constant;
 
 typedef struct lw_shared_prepared_constants {
-    uint32_t ref_count;
+    lw_atomic_u32 ref_count;
     lw_prepared_constant* constants;
     uint8_t* packed_weights;
     size_t packed_weight_bytes;
