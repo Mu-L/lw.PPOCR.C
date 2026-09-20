@@ -245,6 +245,7 @@ set(LW_PPOCR_C_SOURCES
     src/ppocr/cls_preprocess.c
     src/ppocr/ctc_decode.c
     src/ppocr/crop.c
+    src/ppocr/crop_buffer.c
     src/ppocr/db_postprocess.c
     src/ppocr/det_preprocess.c
     src/ppocr/detector.c
@@ -1283,6 +1284,17 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
     endif()
     add_test(NAME lwm_loader COMMAND test-lwm-loader "${LW_PPOCR_C_REC_LWM}")
 
+    add_executable(test-crop-buffer tests/test_crop_buffer.c)
+    target_link_libraries(test-crop-buffer PRIVATE lw_ppocr_c)
+    target_include_directories(test-crop-buffer PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/ppocr")
+    target_compile_features(test-crop-buffer PRIVATE c_std_11)
+    if(MSVC)
+        target_compile_options(test-crop-buffer PRIVATE /W4 /WX /utf-8)
+    else()
+        target_compile_options(test-crop-buffer PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(NAME crop_buffer COMMAND test-crop-buffer)
     add_executable(test-session-planner tests/test_session.c)
     target_link_libraries(test-session-planner PRIVATE lw_ppocr_c)
     target_include_directories(test-session-planner PRIVATE

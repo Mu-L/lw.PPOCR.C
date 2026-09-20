@@ -1132,6 +1132,54 @@ prepared arena 引用计数已在本地 Windows x64 验证；同进程多图 ben
 M0 若发现主要内存来自 crop、重复 packed arena 或宿主加载，依据报告调整 M3/M5/M6 顺序。
 调整顺序不等于取消正确性门禁，也不应扩大成全 Runtime 重写。
 
+## 18.1 P1 Streaming Crop formalization
+
+P1 已将实验性的 worker-local crop 生命周期抽成内部 `lw_crop_buffer` 模块：
+
+- `src/ppocr/crop_buffer.c` 负责按需增长、跨请求复用和释放；不改变公共 C ABI。
+- `src/ppocr/ocr.c` 的 `LW_EXPERIMENTAL_STREAMING_CROPS` 路径只保存 buffer 对象，保持原有
+  aggregate crop 路径和默认关闭状态不变。
+- 默认保留上限为 4 MiB。单次请求超过上限时允许临时增长，请求完成后释放超出上限的容量；
+  4 MiB 以内的 buffer 跨请求保留，以减少 allocator 抖动。
+- `tests/test_crop_buffer.c` 覆盖增长/复用、超限 trim 和 `retained_limit == 0` 的不 trim 语义。
+
+验证命令：
+
+```text
+cmake -S . -B build-crop-streaming -DLW_EXPERIMENTAL_STREAMING_CROPS=ON -DBUILD_TESTING=ON
+cmake --build build-crop-streaming --config Release --parallel
+ctest --test-dir build-crop-streaming -C Release -R "^(crop_buffer|full_ocr_golden_corpus)$" --output-on-failure
+```
+
+Streaming crop 仍是实验开关。在完成默认/Streaming 完整 CTest、Golden 以及 Tiny/Small/Medium
+100 图 1/4 worker 的 AB/BA 多轮结果前，不将它改为默认路径，也不把单轮延迟或 RSS 结果写成
+产品承诺。
+## 18.2 远端长基准
+
+100 图 AB/BA 会占用较长的本机时间，不再作为每次本地开发的必跑步骤。仓库新增
+`.github/workflows/runtime-memory-benchmark.yml`，在 Windows x64 runner 上完成：
+
+- compact 与 `LW_EXPERIMENTAL_STREAMING_CROPS=ON` 两套 Release 构建；
+- Tiny、Small、Medium 的临时 LWM 模型准备；
+- 固定 seed `20260907` 生成的 100 图 PPM 数据集；
+- 1/4 worker、REC 960、warm-up 1、paired AB/BA 多轮；
+- 每图 OCR 耗时、P95、Peak RSS、最大采样 RSS、文本 checksum。
+
+该 workflow 默认通过 GitHub Actions 的 **Run workflow** 手动启动，也按周执行一次。推送代码后，
+可用 GitHub CLI 触发完整矩阵：
+
+```powershell
+gh workflow run runtime-memory-benchmark.yml `
+  --ref main `
+  -f model=all `
+  -f workers=both `
+  -f paired_rounds=3 `
+  -f image_count=100
+```
+
+若只想快速检查某个模型，可将 `model` 设为 `tiny`、`small` 或 `medium`，将 `workers` 设为
+`1` 或 `4`。结果会同时写入 Job Summary，并上传为保留 30 天的 artifact；未下载报告前不要把
+远端耗时或 RSS 解读成跨 runner 的绝对基线。
 ## 19. 参考链接
 
 - [SimdPaddleOCR README（当前主线）](https://github.com/sdcb/SimdPaddleOCR)

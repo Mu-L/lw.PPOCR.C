@@ -8,6 +8,7 @@
  * requests without adding locks inside the dependency-free core.
  */
 
+#include "crop_buffer_internal.h"
 #include "crop_internal.h"
 #include "cpu_topology.h"
 #include "det_internal.h"
@@ -32,6 +33,7 @@
 #endif
 
 #define LW_OCR_DEFAULT_MAX_CROP_PIXELS UINT64_C(16000000)
+#define LW_OCR_DEFAULT_RETAINED_CROP_BYTES (UINT64_C(4) * 1024u * 1024u)
 #define LW_OCR_MAX_WORKER_COUNT 16u
 
 typedef struct lw_ocr_crop {
@@ -58,14 +60,13 @@ typedef struct lw_ocr_worker_task {
     uint64_t rec_width_histogram[LW_REC_WIDTH_HISTOGRAM_BUCKET_COUNT];
     lw_pipeline_component_profile classifier_profile;
     lw_pipeline_component_profile recognizer_profile;
+    lw_crop_buffer crop_buffer;
 #if defined(LW_EXPERIMENTAL_STREAMING_CROPS)
     const uint8_t* source;
     uint64_t source_byte_count;
     uint32_t source_width;
     uint32_t source_height;
     uint32_t source_stride;
-    uint8_t* crop;
-    uint64_t crop_capacity;
     uint64_t crop_nanoseconds;
 #endif
 } lw_ocr_worker_task;
@@ -301,6 +302,8 @@ lw_status lw_ocr_create(const char* detector_model_path_utf8,
     {
         uint32_t worker_index;
         for (worker_index = 0u; worker_index < ocr->worker_count; ++worker_index) {
+            lw_crop_buffer_init(&ocr->worker_tasks[worker_index].crop_buffer,
+                                LW_OCR_DEFAULT_RETAINED_CROP_BYTES);
             if (values.use_direction_classification != 0u) {
                 status = lw_classifier_create(classifier_model_path_utf8, &values.classifier,
                                               &ocr->classifiers[worker_index], error);
@@ -428,11 +431,11 @@ void lw_ocr_free(lw_ocr* ocr) {
     if (ocr == NULL)
         return;
     free(ocr->crop);
-#if defined(LW_EXPERIMENTAL_STREAMING_CROPS)
     for (worker_index = 0u; worker_index < ocr->worker_count; ++worker_index) {
-        free(ocr->worker_tasks == NULL ? NULL : ocr->worker_tasks[worker_index].crop);
+        if (ocr->worker_tasks != NULL) {
+            lw_crop_buffer_free(&ocr->worker_tasks[worker_index].crop_buffer);
+        }
     }
-#endif
     free(ocr->worker_started);
 #if defined(_WIN32) || !defined(__EMSCRIPTEN__)
     free(ocr->worker_threads);
@@ -494,30 +497,6 @@ static lw_status ensure_crop_capacity(lw_ocr* ocr, uint64_t byte_count, lw_error
     return LW_STATUS_OK;
 }
 
-#if defined(LW_EXPERIMENTAL_STREAMING_CROPS)
-static lw_status ensure_worker_crop_capacity(lw_ocr_worker_task* task, uint64_t byte_count,
-                                             lw_error* error) {
-    uint8_t* resized;
-    if (byte_count <= task->crop_capacity) {
-        return LW_STATUS_OK;
-    }
-    if (byte_count > SIZE_MAX) {
-        lw_set_error(error, LW_STATUS_OUT_OF_BOUNDS,
-                     "worker-local OCR crop capacity exceeds the platform");
-        return LW_STATUS_OUT_OF_BOUNDS;
-    }
-    resized = (uint8_t*)realloc(task->crop, (size_t)byte_count);
-    if (resized == NULL) {
-        lw_set_error(error, LW_STATUS_OUT_OF_MEMORY,
-                     "unable to allocate worker-local OCR crop buffer");
-        return LW_STATUS_OUT_OF_MEMORY;
-    }
-    task->crop = resized;
-    task->crop_capacity = byte_count;
-    return LW_STATUS_OK;
-}
-#endif
-
 /* Each worker owns its CLS and REC handles, while crop/output slots are
  * disjoint. This keeps the public OCR handle non-reentrant but lets one request
  * recognize independent text lines concurrently. */
@@ -560,11 +539,11 @@ static void process_worker_task(lw_ocr_worker_task* task) {
             uint64_t crop_started =
                 task->profile_enabled == 0u ? 0u : lw_pipeline_profile_now(&task->recognizer_profile);
             lw_status crop_status;
-            crop_status = ensure_worker_crop_capacity(task, crop_byte_count, &task->error);
+            crop_status = lw_crop_buffer_reserve(&task->crop_buffer, crop_byte_count, &task->error);
             if (crop_status == LW_STATUS_OK) {
                 crop_status = lw_crop_quad_bgr_u8(
                     task->source, task->source_byte_count, task->source_width, task->source_height,
-                    task->source_stride, box, task->crop, task->crop_capacity, &crop_width,
+                    task->source_stride, box, task->crop_buffer.data, task->crop_buffer.capacity, &crop_width,
                     &crop_height, &crop_byte_count);
             }
             if (task->profile_enabled != 0u) {
@@ -580,7 +559,7 @@ static void process_worker_task(lw_ocr_worker_task* task) {
                 task->status = crop_status;
                 return;
             }
-            crop_pixels = task->crop;
+            crop_pixels = task->crop_buffer.data;
         }
 #else
         crop_pixels = ocr->crop + (size_t)crop->offset;
@@ -734,14 +713,10 @@ static lw_status run_worker_tasks(lw_ocr* ocr, const uint8_t* source, uint64_t s
         worker_used[worker_index] = 1u;
         {
             lw_ocr_worker_task* task = &ocr->worker_tasks[worker_index];
-#if defined(LW_EXPERIMENTAL_STREAMING_CROPS)
-            uint8_t* worker_crop = task->crop;
-            uint64_t worker_crop_capacity = task->crop_capacity;
-#endif
+            lw_crop_buffer crop_buffer = task->crop_buffer;
             memset(task, 0, sizeof(*task));
+            task->crop_buffer = crop_buffer;
 #if defined(LW_EXPERIMENTAL_STREAMING_CROPS)
-            task->crop = worker_crop;
-            task->crop_capacity = worker_crop_capacity;
             task->source = source;
             task->source_byte_count = source_byte_count;
             task->source_width = source_width;
@@ -847,6 +822,11 @@ static lw_status run_worker_tasks(lw_ocr* ocr, const uint8_t* source, uint64_t s
             status = ocr->worker_tasks[worker_index].status;
             lw_set_error(error, status, ocr->worker_tasks[worker_index].error.message);
             break;
+        }
+    }
+    for (slot = 0u; slot < ocr->worker_count; ++slot) {
+        if (ocr->worker_tasks != NULL) {
+            lw_crop_buffer_trim_after_request(&ocr->worker_tasks[slot].crop_buffer);
         }
     }
     return status;
