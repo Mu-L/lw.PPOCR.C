@@ -22,6 +22,8 @@ option(LW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH
     "Use the experimental AVX2+FMA Conv1x1 dispatch in native builds" OFF)
 option(LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH
     "Use the experimental AVX2+FMA terminal MatMul dispatch in native builds" OFF)
+option(LW_EXPERIMENTAL_AVX2_FAST_PATH
+    "Build the experimental graph-level AVX2/FMA NHWC fast-path benchmark" OFF)
 option(LW_EXPERIMENTAL_PREPARED_EXECUTION
     "Build the experimental session-local prepared execution table" OFF)
 option(LW_EXPERIMENTAL_WORKSPACE_PLANNER_V2
@@ -2057,6 +2059,39 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
     endif()
     add_test(NAME nhwc_conv1x1_layout COMMAND nhwc-conv1x1-driver)
     set_tests_properties(nhwc_conv1x1_layout PROPERTIES TIMEOUT 30)
+    if(LW_EXPERIMENTAL_AVX2_FAST_PATH AND
+       (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|x64|X86)$" OR
+        MSVC_C_ARCHITECTURE_ID MATCHES "^(x64|X86)$"))
+        add_executable(nhwc-pointwise-benchmark-driver
+            tests/nhwc_pointwise_driver.c
+            src/kernels/nhwc_pack.c
+            src/simd/avx2_nhwc_pointwise.c)
+        target_link_libraries(nhwc-pointwise-benchmark-driver PRIVATE lw_ppocr_c)
+        target_include_directories(nhwc-pointwise-benchmark-driver PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/simd")
+        target_compile_features(nhwc-pointwise-benchmark-driver PRIVATE c_std_11)
+        target_compile_definitions(nhwc-pointwise-benchmark-driver PRIVATE
+            LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+        if(MSVC)
+            set_property(SOURCE src/simd/avx2_nhwc_pointwise.c APPEND PROPERTY
+                COMPILE_OPTIONS /arch:AVX2 /fp:strict)
+            target_compile_definitions(nhwc-pointwise-benchmark-driver PRIVATE
+                _CRT_SECURE_NO_WARNINGS)
+            target_compile_options(nhwc-pointwise-benchmark-driver PRIVATE /W4 /WX /utf-8)
+        else()
+            target_compile_options(nhwc-pointwise-benchmark-driver PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+        endif()
+        add_test(NAME nhwc_pointwise_benchmark
+            COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_nhwc_pointwise_benchmark.py"
+                    --driver "$<TARGET_FILE:nhwc-pointwise-benchmark-driver>")
+        set_tests_properties(nhwc_pointwise_benchmark PROPERTIES TIMEOUT 120)
+    elseif(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+        message(WARNING
+            "LW_EXPERIMENTAL_AVX2_FAST_PATH requires an x86/x64 build; benchmark target skipped")
+    endif()
     add_executable(rec-pipeline-driver tests/rec_pipeline_driver.c)
     target_link_libraries(rec-pipeline-driver PRIVATE lw_ppocr_c)
     if(WIN32)

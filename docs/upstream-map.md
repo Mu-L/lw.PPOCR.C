@@ -12,3 +12,5 @@ or the LWM format.
 The upstream project is Apache-2.0 licensed. This planner contains no copied
 Apache-2.0 implementation text; any future intrinsic/kernel translation must be
 added here with its exact source commit and corresponding notice review.
+
+The experimental NHWC pointwise kernel is an independent implementation of the repository design document; it does not copy source code from SimdPaddleOCR and remains outside the production target.
