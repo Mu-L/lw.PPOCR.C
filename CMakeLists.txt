@@ -1310,6 +1310,23 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
         target_compile_options(test-session-planner PRIVATE -Wall -Wextra -Wpedantic -Werror)
     endif()
     add_test(NAME session_planner COMMAND test-session-planner "${LW_PPOCR_C_REC_LWM}")
+    add_executable(layout-plan-driver
+        tests/layout_plan_driver.c
+        src/runtime/layout_planner.c)
+    target_link_libraries(layout-plan-driver PRIVATE lw_ppocr_c)
+    target_include_directories(layout-plan-driver PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime")
+    target_compile_features(layout-plan-driver PRIVATE c_std_11)
+    add_dependencies(layout-plan-driver convert_rec_model)
+    if(MSVC)
+        target_compile_options(layout-plan-driver PRIVATE /W4 /WX /utf-8)
+    else()
+        target_compile_options(layout-plan-driver PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(NAME layout_plan_analysis
+        COMMAND layout-plan-driver "${LW_PPOCR_C_REC_LWM}" 960)
+    add_test(NAME layout_plan_direct_input
+        COMMAND layout-plan-driver "${LW_PPOCR_C_REC_LWM}" 960 direct-nhwc)
 
     add_executable(workspace-report-driver tests/workspace_report_driver.c)
     target_link_libraries(workspace-report-driver PRIVATE lw_ppocr_c)
