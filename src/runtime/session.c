@@ -12,6 +12,7 @@
 #include "packed_matmul_internal.h"
 #include "parallel_internal.h"
 #include "cpu_features.h"
+#include "operator_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -22,8 +23,6 @@
 
 #define LW_DEFAULT_MAX_WORKSPACE_SIZE (UINT64_C(512) * UINT64_C(1024) * UINT64_C(1024))
 #define LW_DEFAULT_MAX_TENSOR_SIZE (UINT64_C(256) * UINT64_C(1024) * UINT64_C(1024))
-#define LW_OP_CONV 1u
-#define LW_OP_MATMUL 14u
 
 static void* workspace_allocate(size_t size) {
 #if defined(_WIN32)

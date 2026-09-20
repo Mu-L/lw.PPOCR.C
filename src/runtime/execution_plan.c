@@ -1,17 +1,11 @@
 #include "session_internal.h"
+#include "operator_internal.h"
 
 #include "lwm_read.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-enum {
-    LW_PLAN_OP_ADD = 2,
-    LW_PLAN_OP_MUL = 3,
-    LW_PLAN_OP_DIV = 4,
-    LW_PLAN_OP_ERF = 5,
-    LW_PLAN_OP_SOFTMAX = 15
-};
 
 static int constant_scalar_f32(const lw_session* session, uint32_t tensor_index, float expected) {
     const lw_runtime_tensor* tensor = &session->tensors[tensor_index];
@@ -60,9 +54,9 @@ int lw_match_fused_gelu(const lw_session* session, uint32_t node_index,
         const uint8_t* node2 = node1 + LWM_V0_NODE_SIZE;
         const uint8_t* node3 = node2 + LWM_V0_NODE_SIZE;
         const uint8_t* node4 = node3 + LWM_V0_NODE_SIZE;
-        if (lwm_read_u16(node0) != LW_PLAN_OP_DIV || lwm_read_u16(node1) != LW_PLAN_OP_ERF ||
-            lwm_read_u16(node2) != LW_PLAN_OP_ADD || lwm_read_u16(node3) != LW_PLAN_OP_MUL ||
-            lwm_read_u16(node4) != LW_PLAN_OP_MUL ||
+        if (lwm_read_u16(node0) != LW_OP_DIV || lwm_read_u16(node1) != LW_OP_ERF ||
+            lwm_read_u16(node2) != LW_OP_ADD || lwm_read_u16(node3) != LW_OP_MUL ||
+            lwm_read_u16(node4) != LW_OP_MUL ||
             match->inputs[1][0] != match->outputs[0] ||
             (match->inputs[2][0] != match->outputs[1] &&
              match->inputs[2][1] != match->outputs[1]) ||
@@ -150,7 +144,7 @@ static int match_ctc_greedy_tail(const lw_session* session, uint32_t* skip_tenso
     }
     node = model->bytes + (size_t)model->node_offset +
            (size_t)(model->info.node_count - 1u) * LWM_V0_NODE_SIZE;
-    if (lwm_read_u16(node) != LW_PLAN_OP_SOFTMAX || lwm_read_u16(node + 2u) != 1u ||
+    if (lwm_read_u16(node) != LW_OP_SOFTMAX || lwm_read_u16(node + 2u) != 1u ||
         lwm_read_u16(node + 4u) != 1u) {
         return 0;
     }
