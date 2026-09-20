@@ -494,6 +494,23 @@ static void layout_plan_require_layout(lw_layout_plan* plan,
         ++plan->layout_conversion_count;
     }
 }
+static void layout_plan_publish_output(const lw_session* session, lw_layout_plan* plan,
+                                       uint32_t output_index, uint8_t output_layout) {
+    if (session == NULL || plan == NULL || output_index >= plan->tensor_count) {
+        return;
+    }
+    if (lw_layout_tensor_is_neutral(session, output_index)) {
+        plan->tensor_layout[output_index] = LW_FAST_LAYOUT_NCHW;
+        plan->tensor_available_layouts[output_index] =
+            (uint8_t)(LW_LAYOUT_AVAILABLE_NCHW | LW_LAYOUT_AVAILABLE_NHWC);
+    } else if (output_layout == LW_FAST_LAYOUT_NHWC) {
+        plan->tensor_layout[output_index] = LW_FAST_LAYOUT_NHWC;
+        plan->tensor_available_layouts[output_index] = LW_LAYOUT_AVAILABLE_NHWC;
+    } else {
+        plan->tensor_layout[output_index] = LW_FAST_LAYOUT_NCHW;
+        plan->tensor_available_layouts[output_index] = LW_LAYOUT_AVAILABLE_NCHW;
+    }
+}
 void lw_layout_plan_free(lw_layout_plan* plan) {
     if (plan == NULL) {
         return;
@@ -543,7 +560,8 @@ lw_status lw_layout_plan_build(const lw_session* session,
         if ((session->tensors[tensor_index].flags & LWM_V0_TENSOR_FLAG_INPUT) != 0u &&
             options->allow_direct_nhwc_graph_input != 0u &&
             layout_graph_input_can_start_nhwc(session, tensor_index) &&
-            layout_rank4_f32(&session->tensors[tensor_index])) {
+            layout_rank4_f32(&session->tensors[tensor_index]) &&
+            !lw_layout_tensor_is_neutral(session, tensor_index)) {
             plan->tensor_layout[tensor_index] = LW_FAST_LAYOUT_NHWC;
             plan->tensor_available_layouts[tensor_index] = LW_LAYOUT_AVAILABLE_NHWC;
             plan->graph_input_direct_nhwc = 1u;
@@ -563,10 +581,8 @@ lw_status lw_layout_plan_build(const lw_session* session,
             if (!layout_node_activation_input(session, node, input_slot, &input_index)) {
                 continue;
             }
-            if (plan->tensor_layout[input_index] == LW_FAST_LAYOUT_NHWC) {
+            if ((plan->tensor_available_layouts[input_index] & LW_LAYOUT_AVAILABLE_NHWC) != 0u) {
                 has_nhwc_input = 1;
-            } else {
-                has_nchw_input = 1;
             }
         }
         if (capable && (has_nhwc_input || layout_dense_conv_node(session, node) ||
@@ -584,22 +600,11 @@ lw_status lw_layout_plan_build(const lw_session* session,
             in_nhwc_island = 1;
             for (input_slot = 0u; input_slot < lwm_read_u16(node + 2u); ++input_slot) {
                 uint32_t input_index;
-                if (layout_node_activation_input(session, node, input_slot, &input_index) &&
-                    !lw_layout_tensor_is_neutral(session, input_index) &&
-                    plan->tensor_layout[input_index] != LW_FAST_LAYOUT_NHWC) {
+                if (layout_node_activation_input(session, node, input_slot, &input_index)) {
                     layout_plan_require_layout(plan, input_index, LW_FAST_LAYOUT_NHWC);
                 }
             }
-            if (output_index < plan->tensor_count) {
-                if (lw_layout_tensor_is_neutral(session, output_index)) {
-                    plan->tensor_layout[output_index] = LW_FAST_LAYOUT_NCHW;
-                    plan->tensor_available_layouts[output_index] =
-                        (uint8_t)(LW_LAYOUT_AVAILABLE_NCHW | LW_LAYOUT_AVAILABLE_NHWC);
-                } else {
-                    plan->tensor_layout[output_index] = LW_FAST_LAYOUT_NHWC;
-                    plan->tensor_available_layouts[output_index] = LW_LAYOUT_AVAILABLE_NHWC;
-                }
-            }
+            layout_plan_publish_output(session, plan, output_index, LW_FAST_LAYOUT_NHWC);
         } else {
             plan->node_layout[node_index] = LW_FAST_LAYOUT_NCHW;
             if (plan->nchw_node_count != UINT32_MAX) {
@@ -608,16 +613,11 @@ lw_status lw_layout_plan_build(const lw_session* session,
             in_nhwc_island = 0;
             for (input_slot = 0u; node != NULL && input_slot < lwm_read_u16(node + 2u); ++input_slot) {
                 uint32_t input_index;
-                if (layout_node_activation_input(session, node, input_slot, &input_index) &&
-                    !lw_layout_tensor_is_neutral(session, input_index) &&
-                    plan->tensor_layout[input_index] == LW_FAST_LAYOUT_NHWC) {
+                if (layout_node_activation_input(session, node, input_slot, &input_index)) {
                     layout_plan_require_layout(plan, input_index, LW_FAST_LAYOUT_NCHW);
                 }
             }
-            if (output_index < plan->tensor_count) {
-                plan->tensor_layout[output_index] = LW_FAST_LAYOUT_NCHW;
-                plan->tensor_available_layouts[output_index] = LW_LAYOUT_AVAILABLE_NCHW;
-            }
+            layout_plan_publish_output(session, plan, output_index, LW_FAST_LAYOUT_NCHW);
         }
         (void)has_nchw_input;
     }

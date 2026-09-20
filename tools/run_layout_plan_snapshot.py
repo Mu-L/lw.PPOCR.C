@@ -112,6 +112,7 @@ def main() -> int:
     parser.add_argument("--contract", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--direct-input", action="store_true")
+    parser.add_argument("--update-contract", action="store_true")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
@@ -138,8 +139,31 @@ def main() -> int:
     if completed.returncode != 0:
         raise RuntimeError(f"layout planner exited with {completed.returncode}")
     parsed = parse_output(completed.stdout)
-    expected = load_contract(contract_path, args.variant)
-    check_expected(parsed["summary"], expected, args.variant)
+    if args.update_contract:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        variants = contract.get("variants")
+        if not isinstance(variants, dict) or args.variant not in variants:
+            raise ValueError(f"layout planner contract has no variant: {args.variant}")
+        fields = (
+            "tensor_count",
+            "node_count",
+            "nhwc_nodes",
+            "nchw_nodes",
+            "conversions",
+            "islands",
+            "width",
+        )
+        variants[args.variant] = {
+            field: parsed["summary"][field] for field in fields
+        }
+        contract_path.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+    else:
+        expected = load_contract(contract_path, args.variant)
+        check_expected(parsed["summary"], expected, args.variant)
     report = {
         "schema_version": 1,
         "variant": args.variant,

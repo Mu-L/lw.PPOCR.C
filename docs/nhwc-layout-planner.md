@@ -23,9 +23,9 @@ converted Small/Medium validation models are:
 
 | Variant | Tensors | Nodes | NHWC nodes | NCHW nodes | Islands | Conversions |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Tiny | 274 | 159 | 121 | 38 | 5 | 10 |
-| Small | 563 | 336 | 200 | 136 | 8 | 18 |
-| Medium | 595 | 355 | 238 | 117 | 9 | 19 |
+| Tiny | 274 | 159 | 118 | 41 | 8 | 4 |
+| Small | 563 | 336 | 188 | 148 | 12 | 4 |
+| Medium | 595 | 355 | 221 | 134 | 14 | 4 |
 
 The Small and Medium workflows reuse the `converted-runtime/rec.lwm` produced
 by their existing model validation jobs. A snapshot mismatch fails the job
