@@ -1,6 +1,7 @@
 #include "x64_rec_fast_internal.h"
 
 #include "lwm_read.h"
+#include "operator_internal.h"
 
 #include <limits.h>
 #include <stdlib.h>
@@ -19,6 +20,119 @@ static int fast_tensor_eligible(const lw_runtime_tensor* tensor) {
            tensor->dimensions[2] > 0 && tensor->dimensions[3] > 0;
 }
 
+static const float* fast_constant_f32(const lw_session* session, uint32_t tensor_index) {
+    const lw_runtime_tensor* tensor;
+    const uint8_t* disk;
+    uint64_t data_offset;
+    if (session == NULL || session->model == NULL || tensor_index >= session->model->info.tensor_count) {
+        return NULL;
+    }
+    tensor = &session->tensors[tensor_index];
+    if (tensor->dtype != LW_DTYPE_F32 ||
+        (tensor->flags & LWM_V0_TENSOR_FLAG_CONSTANT) == 0u) return NULL;
+    disk = session->model->bytes + (size_t)session->model->tensor_offset +
+           (size_t)tensor_index * LWM_V0_TENSOR_SIZE;
+    data_offset = lwm_read_u64(disk + 48u);
+    if (data_offset > session->model->byte_count ||
+        tensor->byte_size > session->model->byte_count - data_offset) return NULL;
+    return (const float*)(const void*)(session->model->bytes + (size_t)data_offset);
+}
+
+static int fast_prepare_conv(lw_x64_rec_fast_plan* plan, uint32_t node_index,
+                             lw_x64_fast_node* fast_node) {
+    lw_session* session;
+    const uint8_t* node;
+    const uint8_t* params;
+    const lw_runtime_tensor* input;
+    const lw_runtime_tensor* weight;
+    const lw_runtime_tensor* output;
+    lw_x64_fast_conv* conv;
+    uint32_t input_index;
+    uint32_t weight_index;
+    uint32_t bias_index;
+    uint32_t group;
+    int32_t kh, kw, sh, sw, dh, dw, pt, pl, pb, pr;
+    uint64_t packed_count;
+    uint64_t scratch_bytes;
+    if (plan == NULL || fast_node == NULL || node_index >= plan->node_count ||
+        plan->layout.node_layout[node_index] != LW_FAST_LAYOUT_NHWC) return 0;
+    session = plan->session;
+    node = session->model->bytes + (size_t)session->model->node_offset +
+           (size_t)node_index * LWM_V0_NODE_SIZE;
+    if (lwm_read_u16(node) != LW_OP_CONV || lwm_read_u16(node + 2u) < 2u ||
+        lwm_read_u16(node + 2u) > 3u || lwm_read_u16(node + 4u) != 1u) return 0;
+    params = session->model->bytes + (size_t)lwm_read_u64(node + 56u);
+    input_index = lwm_read_u32(node + 8u);
+    weight_index = lwm_read_u32(node + 12u);
+    bias_index = lwm_read_u16(node + 2u) >= 3u ? lwm_read_u32(node + 16u) : UINT32_MAX;
+    if (input_index >= plan->tensor_count || weight_index >= plan->tensor_count ||
+        (bias_index != UINT32_MAX && bias_index >= plan->tensor_count)) return 0;
+    input = &session->tensors[input_index];
+    weight = &session->tensors[weight_index];
+    output = &session->tensors[lwm_read_u32(node + 40u)];
+    group = lwm_read_u32(params + 4u);
+    kh = lwm_read_i32(params + 8u); kw = lwm_read_i32(params + 12u);
+    sh = lwm_read_i32(params + 16u); sw = lwm_read_i32(params + 20u);
+    dh = lwm_read_i32(params + 24u); dw = lwm_read_i32(params + 28u);
+    pt = lwm_read_i32(params + 32u); pl = lwm_read_i32(params + 36u);
+    pb = lwm_read_i32(params + 40u); pr = lwm_read_i32(params + 44u);
+    if (group != 1u || kh <= 0 || kw <= 0 || sh <= 0 || sw <= 0 || dh != 1 || dw != 1 ||
+        pt < 0 || pl < 0 || pt != pb || pl != pr || !fast_tensor_eligible(input) ||
+        !fast_tensor_eligible(output) || weight->dtype != LW_DTYPE_F32 || weight->rank != 4u ||
+        (weight->flags & LWM_V0_TENSOR_FLAG_CONSTANT) == 0u ||
+        weight->dimensions[0] != output->dimensions[1] ||
+        weight->dimensions[1] != input->dimensions[1] || weight->dimensions[2] != kh ||
+        weight->dimensions[3] != kw || output->dimensions[1] < 16 ||
+        ((uint32_t)output->dimensions[1] % LW_NHWC_OC_BLOCK) != 0u) return 0;
+    conv = &fast_node->data.conv;
+    memset(conv, 0, sizeof(*conv));
+    conv->input_index = input_index; conv->output_index = lwm_read_u32(node + 40u);
+    conv->weight_index = weight_index; conv->bias_index = bias_index;
+    conv->input_channels = (uint32_t)input->dimensions[1];
+    conv->output_channels = (uint32_t)output->dimensions[1];
+    conv->input_height = (uint32_t)input->dimensions[2];
+    conv->input_width = (uint32_t)input->dimensions[3];
+    conv->output_height = (uint32_t)output->dimensions[2];
+    conv->output_width = (uint32_t)output->dimensions[3];
+    conv->kernel_h = (uint32_t)kh; conv->kernel_w = (uint32_t)kw;
+    conv->stride_h = (uint32_t)sh; conv->stride_w = (uint32_t)sw;
+    conv->pad_top = (uint32_t)pt; conv->pad_left = (uint32_t)pl;
+    conv->dense_kc = LW_NHWC_DENSE_KC;
+    conv->bias = bias_index == UINT32_MAX ? NULL : fast_constant_f32(session, bias_index);
+    if (bias_index != UINT32_MAX && conv->bias == NULL) return 0;
+    if (fast_constant_f32(session, weight_index) == NULL ||
+        !lw_nhwc_dense_packed_weight_count(conv->input_channels, conv->output_channels,
+                                            conv->kernel_h, conv->kernel_w, &packed_count) ||
+        packed_count > SIZE_MAX / sizeof(float)) return 0;
+    conv->packed_weights = (float*)malloc((size_t)packed_count * sizeof(float));
+    if (conv->packed_weights == NULL) return 0;
+    conv->packed_weight_count = packed_count;
+    lw_pack_nhwc_dense_f32(fast_constant_f32(session, weight_index), conv->input_channels,
+                           conv->output_channels, conv->kernel_h, conv->kernel_w,
+                           conv->packed_weights);
+    if (kh == 1 && kw == 1 && sh == 1 && sw == 1 && pt == 0 && pl == 0) {
+        fast_node->kind = LW_X64_FAST_NODE_POINTWISE;
+        ++plan->pointwise_node_count;
+    } else {
+        lw_nhwc_dense_desc desc;
+        memset(&desc, 0, sizeof(desc));
+        desc.batch = (uint32_t)input->dimensions[0];
+        desc.input_channels = conv->input_channels; desc.input_height = conv->input_height;
+        desc.input_width = conv->input_width; desc.output_channels = conv->output_channels;
+        desc.output_height = conv->output_height; desc.output_width = conv->output_width;
+        desc.kernel_h = conv->kernel_h; desc.kernel_w = conv->kernel_w;
+        desc.stride_h = conv->stride_h; desc.stride_w = conv->stride_w;
+        desc.pad_top = conv->pad_top; desc.pad_left = conv->pad_left; desc.dense_kc = conv->dense_kc;
+        if (!lw_nhwc_dense_scratch_bytes(&desc, &scratch_bytes) || scratch_bytes > SIZE_MAX) {
+            free(conv->packed_weights); conv->packed_weights = NULL; return 0;
+        }
+        conv->scratch_bytes = scratch_bytes;
+        if ((size_t)scratch_bytes > plan->scratch_bytes) plan->scratch_bytes = (size_t)scratch_bytes;
+        fast_node->kind = LW_X64_FAST_NODE_DENSE;
+        ++plan->dense_node_count;
+    }
+    return 1;
+}
 static lw_status fast_allocate_tensor_twins(lw_x64_rec_fast_plan* plan, lw_error* error) {
     size_t total = 0u;
     if (plan == NULL || plan->session == NULL || plan->session->model == NULL) {
@@ -107,8 +221,17 @@ lw_status lw_x64_rec_fast_plan_create(lw_session* session,
         plan->nodes[node_index].kind = LW_X64_FAST_NODE_GENERIC;
         plan->nodes[node_index].semantic_node_count = 1u;
         plan->nodes[node_index].output_index = lwm_read_u32(node + 40u);
+        if (fast_prepare_conv(plan, node_index, &plan->nodes[node_index])) ++plan->fast_node_count;
     }
-    plan->generic_node_count = plan->node_count;
+    plan->generic_node_count = plan->node_count - plan->fast_node_count;
+    if (plan->scratch_bytes != 0u) {
+        plan->scratch = (uint8_t*)malloc(plan->scratch_bytes);
+        if (plan->scratch == NULL) {
+            lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "unable to allocate fast scratch");
+            lw_x64_rec_fast_plan_free(plan);
+            return LW_STATUS_OUT_OF_MEMORY;
+        }
+    }
     lw_set_error(error, LW_STATUS_OK, "");
     *out_plan = plan;
     return LW_STATUS_OK;
@@ -116,6 +239,12 @@ lw_status lw_x64_rec_fast_plan_create(lw_session* session,
 
 void lw_x64_rec_fast_plan_free(lw_x64_rec_fast_plan* plan) {
     if (plan == NULL) return;
+    if (plan->nodes != NULL) {
+        uint32_t index;
+        for (index = 0u; index < plan->node_count; ++index) {
+            free(plan->nodes[index].data.conv.packed_weights);
+        }
+    }
     free(plan->scratch);
     free(plan->nhwc_workspace);
     free(plan->tensors);

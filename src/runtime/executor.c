@@ -1059,6 +1059,53 @@ static lw_status execute_bound_conv3x3(lw_session* session, const lw_bound_node*
 
 #endif
 
+/* Execute one semantic node through the strongest legacy path available.  The
+ * Hybrid executor uses this bridge whenever an NHWC implementation is not
+ * proven for the current node. */
+lw_status lw_executor_execute_best_node_f32(lw_session* session, uint32_t node_index,
+                                            uint32_t graph_input_index,
+                                            const float* graph_input,
+                                            lw_execution_profile* profile,
+                                            uint32_t* consumed_nodes) {
+    const uint8_t* node;
+    uint32_t operation;
+    if (consumed_nodes != NULL) {
+        *consumed_nodes = 1u;
+    }
+    if (session == NULL || session->model == NULL ||
+        node_index >= session->model->info.node_count) {
+        return LW_STATUS_INVALID_ARGUMENT;
+    }
+    node = session->model->bytes + (size_t)session->model->node_offset +
+           (size_t)node_index * LWM_V0_NODE_SIZE;
+    operation = (uint32_t)lwm_read_u16(node);
+    if (lw_simd_level_is_avx2(session->cpu.simd) && operation == LW_OP_DIV) {
+        const float* gelu_input;
+        float* gelu_output;
+        uint64_t element_count;
+        if (match_avx2_gelu(session, node_index, graph_input_index, graph_input,
+                            &gelu_input, &gelu_output, &element_count)) {
+            lw_avx2_gelu_f32(gelu_input, gelu_output, element_count);
+            if (consumed_nodes != NULL) {
+                *consumed_nodes = 5u;
+            }
+            return LW_STATUS_OK;
+        }
+    }
+#if defined(LW_EXPERIMENTAL_PREPARED_EXECUTION)
+    if (session->execution_nodes != NULL && node_index < session->execution_node_count) {
+        const lw_bound_node* bound = &session->execution_nodes[node_index];
+        if (bound->execution_kind == LW_BOUND_EXEC_CONV1X1_PACKED) {
+            return execute_bound_conv1x1(session, bound, graph_input_index, graph_input, profile);
+        }
+        if (bound->execution_kind == LW_BOUND_EXEC_CONV3X3_PACKED) {
+            return execute_bound_conv3x3(session, bound, graph_input_index, graph_input, profile);
+        }
+    }
+#endif
+    return dispatch_node(session, node, node_index, graph_input_index, graph_input,
+                         session->cpu.simd, profile);
+}
 static lw_status execute_session_nodes_f32(lw_session* session, const float* input,
                                            uint64_t input_element_count, uint32_t node_limit,
                                            lw_execution_profile* profile, lw_error* error) {

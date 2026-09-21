@@ -38,11 +38,38 @@ typedef struct lw_x64_fast_tensor_state {
     uint16_t reserved;
 } lw_x64_fast_tensor_state;
 
+typedef struct lw_x64_fast_conv {
+    uint32_t input_index;
+    uint32_t output_index;
+    uint32_t weight_index;
+    uint32_t bias_index;
+    uint32_t input_channels;
+    uint32_t output_channels;
+    uint32_t input_height;
+    uint32_t input_width;
+    uint32_t output_height;
+    uint32_t output_width;
+    uint32_t kernel_h;
+    uint32_t kernel_w;
+    uint32_t stride_h;
+    uint32_t stride_w;
+    uint32_t pad_top;
+    uint32_t pad_left;
+    uint32_t dense_kc;
+    float* packed_weights;
+    uint64_t packed_weight_count;
+    const float* bias;
+    uint64_t scratch_bytes;
+} lw_x64_fast_conv;
+
 typedef struct lw_x64_fast_node {
     uint32_t semantic_node_index;
     uint16_t kind;
     uint16_t semantic_node_count;
     uint32_t output_index;
+    union {
+        lw_x64_fast_conv conv;
+    } data;
 } lw_x64_fast_node;
 
 typedef struct lw_x64_rec_fast_plan {
@@ -60,6 +87,9 @@ typedef struct lw_x64_rec_fast_plan {
     uint32_t graph_output_index;
     uint32_t fast_node_count;
     uint32_t generic_node_count;
+    uint32_t pointwise_node_count;
+    uint32_t dense_node_count;
+    uint32_t depthwise_node_count;
     uint64_t conversion_count;
     uint64_t conversion_bytes;
 } lw_x64_rec_fast_plan;

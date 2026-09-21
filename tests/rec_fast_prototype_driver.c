@@ -5,6 +5,10 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 #include <stdlib.h>
 
 static int parse_u32(const char* text, uint32_t* value) {
@@ -15,6 +19,45 @@ static int parse_u32(const char* text, uint32_t* value) {
     if (end == text || *end != 0 || parsed == 0u || parsed > UINT32_MAX) return 0;
     *value = (uint32_t)parsed;
     return 1;
+}
+
+static uint64_t now_ns(void) {
+#if defined(_WIN32)
+    LARGE_INTEGER counter;
+    LARGE_INTEGER frequency;
+    QueryPerformanceCounter(&counter);
+    QueryPerformanceFrequency(&frequency);
+    return (uint64_t)((counter.QuadPart * UINT64_C(1000000000)) / frequency.QuadPart);
+#else
+    struct timespec value;
+    timespec_get(&value, TIME_UTC);
+    return (uint64_t)value.tv_sec * UINT64_C(1000000000) + (uint64_t)value.tv_nsec;
+#endif
+}
+
+static int run_legacy(lw_session* session, const float* input, uint64_t input_count,
+                      float* output, uint64_t output_count, lw_error* error) {
+    return lw_execute_session_f32(session, input, input_count, output, output_count, error) == LW_STATUS_OK;
+}
+
+static int run_fast(lw_x64_rec_fast_plan* plan, const float* input, uint64_t input_count,
+                    float* output, uint64_t output_count, lw_error* error) {
+    return lw_x64_rec_fast_run(plan, input, input_count, output, output_count, error) == LW_STATUS_OK;
+}
+
+static double median_ms(double* values, uint32_t count) {
+    uint32_t i;
+    uint32_t j;
+    for (i = 0u; i < count; ++i) {
+        for (j = i + 1u; j < count; ++j) {
+            if (values[j] < values[i]) {
+                double swap = values[i];
+                values[i] = values[j];
+                values[j] = swap;
+            }
+        }
+    }
+    return values[count / 2u];
 }
 
 static int test_layout_roundtrip(void) {
@@ -68,6 +111,11 @@ int main(int argc, char** argv) {
     float max_abs = 0.0f;
     uint64_t mismatch = 0u;
     int exit_code = 1;
+    double legacy_samples[9];
+    double fast_samples[9];
+    uint32_t sample_index;
+    double legacy_ms;
+    double fast_ms;
 
     if (!test_layout_roundtrip()) {
         fprintf(stderr, "NCHW/NHWC layout roundtrip failed\n" );
@@ -136,12 +184,46 @@ int main(int argc, char** argv) {
         if (difference > max_abs) max_abs = difference;
         if (difference > 1.0e-4f) ++mismatch;
     }
-    printf("{\"width\":%u,\"max_abs\":%.9g,\"mismatch\":%llu,\"fast_nodes\":%u,\"generic_nodes\":%u,\"conversion_count\":%llu,\"conversion_bytes\":%llu,\"nhwc_workspace_bytes\":%llu}\n",
-           width, (double)max_abs, (unsigned long long)mismatch, plan->fast_node_count,
-           plan->generic_node_count, (unsigned long long)plan->conversion_count,
+    for (sample_index = 0u; sample_index < 2u; ++sample_index) {
+        if (!run_legacy(session, input, input_count, expected, output_count, &error) ||
+            !run_fast(plan, input, input_count, actual, output_count, &error)) {
+            fprintf(stderr, "benchmark warmup failed: %s\n", error.message);
+            goto cleanup;
+        }
+    }
+    for (sample_index = 0u; sample_index < 9u; ++sample_index) {
+        uint64_t started;
+        uint64_t finished;
+        if ((sample_index & 1u) == 0u) {
+            started = now_ns();
+            if (!run_legacy(session, input, input_count, expected, output_count, &error)) goto cleanup;
+            finished = now_ns();
+            legacy_samples[sample_index] = (double)(finished - started) / 1000000.0;
+            started = now_ns();
+            if (!run_fast(plan, input, input_count, actual, output_count, &error)) goto cleanup;
+            finished = now_ns();
+            fast_samples[sample_index] = (double)(finished - started) / 1000000.0;
+        } else {
+            started = now_ns();
+            if (!run_fast(plan, input, input_count, actual, output_count, &error)) goto cleanup;
+            finished = now_ns();
+            fast_samples[sample_index] = (double)(finished - started) / 1000000.0;
+            started = now_ns();
+            if (!run_legacy(session, input, input_count, expected, output_count, &error)) goto cleanup;
+            finished = now_ns();
+            legacy_samples[sample_index] = (double)(finished - started) / 1000000.0;
+        }
+    }
+    legacy_ms = median_ms(legacy_samples, 9u);
+    fast_ms = median_ms(fast_samples, 9u);
+    printf("{\"width\":%u,\"legacy_ms\":%.6f,\"fast_ms\":%.6f,\"speedup\":%.6f,\"max_abs\":%.9g,\"mismatch\":%llu,\"fast_nodes\":%u,\"generic_nodes\":%u,\"pointwise_nodes\":%u,\"dense_nodes\":%u,\"conversion_count\":%llu,\"conversion_bytes\":%llu,\"nhwc_workspace_bytes\":%llu}\n",
+           width, legacy_ms, fast_ms, fast_ms > 0.0 ? legacy_ms / fast_ms : 0.0,
+           (double)max_abs, (unsigned long long)mismatch, plan->fast_node_count,
+           plan->generic_node_count, plan->pointwise_node_count, plan->dense_node_count,
+           (unsigned long long)plan->conversion_count,
            (unsigned long long)plan->conversion_bytes,
            (unsigned long long)plan->nhwc_workspace_bytes);
-    exit_code = mismatch == 0u ? 0 : 1;
+    exit_code = mismatch == 0u && plan->pointwise_node_count != 0u && plan->dense_node_count != 0u ? 0 : 1;
 
 cleanup:
     lw_x64_rec_fast_plan_free(plan);
