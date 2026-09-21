@@ -62,6 +62,18 @@ typedef struct lw_nhwc_dense_desc {
 
 int lw_nhwc_dense_scratch_bytes(const lw_nhwc_dense_desc* desc, uint64_t* scratch_bytes);
 
+int lw_nhwc_dense_prepared_scratch_bytes(const lw_nhwc_dense_desc* desc, uint64_t* scratch_bytes);
+
+lw_status lw_avx2_fma_nhwc_dense_prepared_f32(const float* input,
+                                             const float* packed_weights,
+                                             const int32_t* input_offsets_k,
+                                             const int32_t* patch_offsets_k,
+                                             const lw_nhwc_epilogue* epilogue,
+                                             float* output,
+                                             const lw_nhwc_dense_desc* desc,
+                                             void* scratch,
+                                             uint64_t scratch_bytes);
+
 lw_status lw_avx2_fma_nhwc_dense_f32(const float* input,
                                      const float* packed_weights,
                                      const lw_nhwc_epilogue* epilogue,

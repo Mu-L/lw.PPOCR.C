@@ -72,6 +72,8 @@ static void fast_reset_layouts(lw_x64_rec_fast_plan* plan) {
     if (plan == NULL) return;
     plan->conversion_count = 0u;
     plan->conversion_bytes = 0u;
+    plan->depthwise_x2_invocations = 0u;
+    plan->depthwise_x1_invocations = 0u;
     for (index = 0u; index < plan->tensor_count; ++index) {
         plan->tensors[index].available_layouts = 0u;
     }
@@ -289,7 +291,8 @@ static lw_status fast_execute_dense(lw_x64_rec_fast_plan* plan,
             return LW_STATUS_UNSUPPORTED;
         }
     }
-    status = lw_avx2_fma_nhwc_dense_f32(input, conv->packed_weights, &epilogue, output,
+    status = lw_avx2_fma_nhwc_dense_prepared_f32(input, conv->packed_weights,
+        conv->dense_input_offsets_k, conv->dense_patch_offsets_k, &epilogue, output,
                                         &desc, plan->scratch, plan->scratch_bytes);
     if (status != LW_STATUS_OK) {
         lw_set_error(error, status, "dense fast kernel failed");
@@ -530,6 +533,52 @@ static lw_status fast_execute_concat(lw_x64_rec_fast_plan* plan,
     fast_publish_nhwc(plan, op->output_index);
     return LW_STATUS_OK;
 }
+static int fast_depthwise_pair_is_interior(const lw_x64_fast_conv* conv,
+                                          uint32_t output_y, uint32_t output_x) {
+    int32_t input_y0;
+    int32_t input_x0;
+    if (conv == NULL || output_x + 1u >= conv->output_width) return 0;
+    input_y0 = (int32_t)((uint64_t)output_y * conv->stride_h) - (int32_t)conv->pad_top;
+    input_x0 = (int32_t)((uint64_t)output_x * conv->stride_w) - (int32_t)conv->pad_left;
+    return input_y0 >= 0 &&
+           input_y0 + (int32_t)conv->kernel_h <= (int32_t)conv->input_height &&
+           input_x0 >= 0 &&
+           input_x0 + (int32_t)conv->stride_w + (int32_t)conv->kernel_w <=
+               (int32_t)conv->input_width;
+}
+
+static void fast_record_depthwise_dispatch(lw_x64_rec_fast_plan* plan,
+                                           const lw_x64_fast_conv* conv) {
+    uint32_t block_count;
+    if (plan == NULL || conv == NULL) return;
+    block_count = (conv->input_channels + LW_NHWC_DEPTHWISE_BLOCK - 1u) /
+                  LW_NHWC_DEPTHWISE_BLOCK;
+    for (uint32_t block = 0u; block < block_count; ++block) {
+        uint32_t channel_base = block * LW_NHWC_DEPTHWISE_BLOCK;
+        uint32_t remaining = conv->input_channels - channel_base;
+        uint32_t current_channels = remaining > LW_NHWC_DEPTHWISE_BLOCK
+            ? LW_NHWC_DEPTHWISE_BLOCK : remaining;
+        uint32_t vector_count = current_channels / 8u;
+        for (uint32_t output_y = 0u; output_y < conv->output_height; ++output_y) {
+            uint32_t output_x = 0u;
+            while (output_x < conv->output_width) {
+                if (output_x + 1u < conv->output_width &&
+                    vector_count == 4u &&
+                    fast_depthwise_pair_is_interior(conv, output_y, output_x)) {
+                    if (plan->depthwise_x2_invocations != UINT64_MAX) {
+                        ++plan->depthwise_x2_invocations;
+                    }
+                    output_x += 2u;
+                } else {
+                    if (plan->depthwise_x1_invocations != UINT64_MAX) {
+                        ++plan->depthwise_x1_invocations;
+                    }
+                    ++output_x;
+                }
+            }
+        }
+    }
+}
 static lw_status fast_execute_depthwise(lw_x64_rec_fast_plan* plan,
                                         const lw_x64_physical_op* node,
                                         uint32_t graph_input_index,
@@ -563,6 +612,7 @@ static lw_status fast_execute_depthwise(lw_x64_rec_fast_plan* plan,
     desc.pad_left = conv->pad_left;
     desc.pad_bottom = conv->pad_bottom;
     desc.pad_right = conv->pad_right;
+    fast_record_depthwise_dispatch(plan, conv);
     status = lw_avx2_fma_nhwc_depthwise_f32(input, conv->packed_weights, conv->bias,
                                              output, &desc);
     if (status != LW_STATUS_OK) {

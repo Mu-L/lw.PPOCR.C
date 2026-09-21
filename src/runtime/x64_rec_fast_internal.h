@@ -74,6 +74,8 @@ typedef struct lw_x64_fast_conv {
     float* owned_bias;
     int32_t* dense_tap_offsets;
     int32_t* dense_patch_offsets;
+    int32_t* dense_input_offsets_k;
+    int32_t* dense_patch_offsets_k;
     uint32_t dense_taps;
     uint32_t dense_k_total;
     uint32_t dense_patch_width;
@@ -204,6 +206,8 @@ typedef struct lw_x64_rec_fast_plan {
     uint32_t unsupported_nhwc_by_operator[LW_X64_FAST_OPERATOR_CAPACITY];
     uint64_t conversion_count;
     uint64_t conversion_bytes;
+    uint64_t depthwise_x2_invocations;
+    uint64_t depthwise_x1_invocations;
 } lw_x64_rec_fast_plan;
 
 lw_status lw_x64_rec_fast_plan_create(lw_session* session,

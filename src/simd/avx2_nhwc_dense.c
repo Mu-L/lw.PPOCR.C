@@ -101,6 +101,68 @@ int lw_nhwc_dense_scratch_bytes(const lw_nhwc_dense_desc* desc, uint64_t* scratc
     return 1;
 }
 
+int lw_nhwc_dense_prepared_scratch_bytes(const lw_nhwc_dense_desc* desc, uint64_t* scratch_bytes) {
+    uint64_t taps;
+    uint64_t k_total;
+    uint64_t patch_width;
+    uint64_t x_tiles;
+    uint64_t patch_floats;
+    uint64_t partial_floats;
+    uint64_t bytes;
+    uint64_t aligned;
+    if (scratch_bytes == NULL || !dense_geometry(desc, &taps, &k_total, &patch_width, &x_tiles)) {
+        return 0;
+    }
+    (void)taps;
+    (void)k_total;
+    (void)x_tiles;
+    if (!dense_mul_u64(desc->kernel_h, patch_width, &patch_floats) ||
+        !dense_mul_u64(patch_floats, desc->input_channels, &patch_floats) ||
+        !dense_mul_u64(patch_floats, sizeof(float), &bytes) ||
+        !dense_align64(bytes, &aligned) ||
+        !dense_mul_u64(LW_NHWC_PARTIAL_FLOATS, sizeof(float), &partial_floats) ||
+        !dense_add_u64(aligned, partial_floats, &bytes) ||
+        bytes > SIZE_MAX) {
+        return 0;
+    }
+    *scratch_bytes = bytes;
+    return 1;
+}
+
+static int dense_prepared_scratch_views(const lw_nhwc_dense_desc* desc, void* scratch,
+                                        uint64_t scratch_bytes, float** patch,
+                                        float** partial) {
+    uint64_t required;
+    uint64_t taps;
+    uint64_t k_total;
+    uint64_t patch_width;
+    uint64_t x_tiles;
+    uint64_t patch_floats;
+    uint64_t patch_bytes;
+    uint64_t partial_bytes;
+    uint64_t aligned;
+    if (scratch == NULL || patch == NULL || partial == NULL ||
+        !lw_nhwc_dense_prepared_scratch_bytes(desc, &required) ||
+        scratch_bytes < required ||
+        !dense_geometry(desc, &taps, &k_total, &patch_width, &x_tiles)) {
+        return 0;
+    }
+    (void)taps;
+    (void)k_total;
+    (void)x_tiles;
+    if (!dense_mul_u64(desc->kernel_h, patch_width, &patch_floats) ||
+        !dense_mul_u64(patch_floats, desc->input_channels, &patch_floats) ||
+        !dense_mul_u64(patch_floats, sizeof(float), &patch_bytes) ||
+        !dense_align64(patch_bytes, &aligned) ||
+        !dense_mul_u64(LW_NHWC_PARTIAL_FLOATS, sizeof(float), &partial_bytes) ||
+        !dense_add_u64(aligned, partial_bytes, &partial_bytes)) {
+        return 0;
+    }
+    *patch = (float*)scratch;
+    *partial = (float*)((uint8_t*)scratch + (size_t)aligned);
+    return 1;
+}
+
 static int dense_scratch_views(const lw_nhwc_dense_desc* desc, void* scratch,
                                uint64_t scratch_bytes, int32_t** tap_offsets,
                                int32_t** patch_offsets, float** patch, float** partial) {
@@ -199,7 +261,7 @@ static float dense_apply_activation(float value, uint16_t activation) {
 
 #if !defined(LW_NHWC_X86)
 static void dense_tile_scalar(const float* const* row_ptrs, uint32_t rows,
-                              const int32_t* offsets, uint32_t taps,
+                              const int32_t* offsets, const int32_t* direct_offsets, uint32_t taps,
                               const float* packed, uint32_t k0, uint32_t k_end,
                               uint32_t k_total, const lw_nhwc_epilogue* epilogue,
                               float* output, uint32_t output_stride, float* partial) {
@@ -217,11 +279,16 @@ static void dense_tile_scalar(const float* const* row_ptrs, uint32_t rows,
         memcpy(sums, partial, sizeof(sums));
     }
     for (uint32_t k = k0; k < k_end; ++k) {
-        uint32_t ic = k / taps;
-        uint32_t tap = k - ic * taps;
+        int32_t input_offset;
+        if (direct_offsets != NULL) input_offset = direct_offsets[k];
+        else {
+            uint32_t ic = k / taps;
+            uint32_t tap = k - ic * taps;
+            input_offset = offsets[tap] + (int32_t)ic;
+        }
         const float* weights = packed + (size_t)(k - k0) * LW_NHWC_OC_BLOCK;
         for (row = 0u; row < LW_NHWC_PIXEL_TILE; ++row) {
-            float value = row_ptrs[row][offsets[tap] + (int32_t)ic];
+            float value = row_ptrs[row][input_offset];
             for (lane = 0u; lane < LW_NHWC_OC_BLOCK; ++lane) {
                 sums[row][lane] += value * weights[lane];
             }
@@ -254,7 +321,7 @@ static void dense_tile_scalar(const float* const* row_ptrs, uint32_t rows,
 
 LW_NHWC_DENSE_AVX2
 static void dense_tile_avx2(const float* const* row_ptrs, uint32_t rows,
-                            const int32_t* offsets, uint32_t taps,
+                            const int32_t* offsets, const int32_t* direct_offsets, uint32_t taps,
                             const float* packed, uint32_t k0, uint32_t k_end,
                             uint32_t k_total, const lw_nhwc_epilogue* epilogue,
                             float* output, uint32_t output_stride, float* partial) {
@@ -278,13 +345,18 @@ static void dense_tile_avx2(const float* const* row_ptrs, uint32_t rows,
         }
     }
     for (uint32_t k = k0; k < k_end; ++k) {
-        uint32_t ic = k / taps;
-        uint32_t tap = k - ic * taps;
+        int32_t input_offset;
+        if (direct_offsets != NULL) input_offset = direct_offsets[k];
+        else {
+            uint32_t ic = k / taps;
+            uint32_t tap = k - ic * taps;
+            input_offset = offsets[tap] + (int32_t)ic;
+        }
         const float* weights = packed + (size_t)(k - k0) * 16u;
         __m256 w0 = _mm256_loadu_ps(weights);
         __m256 w1 = _mm256_loadu_ps(weights + 8u);
         for (row = 0u; row < LW_NHWC_PIXEL_TILE; ++row) {
-            __m256 value = _mm256_set1_ps(row_ptrs[row][offsets[tap] + (int32_t)ic]);
+            __m256 value = _mm256_set1_ps(row_ptrs[row][input_offset]);
             lo[row] = _mm256_fmadd_ps(value, w0, lo[row]);
             hi[row] = _mm256_fmadd_ps(value, w1, hi[row]);
         }
@@ -385,13 +457,107 @@ lw_status lw_avx2_fma_nhwc_dense_f32(const float* input, const float* packed_wei
                         if (k_end > (uint32_t)k_total64) k_end = (uint32_t)k_total64;
 #if defined(LW_NHWC_X86)
                         dense_tile_avx2(row_ptrs, rows,
-                            interior ? tap_offsets : patch_offsets, (uint32_t)taps64,
+                            interior ? tap_offsets : patch_offsets, NULL, (uint32_t)taps64,
                             packed_block + (size_t)k0 * LW_NHWC_OC_BLOCK, k0, k_end,
                             (uint32_t)k_total64, &local_epilogue, destination,
                             desc->output_channels, partial);
 #else
                         dense_tile_scalar(row_ptrs, rows,
-                            interior ? tap_offsets : patch_offsets, (uint32_t)taps64,
+                            interior ? tap_offsets : patch_offsets, NULL, (uint32_t)taps64,
+                            packed_block + (size_t)k0 * LW_NHWC_OC_BLOCK, k0, k_end,
+                            (uint32_t)k_total64, &local_epilogue, destination,
+                            desc->output_channels, partial);
+#endif
+                    }
+                }
+            }
+        }
+    }
+    return LW_STATUS_OK;
+}
+
+lw_status lw_avx2_fma_nhwc_dense_prepared_f32(const float* input,
+                                               const float* packed_weights,
+                                               const int32_t* input_offsets_k,
+                                               const int32_t* patch_offsets_k,
+                                               const lw_nhwc_epilogue* epilogue,
+                                               float* output,
+                                               const lw_nhwc_dense_desc* desc,
+                                               void* scratch,
+                                               uint64_t scratch_bytes) {
+    float* patch;
+    float* partial;
+    uint64_t taps64;
+    uint64_t k_total64;
+    uint64_t patch_width64;
+    uint64_t x_tiles64;
+    uint32_t kc;
+    if (input == NULL || packed_weights == NULL || input_offsets_k == NULL ||
+        patch_offsets_k == NULL || output == NULL || desc == NULL ||
+        !dense_geometry(desc, &taps64, &k_total64, &patch_width64, &x_tiles64) ||
+        !dense_prepared_scratch_views(desc, scratch, scratch_bytes, &patch, &partial)) {
+        return LW_STATUS_INVALID_ARGUMENT;
+    }
+    if (epilogue != NULL && epilogue->activation == LW_NHWC_ACT_GELU) {
+        return LW_STATUS_UNSUPPORTED;
+    }
+    kc = desc->dense_kc == 0u ? (uint32_t)k_total64 : desc->dense_kc;
+    if (kc == 0u) return LW_STATUS_INVALID_ARGUMENT;
+    for (uint32_t batch = 0u; batch < desc->batch; ++batch) {
+        const float* input_batch = input + (size_t)batch * desc->input_height *
+                                   desc->input_width * desc->input_channels;
+        float* output_batch = output + (size_t)batch * desc->output_height *
+                              desc->output_width * desc->output_channels;
+        for (uint32_t oy = 0u; oy < desc->output_height; ++oy) {
+            int32_t iy0 = (int32_t)((uint64_t)oy * desc->stride_h) - (int32_t)desc->pad_top;
+            for (uint32_t tile = 0u; tile < (uint32_t)x_tiles64; ++tile) {
+                uint32_t ox = tile * LW_NHWC_PIXEL_TILE;
+                uint32_t rows = desc->output_width - ox;
+                int32_t ix0 = (int32_t)((uint64_t)ox * desc->stride_w) - (int32_t)desc->pad_left;
+                int interior = iy0 >= 0 &&
+                    iy0 + (int32_t)desc->kernel_h <= (int32_t)desc->input_height &&
+                    ix0 >= 0 &&
+                    ix0 + (int32_t)((LW_NHWC_PIXEL_TILE - 1u) * desc->stride_w + desc->kernel_w) <=
+                        (int32_t)desc->input_width;
+                const float* row_ptrs[LW_NHWC_PIXEL_TILE];
+                const int32_t* direct_offsets = interior ? input_offsets_k : patch_offsets_k;
+                if (rows > LW_NHWC_PIXEL_TILE) rows = LW_NHWC_PIXEL_TILE;
+                if (interior) {
+                    for (uint32_t row = 0u; row < LW_NHWC_PIXEL_TILE; ++row) {
+                        row_ptrs[row] = input_batch + (((size_t)iy0 * desc->input_width +
+                            (uint32_t)(ix0 + (int32_t)row * desc->stride_w)) * desc->input_channels);
+                    }
+                } else {
+                    dense_gather_patch(input_batch, patch, desc, iy0, ix0, (uint32_t)patch_width64);
+                    for (uint32_t row = 0u; row < LW_NHWC_PIXEL_TILE; ++row) {
+                        row_ptrs[row] = patch + (size_t)row * desc->stride_w * desc->input_channels;
+                    }
+                }
+                for (uint32_t block = 0u; block < desc->output_channels / LW_NHWC_OC_BLOCK; ++block) {
+                    const float* packed_block = packed_weights +
+                        (size_t)block * k_total64 * LW_NHWC_OC_BLOCK;
+                    float* destination = output_batch + ((size_t)oy * desc->output_width + ox) *
+                                         desc->output_channels + block * LW_NHWC_OC_BLOCK;
+                    lw_nhwc_epilogue local_epilogue = epilogue == NULL
+                        ? (lw_nhwc_epilogue){0} : *epilogue;
+                    if (local_epilogue.bias != NULL) local_epilogue.bias += block * LW_NHWC_OC_BLOCK;
+                    if (local_epilogue.residual != NULL) {
+                        local_epilogue.residual += ((size_t)batch * desc->output_height * desc->output_width +
+                            (size_t)oy * desc->output_width + ox) * desc->output_channels +
+                            block * LW_NHWC_OC_BLOCK;
+                    }
+                    for (uint32_t k0 = 0u; k0 < (uint32_t)k_total64; k0 += kc) {
+                        uint32_t k_end = k0 + kc;
+                        if (k_end > (uint32_t)k_total64) k_end = (uint32_t)k_total64;
+#if defined(LW_NHWC_X86)
+                        dense_tile_avx2(row_ptrs, rows, NULL, direct_offsets,
+                            (uint32_t)taps64,
+                            packed_block + (size_t)k0 * LW_NHWC_OC_BLOCK, k0, k_end,
+                            (uint32_t)k_total64, &local_epilogue, destination,
+                            desc->output_channels, partial);
+#else
+                        dense_tile_scalar(row_ptrs, rows, NULL, direct_offsets,
+                            (uint32_t)taps64,
                             packed_block + (size_t)k0 * LW_NHWC_OC_BLOCK, k0, k_end,
                             (uint32_t)k_total64, &local_epilogue, destination,
                             desc->output_channels, partial);

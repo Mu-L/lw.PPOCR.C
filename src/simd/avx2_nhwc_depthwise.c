@@ -133,17 +133,18 @@ lw_status lw_avx2_fma_nhwc_depthwise_f32(const float* input, const float* packed
                 const float* block_weights = packed_weights +
                     (size_t)block * taps * LW_NHWC_DEPTHWISE_BLOCK;
                 uint32_t output_x = 0u;
-                while (output_x + 1u < desc->output_width &&
-                       vector_count == 4u &&
-                       depthwise_pair_is_interior(desc, output_y, output_x)) {
-                    depthwise_block32_x2(input_batch, block_weights, bias, output_batch, desc,
-                                         output_y, output_x, channel_base);
-                    output_x += 2u;
-                }
                 while (output_x < desc->output_width) {
-                    depthwise_block32(input_batch, block_weights, bias, output_batch, desc,
-                                      output_y, output_x, channel_base, vector_count);
-                    ++output_x;
+                    if (output_x + 1u < desc->output_width &&
+                        vector_count == 4u &&
+                        depthwise_pair_is_interior(desc, output_y, output_x)) {
+                        depthwise_block32_x2(input_batch, block_weights, bias, output_batch, desc,
+                                             output_y, output_x, channel_base);
+                        output_x += 2u;
+                    } else {
+                        depthwise_block32(input_batch, block_weights, bias, output_batch, desc,
+                                          output_y, output_x, channel_base, vector_count);
+                        ++output_x;
+                    }
                 }
             }
         }

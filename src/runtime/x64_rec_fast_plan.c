@@ -356,6 +356,59 @@ static int fast_conv_output_matches(const lw_runtime_tensor* input, const lw_run
     return numerator_h / sh + 1 == output->dimensions[2] &&
            numerator_w / sw + 1 == output->dimensions[3];
 }
+static int fast_prepare_dense_offsets(lw_x64_fast_conv* conv) {
+    uint64_t taps64;
+    uint64_t k_total64;
+    uint64_t patch_width64;
+    uint64_t x_tiles64;
+    if (conv == NULL || conv->input_channels == 0u || conv->kernel_h == 0u ||
+        conv->kernel_w == 0u || conv->stride_w == 0u ||
+        (uint64_t)conv->kernel_h * conv->kernel_w > UINT32_MAX ||
+        (uint64_t)conv->input_channels * conv->kernel_h * conv->kernel_w > UINT32_MAX) {
+        return 0;
+    }
+    taps64 = (uint64_t)conv->kernel_h * conv->kernel_w;
+    k_total64 = taps64 * conv->input_channels;
+    patch_width64 = ((uint64_t)LW_NHWC_PIXEL_TILE - 1u) * conv->stride_w + conv->kernel_w;
+    x_tiles64 = ((uint64_t)conv->output_width + LW_NHWC_PIXEL_TILE - 1u) / LW_NHWC_PIXEL_TILE;
+    if (patch_width64 > UINT32_MAX || x_tiles64 > UINT32_MAX ||
+        k_total64 > SIZE_MAX / sizeof(int32_t)) return 0;
+    conv->dense_taps = (uint32_t)taps64;
+    conv->dense_k_total = (uint32_t)k_total64;
+    conv->dense_patch_width = (uint32_t)patch_width64;
+    conv->dense_x_tiles = (uint32_t)x_tiles64;
+    conv->dense_input_offsets_k = (int32_t*)malloc((size_t)k_total64 * sizeof(int32_t));
+    conv->dense_patch_offsets_k = (int32_t*)malloc((size_t)k_total64 * sizeof(int32_t));
+    if (conv->dense_input_offsets_k == NULL || conv->dense_patch_offsets_k == NULL) {
+        free(conv->dense_input_offsets_k);
+        free(conv->dense_patch_offsets_k);
+        conv->dense_input_offsets_k = NULL;
+        conv->dense_patch_offsets_k = NULL;
+        return 0;
+    }
+    for (uint32_t ky = 0u; ky < conv->kernel_h; ++ky) {
+        for (uint32_t kx = 0u; kx < conv->kernel_w; ++kx) {
+            for (uint32_t channel = 0u; channel < conv->input_channels; ++channel) {
+                uint64_t tap = (uint64_t)ky * conv->kernel_w + kx;
+                uint64_t k = (uint64_t)channel * taps64 + tap;
+                uint64_t input_offset = (((uint64_t)ky * conv->input_width + kx) *
+                                         conv->input_channels) + channel;
+                uint64_t patch_offset = (((uint64_t)ky * patch_width64 + kx) *
+                                         conv->input_channels) + channel;
+                if (input_offset > INT32_MAX || patch_offset > INT32_MAX) {
+                    free(conv->dense_input_offsets_k);
+                    free(conv->dense_patch_offsets_k);
+                    conv->dense_input_offsets_k = NULL;
+                    conv->dense_patch_offsets_k = NULL;
+                    return 0;
+                }
+                conv->dense_input_offsets_k[k] = (int32_t)input_offset;
+                conv->dense_patch_offsets_k[k] = (int32_t)patch_offset;
+            }
+        }
+    }
+    return 1;
+}
 static int fast_prepare_conv(lw_x64_rec_fast_plan* plan, uint32_t node_index,
                              lw_x64_fast_node* fast_node) {
     lw_session* session;
@@ -463,7 +516,12 @@ static int fast_prepare_conv(lw_x64_rec_fast_plan* plan, uint32_t node_index,
         desc.pad_top = conv->pad_top; desc.pad_left = conv->pad_left;
         desc.pad_bottom = conv->pad_bottom; desc.pad_right = conv->pad_right;
         desc.dense_kc = conv->dense_kc;
-        if (!lw_nhwc_dense_scratch_bytes(&desc, &scratch_bytes) || scratch_bytes > SIZE_MAX) {
+        if (!fast_prepare_dense_offsets(conv) ||
+            !lw_nhwc_dense_prepared_scratch_bytes(&desc, &scratch_bytes) || scratch_bytes > SIZE_MAX) {
+            free(conv->dense_input_offsets_k);
+            free(conv->dense_patch_offsets_k);
+            conv->dense_input_offsets_k = NULL;
+            conv->dense_patch_offsets_k = NULL;
             free(conv->packed_weights); conv->packed_weights = NULL; return 0;
         }
         conv->scratch_bytes = scratch_bytes;
@@ -975,10 +1033,14 @@ static void fast_release_conv(lw_x64_fast_conv* conv) {
     free(conv->owned_bias);
     free(conv->dense_tap_offsets);
     free(conv->dense_patch_offsets);
+    free(conv->dense_input_offsets_k);
+    free(conv->dense_patch_offsets_k);
     conv->packed_weights = NULL;
     conv->owned_bias = NULL;
     conv->dense_tap_offsets = NULL;
     conv->dense_patch_offsets = NULL;
+    conv->dense_input_offsets_k = NULL;
+    conv->dense_patch_offsets_k = NULL;
 }
 
 static lw_status fast_compile_physical_ops(lw_x64_rec_fast_plan* plan, lw_error* error) {
@@ -1006,6 +1068,8 @@ static lw_status fast_compile_physical_ops(lw_x64_rec_fast_plan* plan, lw_error*
             node->data.conv.owned_bias = NULL;
             node->data.conv.dense_tap_offsets = NULL;
             node->data.conv.dense_patch_offsets = NULL;
+            node->data.conv.dense_input_offsets_k = NULL;
+            node->data.conv.dense_patch_offsets_k = NULL;
             {
                 uint32_t start = op->semantic_begin;
                 int fused_bn = 0;
