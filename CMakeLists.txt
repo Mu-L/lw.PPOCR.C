@@ -313,6 +313,7 @@ if(LW_EXPERIMENTAL_AVX2_FAST_PATH AND NOT EMSCRIPTEN AND
         src/kernels/nhwc_depthwise.c
         src/simd/avx2_nhwc_pointwise.c
         src/simd/avx2_nhwc_depthwise.c
+        src/simd/avx2_nhwc_support.c
         src/simd/avx2_nhwc_dense.c)
 endif()
 if(MSVC AND MSVC_C_ARCHITECTURE_ID MATCHES "^(x64|X86)$")
@@ -405,7 +406,7 @@ lw_configure_runtime_target(lw_ppocr_c)
 if(LW_X64_REC_FAST_ENABLED)
     target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
     if(MSVC)
-        set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c src/simd/avx2_nhwc_depthwise.c APPEND PROPERTY
+        set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c src/simd/avx2_nhwc_depthwise.c src/simd/avx2_nhwc_support.c APPEND PROPERTY
             COMPILE_OPTIONS /arch:AVX2 /fp:strict)
     endif()
 endif()
@@ -455,7 +456,7 @@ lw_configure_runtime_target(lw_ppocr_c_shared)
 if(LW_X64_REC_FAST_ENABLED)
     target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
     if(MSVC)
-        set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c src/simd/avx2_nhwc_depthwise.c APPEND PROPERTY
+        set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c src/simd/avx2_nhwc_depthwise.c src/simd/avx2_nhwc_support.c APPEND PROPERTY
             COMPILE_OPTIONS /arch:AVX2 /fp:strict)
     endif()
 endif()

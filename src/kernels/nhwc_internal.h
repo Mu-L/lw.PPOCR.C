@@ -115,6 +115,17 @@ lw_status lw_avx2_fma_nhwc_depthwise_f32(const float* input,
                                          const float* bias,
                                          float* output,
                                          const lw_nhwc_depthwise_desc* desc);
+typedef struct lw_nhwc_depthwise_stats {
+    uint64_t x1_invocations;
+    uint64_t x2_invocations;
+} lw_nhwc_depthwise_stats;
+
+lw_status lw_avx2_fma_nhwc_depthwise_profiled_f32(const float* input,
+                                                   const float* packed_weights,
+                                                   const float* bias,
+                                                   float* output,
+                                                   const lw_nhwc_depthwise_desc* desc,
+                                                   lw_nhwc_depthwise_stats* stats);
 void lw_avx2_fma_nhwc_pointwise_grouped_f32(const float* input,
                                              const float* packed_weights,
                                              const lw_nhwc_epilogue* epilogue,
@@ -132,4 +143,17 @@ void lw_avx2_fma_nhwc_pointwise_f32(const float* input,
                                     uint32_t input_channels,
                                     uint32_t output_channels);
 
+void lw_avx2_nhwc_affine_f32(const float* input, const float* mul, const float* add,
+                             float* output, uint32_t pixels, uint32_t channels);
+void lw_avx2_nhwc_reduce_mean_hw_f32(const float* input, float* output,
+                                     uint32_t batch, uint32_t height,
+                                     uint32_t width, uint32_t channels);
+void lw_avx2_nhwc_pool_f32(const float* input, float* output,
+                           uint32_t batch, uint32_t input_height,
+                           uint32_t input_width, uint32_t output_height,
+                           uint32_t output_width, uint32_t channels,
+                           uint32_t kernel_h, uint32_t kernel_w,
+                           uint32_t stride_h, uint32_t stride_w,
+                           uint32_t pad_top, uint32_t pad_left,
+                           uint8_t count_include_pad, uint8_t is_max);
 #endif

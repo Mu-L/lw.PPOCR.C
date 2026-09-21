@@ -125,6 +125,8 @@ typedef struct lw_x64_fast_spatial {
     const float* bias;
     const float* mean;
     const float* variance;
+    float* affine_mul;
+    float* affine_add;
     float epsilon;
 } lw_x64_fast_spatial;
 typedef struct lw_x64_fast_node {

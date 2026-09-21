@@ -103,9 +103,10 @@ static void depthwise_block32_x2(const float* input, const float* weights, const
     }
 }
 #endif
-lw_status lw_avx2_fma_nhwc_depthwise_f32(const float* input, const float* packed_weights,
-                                         const float* bias, float* output,
-                                         const lw_nhwc_depthwise_desc* desc) {
+static lw_status depthwise_execute(const float* input, const float* packed_weights,
+                                   const float* bias, float* output,
+                                   const lw_nhwc_depthwise_desc* desc,
+                                   lw_nhwc_depthwise_stats* stats) {
     if (input == NULL || packed_weights == NULL || output == NULL || desc == NULL ||
         desc->batch == 0u || desc->channels == 0u ||
         (desc->channels & 7u) != 0u ||
@@ -139,10 +140,12 @@ lw_status lw_avx2_fma_nhwc_depthwise_f32(const float* input, const float* packed
                         depthwise_pair_is_interior(desc, output_y, output_x)) {
                         depthwise_block32_x2(input_batch, block_weights, bias, output_batch, desc,
                                              output_y, output_x, channel_base);
+                        if (stats != NULL && stats->x2_invocations != UINT64_MAX) ++stats->x2_invocations;
                         output_x += 2u;
                     } else {
                         depthwise_block32(input_batch, block_weights, bias, output_batch, desc,
                                           output_y, output_x, channel_base, vector_count);
+                        if (stats != NULL && stats->x1_invocations != UINT64_MAX) ++stats->x1_invocations;
                         ++output_x;
                     }
                 }
@@ -154,6 +157,20 @@ lw_status lw_avx2_fma_nhwc_depthwise_f32(const float* input, const float* packed
     (void)bias;
     (void)output;
     (void)packed_weights;
+    (void)stats;
     return LW_STATUS_UNSUPPORTED;
 #endif
+}
+
+lw_status lw_avx2_fma_nhwc_depthwise_f32(const float* input, const float* packed_weights,
+                                         const float* bias, float* output,
+                                         const lw_nhwc_depthwise_desc* desc) {
+    return depthwise_execute(input, packed_weights, bias, output, desc, NULL);
+}
+
+lw_status lw_avx2_fma_nhwc_depthwise_profiled_f32(const float* input, const float* packed_weights,
+                                                   const float* bias, float* output,
+                                                   const lw_nhwc_depthwise_desc* desc,
+                                                   lw_nhwc_depthwise_stats* stats) {
+    return depthwise_execute(input, packed_weights, bias, output, desc, stats);
 }

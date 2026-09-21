@@ -339,6 +339,20 @@ static int fast_prepare_batch_norm(lw_x64_rec_fast_plan* plan, uint32_t node_ind
     fast_node->data.spatial.scale = scale; fast_node->data.spatial.bias = bias;
     fast_node->data.spatial.mean = mean; fast_node->data.spatial.variance = variance;
     fast_node->data.spatial.epsilon = fast_read_f32(params + 4u);
+    fast_node->data.spatial.affine_mul = (float*)malloc((size_t)c * sizeof(float));
+    fast_node->data.spatial.affine_add = (float*)malloc((size_t)c * sizeof(float));
+    if (fast_node->data.spatial.affine_mul == NULL || fast_node->data.spatial.affine_add == NULL) {
+        free(fast_node->data.spatial.affine_mul);
+        free(fast_node->data.spatial.affine_add);
+        fast_node->data.spatial.affine_mul = NULL;
+        fast_node->data.spatial.affine_add = NULL;
+        return 0;
+    }
+    for (uint32_t channel = 0u; channel < c; ++channel) {
+        float multiplier = scale[channel] / sqrtf(variance[channel] + fast_node->data.spatial.epsilon);
+        fast_node->data.spatial.affine_mul[channel] = multiplier;
+        fast_node->data.spatial.affine_add[channel] = bias[channel] - mean[channel] * multiplier;
+    }
     fast_node->kind = LW_X64_FAST_NODE_BATCH_NORM;
     ++plan->batch_norm_node_count;
     return 1;
@@ -1016,6 +1030,21 @@ static int fast_physical_op_owns_conv(uint16_t kind) {
            kind == LW_X64_FAST_NODE_DEPTHWISE;
 }
 
+static int fast_physical_op_owns_spatial(uint16_t kind) {
+    return kind == LW_X64_FAST_NODE_BATCH_NORM ||
+           kind == LW_X64_FAST_NODE_REDUCE_MEAN ||
+           kind == LW_X64_FAST_NODE_POOL ||
+           kind == LW_X64_FAST_NODE_CONCAT;
+}
+
+static void fast_release_spatial(lw_x64_fast_spatial* spatial) {
+    if (spatial == NULL) return;
+    free(spatial->affine_mul);
+    free(spatial->affine_add);
+    spatial->affine_mul = NULL;
+    spatial->affine_add = NULL;
+}
+
 static void fast_move_node_to_physical(const lw_x64_fast_node* node,
                                        lw_x64_physical_op* op) {
     if (node == NULL || op == NULL) return;
@@ -1094,8 +1123,11 @@ static lw_status fast_compile_physical_ops(lw_x64_rec_fast_plan* plan, lw_error*
                     if (plan->fused_conv_relu_count != UINT32_MAX) ++plan->fused_conv_relu_count;
                 }
             }
-            consumed = op->semantic_count;
+        } else if (fast_physical_op_owns_spatial(op->kind)) {
+            node->data.spatial.affine_mul = NULL;
+            node->data.spatial.affine_add = NULL;
         }
+        consumed = op->semantic_count;
         if (consumed > plan->node_count - node_index) consumed = 1u;
         node_index += consumed;
     }
@@ -1211,6 +1243,9 @@ void lw_x64_rec_fast_plan_free(lw_x64_rec_fast_plan* plan) {
             if (fast_physical_op_owns_conv(plan->nodes[index].kind)) {
                 fast_release_conv(&plan->nodes[index].data.conv);
             }
+            if (fast_physical_op_owns_spatial(plan->nodes[index].kind)) {
+                fast_release_spatial(&plan->nodes[index].data.spatial);
+            }
         }
     }
     if (plan->ops != NULL) {
@@ -1218,6 +1253,9 @@ void lw_x64_rec_fast_plan_free(lw_x64_rec_fast_plan* plan) {
         for (index = 0u; index < plan->op_count; ++index) {
             if (fast_physical_op_owns_conv(plan->ops[index].kind)) {
                 fast_release_conv(&plan->ops[index].data.conv);
+            }
+            if (fast_physical_op_owns_spatial(plan->ops[index].kind)) {
+                fast_release_spatial(&plan->ops[index].data.spatial);
             }
         }
     }

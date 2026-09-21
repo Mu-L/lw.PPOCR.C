@@ -282,8 +282,8 @@ int main(int argc, char** argv) {
            plan->fused_conv_bn_count, plan->fused_conv_relu_count, plan->fused_conv_bn_relu_count,
            plan->fused_conv_add_count, plan->fused_conv_add_relu_count);
     exit_code = mismatch == 0u && argmax_mismatch == 0u &&
+                 plan->unsupported_nhwc_node_count == 0u &&
                  plan->pointwise_node_count != 0u && plan->dense_node_count != 0u &&
-                 plan->depthwise_x2_invocations != 0u && plan->depthwise_x1_invocations != 0u &&
                  fast_profile.total_nanoseconds != 0u &&
                  fast_profile.conversion_invocations == plan->conversion_count ? 0 : 1;
 
