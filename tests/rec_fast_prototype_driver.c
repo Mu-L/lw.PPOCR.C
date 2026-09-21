@@ -193,6 +193,23 @@ int main(int argc, char** argv) {
         fprintf(stderr, "fast plan create failed: %s: %s\n", lw_status_string(status), error.message);
         goto cleanup;
     }
+    {
+        uint64_t direct_input_count = 0u;
+        float* direct_input = lw_x64_rec_fast_graph_input_nhwc(plan, &direct_input_count);
+        if ((plan->layout.graph_input_direct_nhwc != 0u) != (direct_input != NULL) ||
+            (direct_input != NULL && direct_input_count != input_count)) {
+            fprintf(stderr, "direct NHWC graph-input contract failed\n");
+            goto cleanup;
+        }
+        if (direct_input == NULL) {
+            status = lw_x64_rec_fast_run_prepared_nhwc(plan, NULL, &error);
+            if (status != LW_STATUS_UNSUPPORTED) {
+                fprintf(stderr, "prepared NHWC fallback contract failed: %s: %s\n",
+                        lw_status_string(status), error.message);
+                goto cleanup;
+            }
+        }
+    }
     status = lw_execute_session_f32(session, input, input_count, expected, output_count, &error);
     if (status != LW_STATUS_OK) {
         fprintf(stderr, "reference execution failed: %s: %s\n", lw_status_string(status), error.message);

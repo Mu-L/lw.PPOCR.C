@@ -30,16 +30,19 @@ The current milestone provides:
 - plan-time Dense K-offset metadata and a prepared AVX2/FMA entry point that removes per-call offset construction and K division/modulo from the hot loop, retaining only patch and partial-tile scratch;
 - AVX2 NHWC support ops for prepared BatchNorm affine, spatial ReduceMean, and AveragePool/MaxPool kernels;
 - deterministic comparison and paired AB/BA median timing against the canonical executor at REC width 960.
+- v7 direct-NHWC preparation hooks: a private graph-input accessor and prepared backbone runner can consume preprocessed NHWC data without an initial NCHW-to-NHWC conversion when the model graph starts with an NHWC-capable node; graphs that require an NCHW prologue retain the existing NCHW entry path.
 
 The fast path remains opt-in and experimental. The planner now classifies both the PP-OCRv6 Tiny and Medium REC graphs without an NHWC blocker. Fusion is conservative: it requires single-consumer, shape-compatible semantic chains and falls back to the original physical nodes when a pattern is not provably safe. The benchmark report emits `legacy_ms`, `fast_ms`, `speedup`, Pointwise/Dense/Depthwise/binary/unary/ReduceMean/Pool/Concat/BatchNorm node counts, `physical_op_count`, `elided_tensor_count`, profiled Depthwise x1/x2 dispatch counters (without a timed-run pre-walk), per-kind profile nanoseconds, conversion bytes, `unsupported_nhwc_node_count`, `argmax_mismatch`, and `max_abs <= 1e-4` correctness gates. A negative speedup is not promoted to the default path.
 
+The prepared-NHWC hooks are internal and are not part of the public C ABI. Callers must query the graph-input accessor and treat a null pointer as an explicit fallback to lw_x64_rec_fast_run; the Tiny REC graph currently has an NCHW prologue, so it intentionally exercises that fallback.
+
 The prototype is only built for x86/x64 when the existing experimental option is enabled. ARM64, LoongArch, WebAssembly, DET, and release builds remain on the legacy path.
 
-The CTest entry is `x64_rec_fast_prototype`. It checks the layout conversion round trip, runs two warm-ups followed by nine alternating legacy/fast samples, and compares the complete REC output against `lw_execute_session_f32` with `max_abs <= 1e-4`.
+The CTest entries are `nhwc_support_pool` (valid-window and channels<8 Pool regression), `layout_plan_direct_input`, and `x64_rec_fast_prototype`. It checks the layout conversion round trip, runs two warm-ups followed by nine alternating legacy/fast samples, and compares the complete REC output against `lw_execute_session_f32` with `max_abs <= 1e-4`.
 
 Current local reference measurements (static width model, Windows x64 AVX2) are informational only. The v6 Tiny run below is a fresh post-optimization sample; it is not a release gate:
 
 - Tiny REC960 (v6 local sample): zero mismatches (max_abs=2.72e-05, argmax_mismatch=0), four planned/runtime conversions, 40 elided GELU temporaries, about 3.7 MiB NHWC workspace, and a reported speedup ratio of about 0.69x in the latest local sample; the final profiled run reports 8330 Depthwise x2 and 19340 x1 dispatches. The physical lifetime validator passes and no fusion chain is present in this graph.
 - Medium REC960: the previous `0.71x` / 21.6 MiB figures are retained only as a pre-v6 reference; rerun the Medium artifact before drawing a v6 performance conclusion.
 
-These results confirm that planner coverage, physical lifetimes, Dense preparation, and Depthwise dispatch are improving, but the implementation is not ready for default-path integration: the current end-to-end ratio remains below 1.0x. The next optimization stages should target direct NHWC preprocessing, terminal CTC output elision, and measured recognizer-level hotspots before any promotion decision.
+These results confirm that planner coverage, physical lifetimes, Dense preparation, and Depthwise dispatch are improving, but the implementation is not ready for default-path integration: the current end-to-end ratio remains below 1.0x. The next stages are to connect the existing BGR-to-NHWC preprocessor to the prepared hook, then elide the terminal CTC logits/Softmax materialization and measure recognizer-level hotspots before any promotion decision.

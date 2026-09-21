@@ -14,6 +14,11 @@
 #define LW_X64_FAST_PROFILE_NODE_CAPACITY 512u
 #define LW_X64_FAST_PROFILE_KIND_CAPACITY 16u
 
+typedef enum lw_x64_fast_input_layout {
+    LW_X64_FAST_INPUT_NCHW = 0,
+    LW_X64_FAST_INPUT_NHWC = 1
+} lw_x64_fast_input_layout;
+
 enum {
     LW_X64_FAST_HAVE_NCHW = 1u << 0,
     LW_X64_FAST_HAVE_NHWC = 1u << 1
@@ -220,6 +225,11 @@ lw_status lw_x64_rec_fast_run_profiled(lw_x64_rec_fast_plan* plan,
                                      const float* input, uint64_t input_element_count,
                                      float* output, uint64_t output_element_count,
                                      lw_x64_fast_profile* profile, lw_error* error);
+float* lw_x64_rec_fast_graph_input_nhwc(lw_x64_rec_fast_plan* plan,
+                                      uint64_t* element_count);
+lw_status lw_x64_rec_fast_run_prepared_nhwc(lw_x64_rec_fast_plan* plan,
+                                          lw_x64_fast_profile* profile,
+                                          lw_error* error);
 lw_status lw_x64_rec_fast_run(lw_x64_rec_fast_plan* plan,
                               const float* input,
                               uint64_t input_element_count,

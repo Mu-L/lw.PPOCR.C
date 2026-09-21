@@ -67,7 +67,8 @@ static void fast_publish_nhwc(lw_x64_rec_fast_plan* plan, uint32_t tensor_index)
         : LW_X64_FAST_HAVE_NHWC;
 }
 
-static void fast_reset_layouts(lw_x64_rec_fast_plan* plan) {
+static void fast_begin_run(lw_x64_rec_fast_plan* plan,
+                           lw_x64_fast_input_layout input_layout) {
     uint32_t index;
     if (plan == NULL) return;
     plan->conversion_count = 0u;
@@ -77,7 +78,23 @@ static void fast_reset_layouts(lw_x64_rec_fast_plan* plan) {
     for (index = 0u; index < plan->tensor_count; ++index) {
         plan->tensors[index].available_layouts = 0u;
     }
-    fast_publish_nchw(plan, plan->graph_input_index);
+    if (input_layout == LW_X64_FAST_INPUT_NHWC) {
+        fast_publish_nhwc(plan, plan->graph_input_index);
+    } else {
+        fast_publish_nchw(plan, plan->graph_input_index);
+    }
+}
+
+float* lw_x64_rec_fast_graph_input_nhwc(lw_x64_rec_fast_plan* plan,
+                                        uint64_t* element_count) {
+    const lw_runtime_tensor* tensor;
+    if (element_count != NULL) *element_count = 0u;
+    if (plan == NULL || plan->graph_input_index >= plan->tensor_count ||
+        plan->layout.graph_input_direct_nhwc == 0u) return NULL;
+    tensor = &plan->session->tensors[plan->graph_input_index];
+    if (tensor->dtype != LW_DTYPE_F32 || tensor->rank != 4u) return NULL;
+    if (element_count != NULL) *element_count = tensor->byte_size / sizeof(float);
+    return fast_nhwc_pointer(plan, plan->graph_input_index);
 }
 
 static void fast_add_conversion(lw_x64_rec_fast_plan* plan, uint64_t bytes) {
@@ -652,6 +669,44 @@ static void fast_profile_add(uint64_t* value, uint64_t amount) {
     if (*value > UINT64_MAX - amount) *value = UINT64_MAX;
     else *value += amount;
 }
+static lw_status fast_execute_backbone(lw_x64_rec_fast_plan* plan,
+                                       const float* input,
+                                       lw_x64_fast_profile* profile,
+                                       lw_nhwc_depthwise_stats* depthwise_stats,
+                                       lw_error* error) {
+    if (plan == NULL) return LW_STATUS_INVALID_ARGUMENT;
+    for (uint32_t op_index = 0u; op_index < plan->op_count; ++op_index) {
+        const lw_x64_physical_op* physical = &plan->ops[op_index];
+        uint32_t node_index = physical->semantic_begin;
+        uint64_t started = 0u;
+        uint64_t finished = 0u;
+        lw_status status;
+        if (profile != NULL && profile->clock != NULL) {
+            started = profile->clock(profile->clock_context);
+        }
+        status = fast_execute_physical_op(plan, physical, plan->graph_input_index, input,
+                                           profile == NULL ? NULL : depthwise_stats, error);
+        if (profile != NULL && profile->clock != NULL) {
+            finished = profile->clock(profile->clock_context);
+            if (finished < started) finished = started;
+            fast_profile_add(&profile->total_nanoseconds, finished - started);
+            if (node_index < LW_X64_FAST_PROFILE_NODE_CAPACITY) {
+                fast_profile_add(&profile->node_nanoseconds[node_index], finished - started);
+                fast_profile_add(&profile->node_invocations[node_index], 1u);
+            }
+            if (physical->kind < LW_X64_FAST_PROFILE_KIND_CAPACITY) {
+                fast_profile_add(&profile->kind_nanoseconds[physical->kind], finished - started);
+                fast_profile_add(&profile->kind_invocations[physical->kind], 1u);
+            }
+        }
+        if (status != LW_STATUS_OK) return status;
+    }
+    if (profile != NULL && depthwise_stats != NULL) {
+        plan->depthwise_x2_invocations = depthwise_stats->x2_invocations;
+        plan->depthwise_x1_invocations = depthwise_stats->x1_invocations;
+    }
+    return LW_STATUS_OK;
+}
 lw_status lw_x64_rec_fast_run_profiled(lw_x64_rec_fast_plan* plan, const float* input,
                                        uint64_t input_element_count, float* output,
                                        uint64_t output_element_count,
@@ -659,7 +714,6 @@ lw_status lw_x64_rec_fast_run_profiled(lw_x64_rec_fast_plan* plan, const float* 
     const lw_runtime_tensor* input_tensor;
     const lw_runtime_tensor* output_tensor;
     const float* graph_output;
-    uint32_t node_index;
     lw_x64_fast_profile_clock profile_clock_fn = profile == NULL ? NULL : profile->clock;
     void* profile_clock_context = profile == NULL ? NULL : profile->clock_context;
     lw_nhwc_depthwise_stats depthwise_stats = { 0u, 0u };
@@ -683,33 +737,9 @@ lw_status lw_x64_rec_fast_run_profiled(lw_x64_rec_fast_plan* plan, const float* 
         lw_set_error(error, LW_STATUS_INVALID_SHAPE, "fast execution tensor shape mismatch");
         return LW_STATUS_INVALID_SHAPE;
     }
-    fast_reset_layouts(plan);
-    for (uint32_t op_index = 0u; op_index < plan->op_count; ++op_index) {
-        const lw_x64_physical_op* physical = &plan->ops[op_index];
-        node_index = physical->semantic_begin;
-        uint64_t started = 0u;
-        uint64_t finished = 0u;
-        if (profile != NULL && profile->clock != NULL) started = profile->clock(profile->clock_context);
-        status = fast_execute_physical_op(plan, physical, plan->graph_input_index, input, profile == NULL ? NULL : &depthwise_stats, error);
-        if (profile != NULL && profile->clock != NULL) {
-            finished = profile->clock(profile->clock_context);
-            if (finished < started) finished = started;
-            fast_profile_add(&profile->total_nanoseconds, finished - started);
-            if (node_index < LW_X64_FAST_PROFILE_NODE_CAPACITY) {
-                fast_profile_add(&profile->node_nanoseconds[node_index], finished - started);
-                fast_profile_add(&profile->node_invocations[node_index], 1u);
-            }
-            if (physical->kind < LW_X64_FAST_PROFILE_KIND_CAPACITY) {
-                fast_profile_add(&profile->kind_nanoseconds[physical->kind], finished - started);
-                fast_profile_add(&profile->kind_invocations[physical->kind], 1u);
-            }
-        }
-        if (status != LW_STATUS_OK) return status;
-    }
-    if (profile != NULL) {
-        plan->depthwise_x2_invocations = depthwise_stats.x2_invocations;
-        plan->depthwise_x1_invocations = depthwise_stats.x1_invocations;
-    }
+    fast_begin_run(plan, LW_X64_FAST_INPUT_NCHW);
+    status = fast_execute_backbone(plan, input, profile, &depthwise_stats, error);
+    if (status != LW_STATUS_OK) return status;
     if (fast_layout_tracked_tensor(output_tensor)) {
         status = fast_ensure_nchw(plan, plan->graph_output_index, error);
         if (status != LW_STATUS_OK) return status;
@@ -729,6 +759,37 @@ lw_status lw_x64_rec_fast_run_profiled(lw_x64_rec_fast_plan* plan, const float* 
     return LW_STATUS_OK;
 }
 
+lw_status lw_x64_rec_fast_run_prepared_nhwc(lw_x64_rec_fast_plan* plan,
+                                            lw_x64_fast_profile* profile,
+                                            lw_error* error) {
+    lw_x64_fast_profile_clock profile_clock_fn = profile == NULL ? NULL : profile->clock;
+    void* profile_clock_context = profile == NULL ? NULL : profile->clock_context;
+    lw_nhwc_depthwise_stats depthwise_stats = { 0u, 0u };
+    lw_status status;
+    if (profile != NULL) {
+        memset(profile, 0, sizeof(*profile));
+        profile->clock = profile_clock_fn;
+        profile->clock_context = profile_clock_context;
+    }
+    if (plan == NULL || plan->session == NULL || plan->session->model == NULL) {
+        lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "prepared NHWC fast run requires a valid plan");
+        return LW_STATUS_INVALID_ARGUMENT;
+    }
+    if (plan->layout.graph_input_direct_nhwc == 0u) {
+        lw_set_error(error, LW_STATUS_UNSUPPORTED, "prepared NHWC fast run requires a direct NHWC plan");
+        return LW_STATUS_UNSUPPORTED;
+    }
+    fast_begin_run(plan, LW_X64_FAST_INPUT_NHWC);
+    status = fast_execute_backbone(plan, NULL, profile,
+                                   profile == NULL ? NULL : &depthwise_stats, error);
+    if (status != LW_STATUS_OK) return status;
+    if (profile != NULL) {
+        profile->conversion_invocations = plan->conversion_count;
+        profile->conversion_bytes = plan->conversion_bytes;
+    }
+    lw_set_error(error, LW_STATUS_OK, "");
+    return LW_STATUS_OK;
+}
 lw_status lw_x64_rec_fast_run(lw_x64_rec_fast_plan* plan, const float* input,
                               uint64_t input_element_count, float* output,
                               uint64_t output_element_count, lw_error* error) {

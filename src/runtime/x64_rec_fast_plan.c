@@ -14,6 +14,7 @@ static size_t fast_align64(size_t value) {
 
 
 
+
 static int fast_tensor_eligible(const lw_runtime_tensor* tensor) {
     return tensor != NULL && (tensor->flags & LWM_V0_TENSOR_FLAG_CONSTANT) == 0u &&
            tensor->dtype == LW_DTYPE_F32 && tensor->rank == 4u &&
@@ -349,9 +350,27 @@ static int fast_prepare_batch_norm(lw_x64_rec_fast_plan* plan, uint32_t node_ind
         return 0;
     }
     for (uint32_t channel = 0u; channel < c; ++channel) {
-        float multiplier = scale[channel] / sqrtf(variance[channel] + fast_node->data.spatial.epsilon);
+        float variance_epsilon = variance[channel] + fast_node->data.spatial.epsilon;
+        float multiplier;
+        float additive;
+        if (!(variance_epsilon > 0.0f) || !isfinite(variance_epsilon)) {
+            free(fast_node->data.spatial.affine_mul);
+            free(fast_node->data.spatial.affine_add);
+            fast_node->data.spatial.affine_mul = NULL;
+            fast_node->data.spatial.affine_add = NULL;
+            return 0;
+        }
+        multiplier = scale[channel] / sqrtf(variance_epsilon);
+        additive = bias[channel] - mean[channel] * multiplier;
+        if (!isfinite(multiplier) || !isfinite(additive)) {
+            free(fast_node->data.spatial.affine_mul);
+            free(fast_node->data.spatial.affine_add);
+            fast_node->data.spatial.affine_mul = NULL;
+            fast_node->data.spatial.affine_add = NULL;
+            return 0;
+        }
         fast_node->data.spatial.affine_mul[channel] = multiplier;
-        fast_node->data.spatial.affine_add[channel] = bias[channel] - mean[channel] * multiplier;
+        fast_node->data.spatial.affine_add[channel] = additive;
     }
     fast_node->kind = LW_X64_FAST_NODE_BATCH_NORM;
     ++plan->batch_norm_node_count;
@@ -863,6 +882,11 @@ static int fast_scale_conv_weights(lw_x64_fast_conv* conv, uint16_t kind,
             return 0;
         }
         folded_bias[c] = old_bias * mul[c] + bn_bias[c] - mean[c] * mul[c];
+        if (!isfinite(folded_bias[c])) {
+            free(folded_bias);
+            free(mul);
+            return 0;
+        }
     }
     if (kind == LW_X64_FAST_NODE_DEPTHWISE) {
         uint32_t taps = conv->kernel_h * conv->kernel_w;
@@ -1157,7 +1181,7 @@ lw_status lw_x64_rec_fast_plan_create(lw_session* session,
         lw_x64_rec_fast_plan_free(plan);
         return LW_STATUS_OUT_OF_MEMORY;
     }
-    options.allow_direct_nhwc_graph_input = 0u;
+    options.allow_direct_nhwc_graph_input = 1u;
     status = lw_layout_plan_build(session, &options, &plan->layout, error);
     if (status != LW_STATUS_OK) {
         lw_x64_rec_fast_plan_free(plan);

@@ -74,6 +74,31 @@ void lw_avx2_nhwc_reduce_mean_hw_f32(const float* input, float* output,
     }
 }
 
+static void lw_nhwc_pool_valid_window(int32_t input_y0, int32_t input_x0,
+                                      uint32_t input_height, uint32_t input_width,
+                                      uint32_t kernel_h, uint32_t kernel_w,
+                                      uint32_t* ky_begin, uint32_t* ky_end,
+                                      uint32_t* kx_begin, uint32_t* kx_end) {
+    int32_t y_end = (int32_t)kernel_h;
+    int32_t x_end = (int32_t)kernel_w;
+    int32_t y_begin = input_y0 < 0 ? -input_y0 : 0;
+    int32_t x_begin = input_x0 < 0 ? -input_x0 : 0;
+    if (input_y0 + y_end > (int32_t)input_height) y_end = (int32_t)input_height - input_y0;
+    if (input_x0 + x_end > (int32_t)input_width) x_end = (int32_t)input_width - input_x0;
+    if (y_begin < 0) y_begin = 0;
+    if (x_begin < 0) x_begin = 0;
+    if (y_end < y_begin) y_end = y_begin;
+    if (x_end < x_begin) x_end = x_begin;
+    if (y_begin > (int32_t)kernel_h) y_begin = (int32_t)kernel_h;
+    if (x_begin > (int32_t)kernel_w) x_begin = (int32_t)kernel_w;
+    if (y_end > (int32_t)kernel_h) y_end = (int32_t)kernel_h;
+    if (x_end > (int32_t)kernel_w) x_end = (int32_t)kernel_w;
+    *ky_begin = (uint32_t)y_begin;
+    *ky_end = (uint32_t)y_end;
+    *kx_begin = (uint32_t)x_begin;
+    *kx_end = (uint32_t)x_end;
+}
+
 LW_NHWC_SUPPORT_TARGET
 void lw_avx2_nhwc_pool_f32(const float* input, float* output,
                            uint32_t batch, uint32_t input_height,
@@ -92,42 +117,47 @@ void lw_avx2_nhwc_pool_f32(const float* input, float* output,
             for (uint32_t ox = 0u; ox < output_width; ++ox) {
                 int32_t iy0 = (int32_t)((uint64_t)oy * stride_h) - (int32_t)pad_top;
                 int32_t ix0 = (int32_t)((uint64_t)ox * stride_w) - (int32_t)pad_left;
-                uint32_t count = 0u;
+                uint32_t ky_begin;
+                uint32_t ky_end;
+                uint32_t kx_begin;
+                uint32_t kx_end;
+                uint32_t valid_count;
+                uint32_t denominator;
                 uint32_t channel = 0u;
+                lw_nhwc_pool_valid_window(iy0, ix0, input_height, input_width,
+                                          kernel_h, kernel_w, &ky_begin, &ky_end,
+                                          &kx_begin, &kx_end);
+                valid_count = (ky_end - ky_begin) * (kx_end - kx_begin);
+                denominator = count_include_pad ? kernel_h * kernel_w : valid_count;
+                if (denominator == 0u) denominator = 1u;
 #if LW_NHWC_SUPPORT_X86
                 for (; channel + 8u <= channels; channel += 8u) {
                     __m256 value = is_max ? _mm256_set1_ps(-FLT_MAX) : _mm256_setzero_ps();
-                    for (uint32_t ky = 0u; ky < kernel_h; ++ky) {
-                        int32_t iy = iy0 + (int32_t)ky;
-                        if (iy < 0 || iy >= (int32_t)input_height) continue;
-                        for (uint32_t kx = 0u; kx < kernel_w; ++kx) {
-                            int32_t ix = ix0 + (int32_t)kx;
-                            if (ix < 0 || ix >= (int32_t)input_width) continue;
-                            const float* source = input + ((((size_t)n * input_height + (uint32_t)iy) *
-                                input_width + (uint32_t)ix) * channels + channel);
+                    for (uint32_t ky = ky_begin; ky < ky_end; ++ky) {
+                        uint32_t iy = (uint32_t)(iy0 + (int32_t)ky);
+                        for (uint32_t kx = kx_begin; kx < kx_end; ++kx) {
+                            uint32_t ix = (uint32_t)(ix0 + (int32_t)kx);
+                            const float* source = input + ((((size_t)n * input_height + iy) *
+                                input_width + ix) * channels + channel);
                             __m256 sample = _mm256_loadu_ps(source);
                             value = is_max ? _mm256_max_ps(value, sample) : _mm256_add_ps(value, sample);
-                            if (channel == 0u) ++count;
                         }
                     }
                     if (!is_max) {
-                        uint32_t denominator = count_include_pad ? kernel_h * kernel_w : count;
                         value = _mm256_mul_ps(value, _mm256_set1_ps(1.0f / (float)denominator));
                     }
-                    _mm256_storeu_ps(output + ((((size_t)n * output_height + oy) * output_width + ox) * channels + channel), value);
+                    _mm256_storeu_ps(output + ((((size_t)n * output_height + oy) * output_width + ox) *
+                        channels + channel), value);
                 }
 #endif
                 for (; channel < channels; ++channel) {
                     float value = is_max ? -FLT_MAX : 0.0f;
-                    for (uint32_t ky = 0u; ky < kernel_h; ++ky) {
-                        int32_t iy = iy0 + (int32_t)ky;
-                        if (iy < 0 || iy >= (int32_t)input_height) continue;
-                        for (uint32_t kx = 0u; kx < kernel_w; ++kx) {
-                            int32_t ix = ix0 + (int32_t)kx;
-                            float sample;
-                            if (ix < 0 || ix >= (int32_t)input_width) continue;
-                            sample = input[(((size_t)n * input_height + (uint32_t)iy) *
-                                input_width + (uint32_t)ix) * channels + channel];
+                    for (uint32_t ky = ky_begin; ky < ky_end; ++ky) {
+                        uint32_t iy = (uint32_t)(iy0 + (int32_t)ky);
+                        for (uint32_t kx = kx_begin; kx < kx_end; ++kx) {
+                            uint32_t ix = (uint32_t)(ix0 + (int32_t)kx);
+                            float sample = input[(((size_t)n * input_height + iy) *
+                                input_width + ix) * channels + channel];
                             if (is_max) {
                                 if (sample > value) value = sample;
                             } else {
@@ -135,11 +165,9 @@ void lw_avx2_nhwc_pool_f32(const float* input, float* output,
                             }
                         }
                     }
-                    if (!is_max) {
-                        uint32_t denominator = count_include_pad ? kernel_h * kernel_w : count;
-                        value /= (float)denominator;
-                    }
-                    output[((((size_t)n * output_height + oy) * output_width + ox) * channels + channel)] = value;
+                    if (!is_max) value /= (float)denominator;
+                    output[((((size_t)n * output_height + oy) * output_width + ox) *
+                        channels + channel)] = value;
                 }
             }
         }
