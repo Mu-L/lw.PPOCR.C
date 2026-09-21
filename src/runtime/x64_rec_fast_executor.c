@@ -205,7 +205,7 @@ static lw_status fast_execute_generic_node(lw_x64_rec_fast_plan* plan, uint32_t 
     return LW_STATUS_OK;
 }
 static lw_status fast_execute_pointwise(lw_x64_rec_fast_plan* plan,
-                                        const lw_x64_fast_node* node,
+                                        const lw_x64_physical_op* node,
                                         uint32_t graph_input_index,
                                         const float* graph_input,
                                         lw_error* error) {
@@ -224,6 +224,16 @@ static lw_status fast_execute_pointwise(lw_x64_rec_fast_plan* plan,
     }
     memset(&epilogue, 0, sizeof(epilogue));
     epilogue.bias = conv->bias;
+    epilogue.activation = conv->activation;
+    if (conv->residual_index != UINT32_MAX) {
+        status = fast_ensure_nhwc(plan, conv->residual_index, graph_input_index, graph_input, error);
+        if (status != LW_STATUS_OK) return status;
+        epilogue.residual = fast_nhwc_pointer(plan, conv->residual_index);
+        if (epilogue.residual == NULL) {
+            lw_set_error(error, LW_STATUS_UNSUPPORTED, "pointwise residual buffer is unavailable");
+            return LW_STATUS_UNSUPPORTED;
+        }
+    }
     lw_avx2_fma_nhwc_pointwise_f32(input, conv->packed_weights, &epilogue, output,
                                    conv->input_height * conv->input_width,
                                    conv->input_channels, conv->output_channels);
@@ -232,7 +242,7 @@ static lw_status fast_execute_pointwise(lw_x64_rec_fast_plan* plan,
 }
 
 static lw_status fast_execute_dense(lw_x64_rec_fast_plan* plan,
-                                    const lw_x64_fast_node* node,
+                                    const lw_x64_physical_op* node,
                                     uint32_t graph_input_index,
                                     const float* graph_input,
                                     lw_error* error) {
@@ -269,6 +279,16 @@ static lw_status fast_execute_dense(lw_x64_rec_fast_plan* plan,
     desc.dense_kc = conv->dense_kc;
     memset(&epilogue, 0, sizeof(epilogue));
     epilogue.bias = conv->bias;
+    epilogue.activation = conv->activation;
+    if (conv->residual_index != UINT32_MAX) {
+        status = fast_ensure_nhwc(plan, conv->residual_index, graph_input_index, graph_input, error);
+        if (status != LW_STATUS_OK) return status;
+        epilogue.residual = fast_nhwc_pointer(plan, conv->residual_index);
+        if (epilogue.residual == NULL) {
+            lw_set_error(error, LW_STATUS_UNSUPPORTED, "dense residual buffer is unavailable");
+            return LW_STATUS_UNSUPPORTED;
+        }
+    }
     status = lw_avx2_fma_nhwc_dense_f32(input, conv->packed_weights, &epilogue, output,
                                         &desc, plan->scratch, plan->scratch_bytes);
     if (status != LW_STATUS_OK) {
@@ -297,7 +317,7 @@ static lw_status fast_elementwise_scalar_value(lw_x64_rec_fast_plan* plan, uint3
 }
 
 static lw_status fast_execute_elementwise(lw_x64_rec_fast_plan* plan,
-                                          const lw_x64_fast_node* node,
+                                          const lw_x64_physical_op* node,
                                           uint32_t graph_input_index,
                                           const float* graph_input,
                                           lw_error* error) {
@@ -393,7 +413,7 @@ static lw_status fast_execute_elementwise(lw_x64_rec_fast_plan* plan,
     return LW_STATUS_OK;
 }
 static lw_status fast_execute_reduce_mean(lw_x64_rec_fast_plan* plan,
-                                          const lw_x64_fast_node* node,
+                                          const lw_x64_physical_op* node,
                                           uint32_t graph_input_index,
                                           const float* graph_input,
                                           lw_error* error) {
@@ -418,7 +438,7 @@ static lw_status fast_execute_reduce_mean(lw_x64_rec_fast_plan* plan,
 }
 
 static lw_status fast_execute_pool(lw_x64_rec_fast_plan* plan,
-                                   const lw_x64_fast_node* node,
+                                   const lw_x64_physical_op* node,
                                    uint32_t graph_input_index,
                                    const float* graph_input,
                                    lw_error* error) {
@@ -455,7 +475,7 @@ static lw_status fast_execute_pool(lw_x64_rec_fast_plan* plan,
     fast_publish_nhwc(plan, op->output_index); return LW_STATUS_OK;
 }
 static lw_status fast_execute_batch_norm(lw_x64_rec_fast_plan* plan,
-                                         const lw_x64_fast_node* node,
+                                         const lw_x64_physical_op* node,
                                          uint32_t graph_input_index,
                                          const float* graph_input,
                                          lw_error* error) {
@@ -479,7 +499,7 @@ static lw_status fast_execute_batch_norm(lw_x64_rec_fast_plan* plan,
     return LW_STATUS_OK;
 }
 static lw_status fast_execute_concat(lw_x64_rec_fast_plan* plan,
-                                     const lw_x64_fast_node* node,
+                                     const lw_x64_physical_op* node,
                                      uint32_t graph_input_index,
                                      const float* graph_input,
                                      lw_error* error) {
@@ -511,7 +531,7 @@ static lw_status fast_execute_concat(lw_x64_rec_fast_plan* plan,
     return LW_STATUS_OK;
 }
 static lw_status fast_execute_depthwise(lw_x64_rec_fast_plan* plan,
-                                        const lw_x64_fast_node* node,
+                                        const lw_x64_physical_op* node,
                                         uint32_t graph_input_index,
                                         const float* graph_input,
                                         lw_error* error) {
@@ -553,7 +573,7 @@ static lw_status fast_execute_depthwise(lw_x64_rec_fast_plan* plan,
     return LW_STATUS_OK;
 }
 static lw_status fast_execute_gelu(lw_x64_rec_fast_plan* plan,
-                                   const lw_x64_fast_node* node,
+                                   const lw_x64_physical_op* node,
                                    uint32_t graph_input_index,
                                    const float* graph_input,
                                    lw_error* error) {
@@ -562,7 +582,7 @@ static lw_status fast_execute_gelu(lw_x64_rec_fast_plan* plan,
     float* input;
     float* output;
     lw_status status;
-    if (plan->layout.node_layout[node->semantic_node_index] == LW_FAST_LAYOUT_NCHW) {
+    if (plan->layout.node_layout[node->semantic_begin] == LW_FAST_LAYOUT_NCHW) {
         input = (float*)lw_executor_tensor_input_data(plan->session, op->input_index,
                                                        graph_input_index, graph_input);
         output = lw_executor_tensor_output_data(plan->session, op->output_index);
@@ -586,44 +606,46 @@ static lw_status fast_execute_gelu(lw_x64_rec_fast_plan* plan,
     fast_publish_nhwc(plan, op->output_index);
     return LW_STATUS_OK;
 }
-static lw_status fast_execute_node(lw_x64_rec_fast_plan* plan, uint32_t node_index,
-                                   uint32_t graph_input_index, const float* graph_input,
-                                   uint32_t* consumed_nodes, lw_error* error) {
-    const lw_x64_fast_node* node;
+static lw_status fast_execute_generic_physical_op(lw_x64_rec_fast_plan* plan,
+                                                 const lw_x64_physical_op* op,
+                                                 uint32_t graph_input_index,
+                                                 const float* graph_input,
+                                                 lw_error* error) {
+    uint32_t consumed = 1u;
     lw_status status;
-    if (plan == NULL || node_index >= plan->node_count) {
-        lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "invalid fast node index");
-        return LW_STATUS_INVALID_ARGUMENT;
+    if (plan == NULL || op == NULL) return LW_STATUS_INVALID_ARGUMENT;
+    status = fast_execute_generic_node(plan, op->semantic_begin, graph_input_index,
+                                       graph_input, &consumed, error);
+    if (status != LW_STATUS_OK) return status;
+    if (consumed != op->semantic_count) {
+        lw_set_error(error, LW_STATUS_UNSUPPORTED, "generic physical op span mismatch");
+        return LW_STATUS_UNSUPPORTED;
     }
-    node = &plan->nodes[node_index];
-    if (node->kind == LW_X64_FAST_NODE_GELU) {
-        status = fast_execute_gelu(plan, node, graph_input_index, graph_input, error);
-    } else if (node->kind == LW_X64_FAST_NODE_BATCH_NORM) {
-        status = fast_execute_batch_norm(plan, node, graph_input_index, graph_input, error);
-    } else if (node->kind == LW_X64_FAST_NODE_CONCAT) {
-        status = fast_execute_concat(plan, node, graph_input_index, graph_input, error);
-    } else if (node->kind == LW_X64_FAST_NODE_REDUCE_MEAN) {
-        status = fast_execute_reduce_mean(plan, node, graph_input_index, graph_input, error);
-    } else if (node->kind == LW_X64_FAST_NODE_POOL) {
-        status = fast_execute_pool(plan, node, graph_input_index, graph_input, error);
-    } else if (node->kind == LW_X64_FAST_NODE_POINTWISE) {
-        status = fast_execute_pointwise(plan, node, graph_input_index, graph_input, error);
-    } else if (node->kind == LW_X64_FAST_NODE_CONTIGUOUS_UNARY ||
-               node->kind == LW_X64_FAST_NODE_CONTIGUOUS_BINARY) {
-        status = fast_execute_elementwise(plan, node, graph_input_index, graph_input, error);
-    } else if (node->kind == LW_X64_FAST_NODE_DENSE) {
-        status = fast_execute_dense(plan, node, graph_input_index, graph_input, error);
-    } else if (node->kind == LW_X64_FAST_NODE_DEPTHWISE) {
-        status = fast_execute_depthwise(plan, node, graph_input_index, graph_input, error);
-    } else {
-        return fast_execute_generic_node(plan, node_index, graph_input_index, graph_input,
-                                         consumed_nodes, error);
-    }
-    if (status == LW_STATUS_OK && consumed_nodes != NULL) {
-        *consumed_nodes = node->semantic_node_count == 0u ? 1u : node->semantic_node_count;
-    }
-    return status;
+    return LW_STATUS_OK;
 }
+
+static lw_status fast_execute_physical_op(lw_x64_rec_fast_plan* plan,
+                                          const lw_x64_physical_op* op,
+                                          uint32_t graph_input_index,
+                                          const float* graph_input,
+                                          lw_error* error) {
+    if (plan == NULL || op == NULL) return LW_STATUS_INVALID_ARGUMENT;
+    switch (op->kind) {
+    case LW_X64_FAST_NODE_GELU: return fast_execute_gelu(plan, op, graph_input_index, graph_input, error);
+    case LW_X64_FAST_NODE_BATCH_NORM: return fast_execute_batch_norm(plan, op, graph_input_index, graph_input, error);
+    case LW_X64_FAST_NODE_CONCAT: return fast_execute_concat(plan, op, graph_input_index, graph_input, error);
+    case LW_X64_FAST_NODE_REDUCE_MEAN: return fast_execute_reduce_mean(plan, op, graph_input_index, graph_input, error);
+    case LW_X64_FAST_NODE_POOL: return fast_execute_pool(plan, op, graph_input_index, graph_input, error);
+    case LW_X64_FAST_NODE_POINTWISE: return fast_execute_pointwise(plan, op, graph_input_index, graph_input, error);
+    case LW_X64_FAST_NODE_CONTIGUOUS_UNARY:
+    case LW_X64_FAST_NODE_CONTIGUOUS_BINARY: return fast_execute_elementwise(plan, op, graph_input_index, graph_input, error);
+    case LW_X64_FAST_NODE_DENSE: return fast_execute_dense(plan, op, graph_input_index, graph_input, error);
+    case LW_X64_FAST_NODE_DEPTHWISE: return fast_execute_depthwise(plan, op, graph_input_index, graph_input, error);
+    case LW_X64_FAST_NODE_GENERIC: return fast_execute_generic_physical_op(plan, op, graph_input_index, graph_input, error);
+    default: return LW_STATUS_UNSUPPORTED;
+    }
+}
+
 static void fast_profile_add(uint64_t* value, uint64_t amount) {
     if (value == NULL) return;
     if (*value > UINT64_MAX - amount) *value = UINT64_MAX;
@@ -662,12 +684,11 @@ lw_status lw_x64_rec_fast_run_profiled(lw_x64_rec_fast_plan* plan, const float* 
     fast_reset_layouts(plan);
     for (uint32_t op_index = 0u; op_index < plan->op_count; ++op_index) {
         const lw_x64_physical_op* physical = &plan->ops[op_index];
-        node_index = physical->semantic_node_index;
-        uint32_t consumed = 1u;
+        node_index = physical->semantic_begin;
         uint64_t started = 0u;
         uint64_t finished = 0u;
         if (profile != NULL && profile->clock != NULL) started = profile->clock(profile->clock_context);
-        status = fast_execute_node(plan, node_index, plan->graph_input_index, input, &consumed, error);
+        status = fast_execute_physical_op(plan, physical, plan->graph_input_index, input, error);
         if (profile != NULL && profile->clock != NULL) {
             finished = profile->clock(profile->clock_context);
             if (finished < started) finished = started;

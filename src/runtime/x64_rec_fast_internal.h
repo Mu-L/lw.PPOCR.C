@@ -45,6 +45,7 @@ typedef struct lw_x64_fast_tensor_state {
 typedef struct lw_x64_fast_conv {
     uint32_t input_index;
     uint32_t output_index;
+    uint32_t residual_index;
     uint32_t weight_index;
     uint32_t bias_index;
     uint32_t input_channels;
@@ -65,6 +66,15 @@ typedef struct lw_x64_fast_conv {
     float* packed_weights;
     uint64_t packed_weight_count;
     const float* bias;
+    float* owned_bias;
+    int32_t* dense_tap_offsets;
+    int32_t* dense_patch_offsets;
+    uint32_t dense_taps;
+    uint32_t dense_k_total;
+    uint32_t dense_patch_width;
+    uint32_t dense_x_tiles;
+    uint16_t activation;
+    uint16_t flags;
     uint64_t scratch_bytes;
 } lw_x64_fast_conv;
 
@@ -122,7 +132,17 @@ typedef struct lw_x64_fast_node {
     } data;
 } lw_x64_fast_node;
 
-typedef lw_x64_fast_node lw_x64_physical_op;
+typedef struct lw_x64_physical_op {
+    uint32_t semantic_begin;
+    uint16_t semantic_count;
+    uint16_t kind;
+    uint32_t output_index;
+    union {
+        lw_x64_fast_conv conv;
+        lw_x64_fast_elementwise elementwise;
+        lw_x64_fast_spatial spatial;
+    } data;
+} lw_x64_physical_op;
 typedef uint64_t (*lw_x64_fast_profile_clock)(void* context);
 typedef struct lw_x64_fast_profile {
     lw_x64_fast_profile_clock clock;
@@ -167,6 +187,12 @@ typedef struct lw_x64_rec_fast_plan {
     uint32_t pool_node_count;
     uint32_t concat_node_count;
     uint32_t batch_norm_node_count;
+    uint32_t fused_conv_bn_count;
+    uint32_t fused_conv_relu_count;
+    uint32_t fused_conv_bn_relu_count;
+    uint32_t fused_conv_add_count;
+    uint32_t fused_conv_add_relu_count;
+    uint32_t physical_generic_op_count;
     uint32_t unsupported_nhwc_node_count;
     uint32_t unsupported_nhwc_by_operator[LW_X64_FAST_OPERATOR_CAPACITY];
     uint64_t conversion_count;

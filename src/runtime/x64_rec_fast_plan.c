@@ -4,6 +4,7 @@
 #include "operator_internal.h"
 
 #include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -411,6 +412,8 @@ static int fast_prepare_conv(lw_x64_rec_fast_plan* plan, uint32_t node_index,
          ((uint32_t)output->dimensions[1] < 16u || ((uint32_t)output->dimensions[1] % LW_NHWC_OC_BLOCK) != 0u))) return 0;
     conv = &fast_node->data.conv;
     memset(conv, 0, sizeof(*conv));
+    conv->residual_index = UINT32_MAX;
+    conv->activation = LW_NHWC_ACT_NONE;
     conv->input_index = input_index; conv->output_index = lwm_read_u32(node + 40u);
     conv->weight_index = weight_index; conv->bias_index = bias_index;
     conv->input_channels = (uint32_t)input->dimensions[1];
@@ -630,6 +633,218 @@ static lw_status fast_allocate_nhwc_workspace(lw_x64_rec_fast_plan* plan, lw_err
     }
     return LW_STATUS_OK;
 }
+static int fast_conv_epilogue_supported(uint16_t kind) {
+    return kind == LW_X64_FAST_NODE_POINTWISE || kind == LW_X64_FAST_NODE_DENSE;
+}
+
+static int fast_scale_conv_weights(lw_x64_fast_conv* conv, uint16_t kind,
+                                   const float* scale, const float* bn_bias,
+                                   const float* mean, const float* variance,
+                                   float epsilon) {
+    uint32_t c;
+    float* folded_bias;
+    if (conv == NULL || scale == NULL || bn_bias == NULL || mean == NULL || variance == NULL ||
+        conv->packed_weights == NULL || conv->output_channels == 0u) return 0;
+    folded_bias = (float*)malloc((size_t)conv->output_channels * sizeof(float));
+    if (folded_bias == NULL) return 0;
+    for (c = 0u; c < conv->output_channels; ++c) {
+        float variance_epsilon = variance[c] + epsilon;
+        float mul;
+        float old_bias = conv->bias == NULL ? 0.0f : conv->bias[c];
+        if (!(variance_epsilon >= 0.0f) || !isfinite(variance_epsilon)) {
+            free(folded_bias);
+            return 0;
+        }
+        mul = scale[c] / sqrtf(variance_epsilon);
+        if (!isfinite(mul)) {
+            free(folded_bias);
+            return 0;
+        }
+        folded_bias[c] = old_bias * mul + bn_bias[c] - mean[c] * mul;
+    }
+    if (kind == LW_X64_FAST_NODE_DEPTHWISE) {
+        uint32_t taps = conv->kernel_h * conv->kernel_w;
+        uint32_t blocks = (conv->output_channels + LW_NHWC_DEPTHWISE_BLOCK - 1u) /
+                          LW_NHWC_DEPTHWISE_BLOCK;
+        for (uint32_t block = 0u; block < blocks; ++block) {
+            for (uint32_t tap = 0u; tap < taps; ++tap) {
+                float* weights = conv->packed_weights +
+                    ((size_t)block * taps + tap) * LW_NHWC_DEPTHWISE_BLOCK;
+                for (uint32_t lane = 0u; lane < LW_NHWC_DEPTHWISE_BLOCK; ++lane) {
+                    uint32_t channel = block * LW_NHWC_DEPTHWISE_BLOCK + lane;
+                    if (channel < conv->output_channels) {
+                        float variance_epsilon = variance[channel] + epsilon;
+                        weights[lane] *= scale[channel] / sqrtf(variance_epsilon);
+                    }
+                }
+            }
+        }
+    } else {
+        uint64_t k_total = (uint64_t)conv->input_channels * conv->kernel_h * conv->kernel_w;
+        uint32_t blocks = conv->output_channels / LW_NHWC_OC_BLOCK;
+        for (uint32_t block = 0u; block < blocks; ++block) {
+            for (uint64_t k = 0u; k < k_total; ++k) {
+                float* weights = conv->packed_weights +
+                    ((size_t)block * k_total + (size_t)k) * LW_NHWC_OC_BLOCK;
+                for (uint32_t lane = 0u; lane < LW_NHWC_OC_BLOCK; ++lane) {
+                    uint32_t channel = block * LW_NHWC_OC_BLOCK + lane;
+                    float variance_epsilon = variance[channel] + epsilon;
+                    weights[lane] *= scale[channel] / sqrtf(variance_epsilon);
+                }
+            }
+        }
+    }
+    free(conv->owned_bias);
+    conv->owned_bias = folded_bias;
+    conv->bias = folded_bias;
+    return 1;
+}
+
+static int fast_fuse_conv_bn(lw_x64_rec_fast_plan* plan, lw_x64_physical_op* op,
+                             uint32_t bn_node_index) {
+    const uint8_t* node;
+    const uint8_t* params;
+    uint32_t conv_output;
+    uint32_t output_index;
+    uint32_t scale_index;
+    uint32_t bias_index;
+    uint32_t mean_index;
+    uint32_t variance_index;
+    const lw_runtime_tensor* conv_tensor;
+    const lw_runtime_tensor* output_tensor;
+    uint32_t channels;
+    const float* scale;
+    const float* bias;
+    const float* mean;
+    const float* variance;
+    if (plan == NULL || op == NULL || !fast_conv_epilogue_supported(op->kind) ||
+        bn_node_index >= plan->node_count || op->data.conv.output_index >= plan->tensor_count ||
+        plan->consumer_count == NULL || plan->consumer_count[op->data.conv.output_index] != 1u) return 0;
+    node = plan->session->model->bytes + (size_t)plan->session->model->node_offset +
+           (size_t)bn_node_index * LWM_V0_NODE_SIZE;
+    if (lwm_read_u16(node) != LW_OP_BATCH_NORMALIZATION || lwm_read_u16(node + 2u) < 5u ||
+        lwm_read_u16(node + 4u) != 1u || lwm_read_u32(node + 8u) != op->data.conv.output_index) return 0;
+    conv_output = op->data.conv.output_index;
+    output_index = lwm_read_u32(node + 40u);
+    if (output_index >= plan->tensor_count) return 0;
+    conv_tensor = &plan->session->tensors[conv_output];
+    output_tensor = &plan->session->tensors[output_index];
+    if (!fast_same_shape4(conv_tensor, output_tensor) || plan->layout.node_layout[bn_node_index] !=
+        plan->layout.node_layout[op->semantic_begin]) return 0;
+    scale_index = lwm_read_u32(node + 12u);
+    bias_index = lwm_read_u32(node + 16u);
+    mean_index = lwm_read_u32(node + 20u);
+    variance_index = lwm_read_u32(node + 24u);
+    channels = (uint32_t)conv_tensor->dimensions[1];
+    scale = fast_constant_f32(plan->session, scale_index);
+    bias = fast_constant_f32(plan->session, bias_index);
+    mean = fast_constant_f32(plan->session, mean_index);
+    variance = fast_constant_f32(plan->session, variance_index);
+    params = plan->session->model->bytes + (size_t)lwm_read_u64(node + 56u);
+    if (scale == NULL || bias == NULL || mean == NULL || variance == NULL ||
+        scale_index >= plan->tensor_count || bias_index >= plan->tensor_count ||
+        mean_index >= plan->tensor_count || variance_index >= plan->tensor_count ||
+        plan->session->tensors[scale_index].byte_size < (uint64_t)channels * sizeof(float) ||
+        plan->session->tensors[bias_index].byte_size < (uint64_t)channels * sizeof(float) ||
+        plan->session->tensors[mean_index].byte_size < (uint64_t)channels * sizeof(float) ||
+        plan->session->tensors[variance_index].byte_size < (uint64_t)channels * sizeof(float)) return 0;
+    if (!fast_scale_conv_weights(&op->data.conv, op->kind, scale, bias, mean,
+                                 variance, fast_read_f32(params + 4u))) return 0;
+    op->data.conv.output_index = output_index;
+    ++op->semantic_count;
+    fast_elide_tensor(plan, conv_output);
+    return 1;
+}
+
+static int fast_fuse_conv_add(lw_x64_rec_fast_plan* plan, lw_x64_physical_op* op,
+                              uint32_t add_node_index) {
+    const uint8_t* node;
+    uint32_t left;
+    uint32_t right;
+    uint32_t residual;
+    uint32_t output_index;
+    uint32_t conv_output;
+    if (plan == NULL || op == NULL || !fast_conv_epilogue_supported(op->kind) ||
+        add_node_index >= plan->node_count || op->data.conv.output_index >= plan->tensor_count ||
+        plan->consumer_count == NULL || plan->consumer_count[op->data.conv.output_index] != 1u) return 0;
+    node = plan->session->model->bytes + (size_t)plan->session->model->node_offset +
+           (size_t)add_node_index * LWM_V0_NODE_SIZE;
+    if (lwm_read_u16(node) != LW_OP_ADD || lwm_read_u16(node + 2u) != 2u ||
+        lwm_read_u16(node + 4u) != 1u) return 0;
+    conv_output = op->data.conv.output_index;
+    left = lwm_read_u32(node + 8u);
+    right = lwm_read_u32(node + 12u);
+    if (left == op->data.conv.output_index) residual = right;
+    else if (right == op->data.conv.output_index) residual = left;
+    else return 0;
+    output_index = lwm_read_u32(node + 40u);
+    if (output_index >= plan->tensor_count || residual >= plan->tensor_count ||
+        plan->consumer_count[output_index] != 1u ||
+        (plan->session->tensors[residual].flags & LWM_V0_TENSOR_FLAG_CONSTANT) != 0u ||
+        !fast_same_shape4(&plan->session->tensors[op->data.conv.output_index],
+                          &plan->session->tensors[residual]) ||
+        !fast_same_shape4(&plan->session->tensors[op->data.conv.output_index],
+                          &plan->session->tensors[output_index]) ||
+        plan->layout.node_layout[add_node_index] != plan->layout.node_layout[op->semantic_begin]) return 0;
+    op->data.conv.residual_index = residual;
+    op->data.conv.output_index = output_index;
+    ++op->semantic_count;
+    fast_elide_tensor(plan, conv_output);
+    return 1;
+}
+
+static int fast_fuse_conv_relu(lw_x64_rec_fast_plan* plan, lw_x64_physical_op* op,
+                               uint32_t relu_node_index) {
+    const uint8_t* node;
+    uint32_t input_index;
+    uint32_t output_index;
+    if (plan == NULL || op == NULL || !fast_conv_epilogue_supported(op->kind) ||
+        relu_node_index >= plan->node_count || op->data.conv.output_index >= plan->tensor_count ||
+        plan->consumer_count == NULL || plan->consumer_count[op->data.conv.output_index] != 1u) return 0;
+    node = plan->session->model->bytes + (size_t)plan->session->model->node_offset +
+           (size_t)relu_node_index * LWM_V0_NODE_SIZE;
+    if (lwm_read_u16(node) != LW_OP_RELU || lwm_read_u16(node + 2u) != 1u ||
+        lwm_read_u16(node + 4u) != 1u) return 0;
+    input_index = lwm_read_u32(node + 8u);
+    output_index = lwm_read_u32(node + 40u);
+    if (input_index != op->data.conv.output_index || output_index >= plan->tensor_count ||
+        !fast_same_shape4(&plan->session->tensors[input_index], &plan->session->tensors[output_index]) ||
+        plan->layout.node_layout[relu_node_index] != plan->layout.node_layout[op->semantic_begin]) return 0;
+    op->data.conv.activation = LW_NHWC_ACT_RELU;
+    op->data.conv.output_index = output_index;
+    ++op->semantic_count;
+    fast_elide_tensor(plan, input_index);
+    return 1;
+}
+static int fast_physical_op_owns_conv(uint16_t kind) {
+    return kind == LW_X64_FAST_NODE_POINTWISE ||
+           kind == LW_X64_FAST_NODE_DENSE ||
+           kind == LW_X64_FAST_NODE_DEPTHWISE;
+}
+
+static void fast_move_node_to_physical(const lw_x64_fast_node* node,
+                                       lw_x64_physical_op* op) {
+    if (node == NULL || op == NULL) return;
+    memset(op, 0, sizeof(*op));
+    op->semantic_begin = node->semantic_node_index;
+    op->semantic_count = node->semantic_node_count == 0u ? 1u : node->semantic_node_count;
+    op->kind = node->kind;
+    op->output_index = node->output_index;
+    memcpy(&op->data, &node->data, sizeof(op->data));
+}
+
+static void fast_release_conv(lw_x64_fast_conv* conv) {
+    if (conv == NULL) return;
+    free(conv->packed_weights);
+    free(conv->owned_bias);
+    free(conv->dense_tap_offsets);
+    free(conv->dense_patch_offsets);
+    conv->packed_weights = NULL;
+    conv->owned_bias = NULL;
+    conv->dense_tap_offsets = NULL;
+    conv->dense_patch_offsets = NULL;
+}
+
 static lw_status fast_compile_physical_ops(lw_x64_rec_fast_plan* plan, lw_error* error) {
     uint32_t node_index;
     if (plan == NULL) return LW_STATUS_INVALID_ARGUMENT;
@@ -641,12 +856,46 @@ static lw_status fast_compile_physical_ops(lw_x64_rec_fast_plan* plan, lw_error*
     }
     for (node_index = 0u; node_index < plan->node_count;) {
         lw_x64_fast_node* node = &plan->nodes[node_index];
+        lw_x64_physical_op* op;
         uint32_t consumed = node->semantic_node_count == 0u ? 1u : node->semantic_node_count;
         if (plan->op_count >= plan->op_capacity) {
             lw_set_error(error, LW_STATUS_OUT_OF_BOUNDS, "x64 physical op count overflow");
             return LW_STATUS_OUT_OF_BOUNDS;
         }
-        plan->ops[plan->op_count++] = *node;
+        op = &plan->ops[plan->op_count++];
+        fast_move_node_to_physical(node, op);
+        if (op->kind == LW_X64_FAST_NODE_GENERIC && plan->physical_generic_op_count != UINT32_MAX) ++plan->physical_generic_op_count;
+        if (fast_physical_op_owns_conv(op->kind)) {
+            node->data.conv.packed_weights = NULL;
+            node->data.conv.owned_bias = NULL;
+            node->data.conv.dense_tap_offsets = NULL;
+            node->data.conv.dense_patch_offsets = NULL;
+            {
+                uint32_t start = op->semantic_begin;
+                int fused_bn = 0;
+                int fused_add = 0;
+                int fused_relu = 0;
+                if (start + 1u < plan->node_count) {
+                    fused_bn = fast_fuse_conv_bn(plan, op, start + 1u);
+                    if (!fused_bn) fused_add = fast_fuse_conv_add(plan, op, start + 1u);
+                }
+                if (start + op->semantic_count < plan->node_count) {
+                    fused_relu = fast_fuse_conv_relu(plan, op, start + op->semantic_count);
+                }
+                if (fused_bn && fused_relu) {
+                    if (plan->fused_conv_bn_relu_count != UINT32_MAX) ++plan->fused_conv_bn_relu_count;
+                } else if (fused_bn) {
+                    if (plan->fused_conv_bn_count != UINT32_MAX) ++plan->fused_conv_bn_count;
+                } else if (fused_add && fused_relu) {
+                    if (plan->fused_conv_add_relu_count != UINT32_MAX) ++plan->fused_conv_add_relu_count;
+                } else if (fused_add) {
+                    if (plan->fused_conv_add_count != UINT32_MAX) ++plan->fused_conv_add_count;
+                } else if (fused_relu) {
+                    if (plan->fused_conv_relu_count != UINT32_MAX) ++plan->fused_conv_relu_count;
+                }
+            }
+            consumed = op->semantic_count;
+        }
         if (consumed > plan->node_count - node_index) consumed = 1u;
         node_index += consumed;
     }
@@ -744,10 +993,16 @@ void lw_x64_rec_fast_plan_free(lw_x64_rec_fast_plan* plan) {
     if (plan->nodes != NULL) {
         uint32_t index;
         for (index = 0u; index < plan->node_count; ++index) {
-            if (plan->nodes[index].kind == LW_X64_FAST_NODE_POINTWISE ||
-                plan->nodes[index].kind == LW_X64_FAST_NODE_DENSE ||
-                plan->nodes[index].kind == LW_X64_FAST_NODE_DEPTHWISE) {
-                free(plan->nodes[index].data.conv.packed_weights);
+            if (fast_physical_op_owns_conv(plan->nodes[index].kind)) {
+                fast_release_conv(&plan->nodes[index].data.conv);
+            }
+        }
+    }
+    if (plan->ops != NULL) {
+        uint32_t index;
+        for (index = 0u; index < plan->op_count; ++index) {
+            if (fast_physical_op_owns_conv(plan->ops[index].kind)) {
+                fast_release_conv(&plan->ops[index].data.conv);
             }
         }
     }

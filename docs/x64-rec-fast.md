@@ -20,9 +20,12 @@ The current milestone provides:
 - authoritative per-run layout publication and NCHW/NHWC conversion accounting;
 - GELU fusion safety checks for private single-consumer temporaries, plus elided intermediate tensors excluded from the NHWC workspace;
 - a compiled physical-op table that executes fused semantic spans once and exposes per-kind profile timings;
+- an independent physical-op table that owns packed weights, folded bias, epilogues, and semantic spans, with generic spans validated at execution time;
+- plan-time Conv+BatchNorm folding plus Conv+ReLU and Conv+Add(+ReLU) epilogues for eligible Pointwise/Dense nodes;
+- per-plan fusion counters (`fused_conv_bn`, `fused_conv_relu`, `fused_conv_bn_relu`, `fused_conv_add`, and `fused_conv_add_relu`) for regression and benchmark reporting;
 - deterministic comparison and paired AB/BA median timing against the canonical executor at REC width 960.
 
-The fast path remains opt-in and experimental. The planner now classifies both the PP-OCRv6 Tiny and Medium REC graphs without an NHWC blocker. The benchmark report emits `legacy_ms`, `fast_ms`, `speedup`, Pointwise/Dense/Depthwise/binary/unary/ReduceMean/Pool/Concat/BatchNorm node counts, `physical_op_count`, `elided_tensor_count`, per-kind profile nanoseconds, conversion bytes, `unsupported_nhwc_node_count`, `argmax_mismatch`, and `max_abs <= 1e-4` correctness gates. A negative speedup is not promoted to the default path.
+The fast path remains opt-in and experimental. The planner now classifies both the PP-OCRv6 Tiny and Medium REC graphs without an NHWC blocker. Fusion is conservative: it requires single-consumer, shape-compatible semantic chains and falls back to the original physical nodes when a pattern is not provably safe. The benchmark report emits `legacy_ms`, `fast_ms`, `speedup`, Pointwise/Dense/Depthwise/binary/unary/ReduceMean/Pool/Concat/BatchNorm node counts, `physical_op_count`, `elided_tensor_count`, per-kind profile nanoseconds, conversion bytes, `unsupported_nhwc_node_count`, `argmax_mismatch`, and `max_abs <= 1e-4` correctness gates. A negative speedup is not promoted to the default path.
 
 The prototype is only built for x86/x64 when the existing experimental option is enabled. ARM64, LoongArch, WebAssembly, DET, and release builds remain on the legacy path.
 
