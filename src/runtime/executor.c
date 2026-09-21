@@ -851,6 +851,39 @@ static lw_status dispatch_node(lw_session* session, const uint8_t* node, uint32_
     }
 }
 
+const float* lw_executor_tensor_input_data(const lw_session* session,
+                                          uint32_t tensor_index,
+                                          uint32_t graph_input_index,
+                                          const float* graph_input) {
+    if (session == NULL || session->model == NULL || session->tensors == NULL ||
+        tensor_index >= session->model->info.tensor_count) {
+        return NULL;
+    }
+    return tensor_input_data(session, tensor_index, graph_input_index, graph_input);
+}
+
+float* lw_executor_tensor_output_data(lw_session* session, uint32_t tensor_index) {
+    if (session == NULL || session->model == NULL || session->tensors == NULL ||
+        tensor_index >= session->model->info.tensor_count) {
+        return NULL;
+    }
+    return tensor_output_data(session, tensor_index);
+}
+
+lw_status lw_executor_dispatch_node_f32(lw_session* session, uint32_t node_index,
+                                        uint32_t graph_input_index,
+                                        const float* graph_input,
+                                        lw_execution_profile* profile) {
+    const uint8_t* node;
+    if (session == NULL || session->model == NULL ||
+        node_index >= session->model->info.node_count) {
+        return LW_STATUS_INVALID_ARGUMENT;
+    }
+    node = session->model->bytes + (size_t)session->model->node_offset +
+           (size_t)node_index * LWM_V0_NODE_SIZE;
+    return dispatch_node(session, node, node_index, graph_input_index, graph_input,
+                         session->cpu.simd, profile);
+}
 static int match_avx2_gelu(lw_session* session, uint32_t node_index, uint32_t graph_input_index,
                            const float* graph_input, const float** gelu_input, float** gelu_output,
                            uint64_t* element_count) {

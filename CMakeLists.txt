@@ -299,6 +299,20 @@ set(LW_PPOCR_C_SOURCES
     src/simd/sse2_packed_conv1x1.c
     src/simd/wasm128_erf.c)
 
+set(LW_X64_REC_FAST_ENABLED OFF)
+if(LW_EXPERIMENTAL_AVX2_FAST_PATH AND NOT EMSCRIPTEN AND
+   (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|x64|X86)$" OR
+    MSVC_C_ARCHITECTURE_ID MATCHES "^(x64|X86)$"))
+    set(LW_X64_REC_FAST_ENABLED ON)
+    list(APPEND LW_PPOCR_C_SOURCES
+        src/runtime/layout_planner.c
+        src/runtime/x64_rec_fast_plan.c
+        src/runtime/x64_rec_fast_executor.c
+        src/runtime/layout_convert_x64.c
+        src/kernels/nhwc_pack.c
+        src/simd/avx2_nhwc_pointwise.c
+        src/simd/avx2_nhwc_dense.c)
+endif()
 if(MSVC AND MSVC_C_ARCHITECTURE_ID MATCHES "^(x64|X86)$")
     set_property(SOURCE src/simd/avx2_binary.c src/simd/avx2_conv1x1.c
         src/simd/avx2_conv2x2.c
@@ -386,6 +400,13 @@ set_target_properties(lw_ppocr_c PROPERTIES
     OUTPUT_NAME lw_ppocr_c_static
     POSITION_INDEPENDENT_CODE ON)
 lw_configure_runtime_target(lw_ppocr_c)
+if(LW_X64_REC_FAST_ENABLED)
+    target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+    if(MSVC)
+        set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c APPEND PROPERTY
+            COMPILE_OPTIONS /arch:AVX2 /fp:strict)
+    endif()
+endif()
 if(LW_REC_RESIDENT_WIDTHS AND NOT EMSCRIPTEN)
     target_compile_definitions(lw_ppocr_c PRIVATE LW_REC_RESIDENT_WIDTHS=1)
 endif()
@@ -429,6 +450,13 @@ target_compile_definitions(lw_ppocr_c_shared
     PRIVATE LW_PPOCR_C_BUILD LW_PPOCR_C_SHARED
     INTERFACE LW_PPOCR_C_SHARED)
 lw_configure_runtime_target(lw_ppocr_c_shared)
+if(LW_X64_REC_FAST_ENABLED)
+    target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+    if(MSVC)
+        set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c APPEND PROPERTY
+            COMPILE_OPTIONS /arch:AVX2 /fp:strict)
+    endif()
+endif()
 if(LW_REC_RESIDENT_WIDTHS)
     target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_REC_RESIDENT_WIDTHS=1)
 endif()
@@ -2123,6 +2151,25 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_nhwc_dense_benchmark.py"
                     --driver "$<TARGET_FILE:nhwc-dense-benchmark-driver>")
         set_tests_properties(nhwc_dense_benchmark PROPERTIES TIMEOUT 120)
+        add_executable(rec-fast-prototype-driver tests/rec_fast_prototype_driver.c)
+        target_link_libraries(rec-fast-prototype-driver PRIVATE lw_ppocr_c)
+        target_include_directories(rec-fast-prototype-driver PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels")
+        target_compile_features(rec-fast-prototype-driver PRIVATE c_std_11)
+        target_compile_definitions(rec-fast-prototype-driver PRIVATE
+            LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+        add_dependencies(rec-fast-prototype-driver convert_rec_model)
+        if(MSVC)
+            target_compile_definitions(rec-fast-prototype-driver PRIVATE _CRT_SECURE_NO_WARNINGS)
+            target_compile_options(rec-fast-prototype-driver PRIVATE /W4 /WX /utf-8)
+        else()
+            target_compile_options(rec-fast-prototype-driver PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+        endif()
+        add_test(NAME x64_rec_fast_prototype
+            COMMAND rec-fast-prototype-driver "${LW_PPOCR_C_REC_LWM}" 960)
+        set_tests_properties(x64_rec_fast_prototype PROPERTIES TIMEOUT 120)
     elseif(LW_EXPERIMENTAL_AVX2_FAST_PATH)
         message(WARNING
             "LW_EXPERIMENTAL_AVX2_FAST_PATH requires an x86/x64 build; benchmark target skipped")

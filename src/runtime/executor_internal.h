@@ -65,6 +65,16 @@ typedef struct lw_execution_profile {
     uint64_t layout_analysis_runs;
 } lw_execution_profile;
 
+const float* lw_executor_tensor_input_data(const lw_session* session,
+                                          uint32_t tensor_index,
+                                          uint32_t graph_input_index,
+                                          const float* graph_input);
+float* lw_executor_tensor_output_data(lw_session* session, uint32_t tensor_index);
+lw_status lw_executor_dispatch_node_f32(lw_session* session,
+                                        uint32_t node_index,
+                                        uint32_t graph_input_index,
+                                        const float* graph_input,
+                                        lw_execution_profile* profile);
 lw_status lw_execute_session_f32(lw_session* session, const float* input,
                                  uint64_t input_element_count, float* output,
                                  uint64_t output_element_count, lw_error* error);
