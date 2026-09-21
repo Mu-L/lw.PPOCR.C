@@ -122,6 +122,7 @@ typedef struct lw_x64_fast_node {
     } data;
 } lw_x64_fast_node;
 
+typedef lw_x64_fast_node lw_x64_physical_op;
 typedef uint64_t (*lw_x64_fast_profile_clock)(void* context);
 typedef struct lw_x64_fast_profile {
     lw_x64_fast_profile_clock clock;
@@ -139,8 +140,14 @@ typedef struct lw_x64_rec_fast_plan {
     lw_session* session;
     lw_layout_plan layout;
     lw_x64_fast_node* nodes;
+    lw_x64_physical_op* ops;
+    uint32_t op_count;
+    uint32_t op_capacity;
     uint32_t node_count;
     lw_x64_fast_tensor_state* tensors;
+    uint32_t* consumer_count;
+    uint8_t* elided_tensor;
+    uint32_t elided_tensor_count;
     uint32_t tensor_count;
     uint8_t* nhwc_workspace;
     size_t nhwc_workspace_bytes;

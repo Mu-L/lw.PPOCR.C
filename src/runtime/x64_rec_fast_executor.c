@@ -660,14 +660,14 @@ lw_status lw_x64_rec_fast_run_profiled(lw_x64_rec_fast_plan* plan, const float* 
         return LW_STATUS_INVALID_SHAPE;
     }
     fast_reset_layouts(plan);
-    node_index = 0u;
-    while (node_index < plan->node_count) {
+    for (uint32_t op_index = 0u; op_index < plan->op_count; ++op_index) {
+        const lw_x64_physical_op* physical = &plan->ops[op_index];
+        node_index = physical->semantic_node_index;
         uint32_t consumed = 1u;
         uint64_t started = 0u;
         uint64_t finished = 0u;
         if (profile != NULL && profile->clock != NULL) started = profile->clock(profile->clock_context);
-        status = fast_execute_node(plan, node_index, plan->graph_input_index, input,
-                                   &consumed, error);
+        status = fast_execute_node(plan, node_index, plan->graph_input_index, input, &consumed, error);
         if (profile != NULL && profile->clock != NULL) {
             finished = profile->clock(profile->clock_context);
             if (finished < started) finished = started;
@@ -675,19 +675,13 @@ lw_status lw_x64_rec_fast_run_profiled(lw_x64_rec_fast_plan* plan, const float* 
             if (node_index < LW_X64_FAST_PROFILE_NODE_CAPACITY) {
                 fast_profile_add(&profile->node_nanoseconds[node_index], finished - started);
                 fast_profile_add(&profile->node_invocations[node_index], 1u);
-                for (uint32_t offset = 1u; offset < consumed &&
-                     node_index + offset < LW_X64_FAST_PROFILE_NODE_CAPACITY; ++offset) {
-                    fast_profile_add(&profile->node_nanoseconds[node_index + offset], 1u);
-                    fast_profile_add(&profile->node_invocations[node_index + offset], 1u);
-                }
             }
-            if (plan->nodes[node_index].kind < LW_X64_FAST_PROFILE_KIND_CAPACITY) {
-                fast_profile_add(&profile->kind_nanoseconds[plan->nodes[node_index].kind], finished - started);
-                fast_profile_add(&profile->kind_invocations[plan->nodes[node_index].kind], 1u);
+            if (physical->kind < LW_X64_FAST_PROFILE_KIND_CAPACITY) {
+                fast_profile_add(&profile->kind_nanoseconds[physical->kind], finished - started);
+                fast_profile_add(&profile->kind_invocations[physical->kind], 1u);
             }
         }
         if (status != LW_STATUS_OK) return status;
-        node_index += consumed;
     }
     if (fast_layout_tracked_tensor(output_tensor)) {
         status = fast_ensure_nchw(plan, plan->graph_output_index, error);

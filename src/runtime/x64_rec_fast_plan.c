@@ -102,6 +102,22 @@ static int fast_classify_binary(const lw_session* session, uint32_t left_index,
     return 0;
 }
 
+static int fast_gelu_temporaries_are_private(const lw_x64_rec_fast_plan* plan,
+                                             uint32_t node_index,
+                                             const lw_fused_gelu_match* match) {
+    uint32_t index;
+    if (plan == NULL || match == NULL || plan->session == NULL ||
+        node_index > plan->node_count || plan->node_count - node_index < 5u) return 0;
+    for (index = 0u; index < 4u; ++index) {
+        uint32_t tensor_index = match->outputs[index];
+        if (tensor_index >= plan->tensor_count || plan->consumer_count == NULL ||
+            plan->consumer_count[tensor_index] != 1u ||
+            plan->session->tensors[tensor_index].last_use_node !=
+                (int32_t)(node_index + index + 1u)) return 0;
+    }
+    return 1;
+}
+static void fast_elide_tensor(lw_x64_rec_fast_plan* plan, uint32_t tensor_index);
 static int fast_prepare_gelu(lw_x64_rec_fast_plan* plan, uint32_t node_index,
                              lw_x64_fast_node* fast_node) {
     lw_fused_gelu_match match;
@@ -109,6 +125,11 @@ static int fast_prepare_gelu(lw_x64_rec_fast_plan* plan, uint32_t node_index,
     const lw_runtime_tensor* output;
     if (plan == NULL || fast_node == NULL || node_index >= plan->node_count ||
         !lw_match_fused_gelu(plan->session, node_index, &match)) return 0;
+    if (!fast_gelu_temporaries_are_private(plan, node_index, &match)) return 0;
+    for (uint32_t index = 1u; index < 5u; ++index) {
+        if (plan->layout.node_layout[node_index + index] !=
+            plan->layout.node_layout[node_index]) return 0;
+    }
     if (match.inputs[0][0] >= plan->tensor_count || match.outputs[4] >= plan->tensor_count) return 0;
     input = &plan->session->tensors[match.inputs[0][0]];
     output = &plan->session->tensors[match.outputs[4]];
@@ -117,6 +138,7 @@ static int fast_prepare_gelu(lw_x64_rec_fast_plan* plan, uint32_t node_index,
     fast_node->data.elementwise.input_index = match.inputs[0][0];
     fast_node->data.elementwise.output_index = match.outputs[4];
     fast_node->data.elementwise.operation = LW_OP_ERF;
+    for (uint32_t index = 0u; index < 4u; ++index) fast_elide_tensor(plan, match.outputs[index]);
     fast_node->kind = LW_X64_FAST_NODE_GELU;
     fast_node->semantic_node_count = 5u;
     fast_node->output_index = match.outputs[4];
@@ -423,7 +445,7 @@ static int fast_prepare_conv(lw_x64_rec_fast_plan* plan, uint32_t node_index,
     lw_pack_nhwc_dense_f32(fast_constant_f32(session, weight_index), conv->input_channels,
                            conv->output_channels, conv->kernel_h, conv->kernel_w,
                            conv->packed_weights);
-    if (kh == 1 && kw == 1 && sh == 1 && sw == 1 && pt == 0 && pl == 0) {
+    if (kh == 1 && kw == 1 && sh == 1 && sw == 1 && pt == 0 && pl == 0 && pb == 0 && pr == 0) {
         fast_node->kind = LW_X64_FAST_NODE_POINTWISE;
         ++plan->pointwise_node_count;
     } else {
@@ -469,6 +491,46 @@ static lw_status fast_init_tensor_states(lw_x64_rec_fast_plan* plan, lw_error* e
     return LW_STATUS_OK;
 }
 
+static lw_status fast_build_consumer_counts(lw_x64_rec_fast_plan* plan, lw_error* error) {
+    uint32_t node_index;
+    if (plan == NULL || plan->session == NULL || plan->session->model == NULL) {
+        return LW_STATUS_INVALID_ARGUMENT;
+    }
+    plan->consumer_count = (uint32_t*)calloc(plan->tensor_count, sizeof(*plan->consumer_count));
+    plan->elided_tensor = (uint8_t*)calloc(plan->tensor_count, sizeof(*plan->elided_tensor));
+    if ((plan->consumer_count == NULL || plan->elided_tensor == NULL) && plan->tensor_count != 0u) {
+        lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "unable to allocate fast consumer metadata");
+        return LW_STATUS_OUT_OF_MEMORY;
+    }
+    for (node_index = 0u; node_index < plan->node_count; ++node_index) {
+        const uint8_t* node = plan->session->model->bytes +
+            (size_t)plan->session->model->node_offset +
+            (size_t)node_index * LWM_V0_NODE_SIZE;
+        uint32_t input_count = lwm_read_u16(node + 2u);
+        for (uint32_t input_slot = 0u; input_slot < input_count; ++input_slot) {
+            uint32_t tensor_index = lwm_read_u32(node + 8u +
+                (size_t)input_slot * sizeof(uint32_t));
+            if (tensor_index >= plan->tensor_count) {
+                lw_set_error(error, LW_STATUS_OUT_OF_BOUNDS, "fast consumer tensor index out of bounds");
+                return LW_STATUS_OUT_OF_BOUNDS;
+            }
+            if (plan->consumer_count[tensor_index] == UINT32_MAX) {
+                lw_set_error(error, LW_STATUS_OUT_OF_BOUNDS, "fast consumer count overflow");
+                return LW_STATUS_OUT_OF_BOUNDS;
+            }
+            ++plan->consumer_count[tensor_index];
+        }
+    }
+    return LW_STATUS_OK;
+}
+
+static void fast_elide_tensor(lw_x64_rec_fast_plan* plan, uint32_t tensor_index) {
+    if (plan != NULL && plan->elided_tensor != NULL && tensor_index < plan->tensor_count &&
+        plan->elided_tensor[tensor_index] == 0u) {
+        plan->elided_tensor[tensor_index] = 1u;
+        if (plan->elided_tensor_count != UINT32_MAX) ++plan->elided_tensor_count;
+    }
+}
 typedef struct fast_workspace_interval {
     uint32_t tensor_index;
     int32_t birth;
@@ -486,6 +548,7 @@ static int fast_tensor_needs_nhwc(const lw_x64_rec_fast_plan* plan, uint32_t ten
     const lw_runtime_tensor* tensor;
     if (plan == NULL || tensor_index >= plan->tensor_count) return 0;
     tensor = &plan->session->tensors[tensor_index];
+    if (plan->elided_tensor != NULL && plan->elided_tensor[tensor_index] != 0u) return 0;
     return fast_tensor_eligible(tensor) && plan->tensors[tensor_index].neutral == 0u &&
            (plan->layout.tensor_available_layouts[tensor_index] & LW_LAYOUT_AVAILABLE_NHWC) != 0u;
 }
@@ -567,6 +630,28 @@ static lw_status fast_allocate_nhwc_workspace(lw_x64_rec_fast_plan* plan, lw_err
     }
     return LW_STATUS_OK;
 }
+static lw_status fast_compile_physical_ops(lw_x64_rec_fast_plan* plan, lw_error* error) {
+    uint32_t node_index;
+    if (plan == NULL) return LW_STATUS_INVALID_ARGUMENT;
+    plan->op_capacity = plan->node_count;
+    plan->ops = (lw_x64_physical_op*)calloc(plan->op_capacity, sizeof(*plan->ops));
+    if (plan->ops == NULL && plan->op_capacity != 0u) {
+        lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "unable to allocate x64 physical ops");
+        return LW_STATUS_OUT_OF_MEMORY;
+    }
+    for (node_index = 0u; node_index < plan->node_count;) {
+        lw_x64_fast_node* node = &plan->nodes[node_index];
+        uint32_t consumed = node->semantic_node_count == 0u ? 1u : node->semantic_node_count;
+        if (plan->op_count >= plan->op_capacity) {
+            lw_set_error(error, LW_STATUS_OUT_OF_BOUNDS, "x64 physical op count overflow");
+            return LW_STATUS_OUT_OF_BOUNDS;
+        }
+        plan->ops[plan->op_count++] = *node;
+        if (consumed > plan->node_count - node_index) consumed = 1u;
+        node_index += consumed;
+    }
+    return LW_STATUS_OK;
+}
 lw_status lw_x64_rec_fast_plan_create(lw_session* session,
                                       lw_x64_rec_fast_plan** out_plan,
                                       lw_error* error) {
@@ -602,6 +687,11 @@ lw_status lw_x64_rec_fast_plan_create(lw_session* session,
         lw_x64_rec_fast_plan_free(plan);
         return status;
     }
+    status = fast_build_consumer_counts(plan, error);
+    if (status != LW_STATUS_OK) {
+        lw_x64_rec_fast_plan_free(plan);
+        return status;
+    }
     plan->graph_input_index = lwm_read_u32(session->model->bytes +
                                            (size_t)session->model->input_offset);
     plan->graph_output_index = lwm_read_u32(session->model->bytes +
@@ -624,6 +714,11 @@ lw_status lw_x64_rec_fast_plan_create(lw_session* session,
         } else if (plan->layout.node_layout[node_index] == LW_FAST_LAYOUT_NHWC) {
             fast_record_nhwc_blocker(plan, node);
         }
+    }
+    status = fast_compile_physical_ops(plan, error);
+    if (status != LW_STATUS_OK) {
+        lw_x64_rec_fast_plan_free(plan);
+        return status;
     }
     status = fast_allocate_nhwc_workspace(plan, error);
     if (status != LW_STATUS_OK) {
@@ -659,7 +754,10 @@ void lw_x64_rec_fast_plan_free(lw_x64_rec_fast_plan* plan) {
     free(plan->scratch);
     free(plan->nhwc_workspace);
     free(plan->tensors);
+    free(plan->consumer_count);
+    free(plan->elided_tensor);
     free(plan->nodes);
+    free(plan->ops);
     lw_layout_plan_free(&plan->layout);
     free(plan);
 }
