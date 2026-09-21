@@ -59,11 +59,11 @@ lw_status lw_avx2_fma_nhwc_depthwise_f32(const float* input, const float* packed
         desc->input_height == 0u || desc->input_width == 0u || desc->output_height == 0u ||
         desc->output_width == 0u || desc->kernel_h == 0u || desc->kernel_w == 0u ||
         desc->stride_h == 0u || desc->stride_w == 0u) return LW_STATUS_INVALID_ARGUMENT;
-    if ((uint64_t)desc->input_height + (uint64_t)desc->pad_top * 2u < desc->kernel_h ||
-        (uint64_t)desc->input_width + (uint64_t)desc->pad_left * 2u < desc->kernel_w ||
-        ((uint64_t)desc->input_height + (uint64_t)desc->pad_top * 2u - desc->kernel_h) /
+    if ((uint64_t)desc->input_height + desc->pad_top + desc->pad_bottom < desc->kernel_h ||
+        (uint64_t)desc->input_width + desc->pad_left + desc->pad_right < desc->kernel_w ||
+        ((uint64_t)desc->input_height + desc->pad_top + desc->pad_bottom - desc->kernel_h) /
             desc->stride_h + 1u != desc->output_height ||
-        ((uint64_t)desc->input_width + (uint64_t)desc->pad_left * 2u - desc->kernel_w) /
+        ((uint64_t)desc->input_width + desc->pad_left + desc->pad_right - desc->kernel_w) /
             desc->stride_w + 1u != desc->output_width) return LW_STATUS_INVALID_SHAPE;
 #if LW_DW_X86
     uint32_t taps = desc->kernel_h * desc->kernel_w;

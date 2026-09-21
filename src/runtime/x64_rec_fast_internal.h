@@ -11,6 +11,8 @@
 
 #define LW_X64_FAST_OFFSET_NONE UINT64_MAX
 #define LW_X64_FAST_OPERATOR_CAPACITY 64u
+#define LW_X64_FAST_PROFILE_NODE_CAPACITY 512u
+#define LW_X64_FAST_PROFILE_KIND_CAPACITY 16u
 
 enum {
     LW_X64_FAST_HAVE_NCHW = 1u << 0,
@@ -29,7 +31,8 @@ typedef enum lw_x64_fast_node_kind {
     LW_X64_FAST_NODE_POOL = 8,
     LW_X64_FAST_NODE_RESIZE = 9,
     LW_X64_FAST_NODE_CONCAT = 10,
-    LW_X64_FAST_NODE_LAYER_NORM = 11
+    LW_X64_FAST_NODE_LAYER_NORM = 11,
+    LW_X64_FAST_NODE_GELU = 12
 } lw_x64_fast_node_kind;
 
 typedef struct lw_x64_fast_tensor_state {
@@ -56,6 +59,8 @@ typedef struct lw_x64_fast_conv {
     uint32_t stride_w;
     uint32_t pad_top;
     uint32_t pad_left;
+    uint32_t pad_bottom;
+    uint32_t pad_right;
     uint32_t dense_kc;
     float* packed_weights;
     uint64_t packed_weight_count;
@@ -117,6 +122,19 @@ typedef struct lw_x64_fast_node {
     } data;
 } lw_x64_fast_node;
 
+typedef uint64_t (*lw_x64_fast_profile_clock)(void* context);
+typedef struct lw_x64_fast_profile {
+    lw_x64_fast_profile_clock clock;
+    void* clock_context;
+    uint64_t node_nanoseconds[LW_X64_FAST_PROFILE_NODE_CAPACITY];
+    uint64_t node_invocations[LW_X64_FAST_PROFILE_NODE_CAPACITY];
+    uint64_t kind_nanoseconds[LW_X64_FAST_PROFILE_KIND_CAPACITY];
+    uint64_t kind_invocations[LW_X64_FAST_PROFILE_KIND_CAPACITY];
+    uint64_t conversion_nanoseconds;
+    uint64_t conversion_invocations;
+    uint64_t conversion_bytes;
+    uint64_t total_nanoseconds;
+} lw_x64_fast_profile;
 typedef struct lw_x64_rec_fast_plan {
     lw_session* session;
     lw_layout_plan layout;
@@ -152,6 +170,10 @@ lw_status lw_x64_rec_fast_plan_create(lw_session* session,
                                       lw_x64_rec_fast_plan** out_plan,
                                       lw_error* error);
 void lw_x64_rec_fast_plan_free(lw_x64_rec_fast_plan* plan);
+lw_status lw_x64_rec_fast_run_profiled(lw_x64_rec_fast_plan* plan,
+                                     const float* input, uint64_t input_element_count,
+                                     float* output, uint64_t output_element_count,
+                                     lw_x64_fast_profile* profile, lw_error* error);
 lw_status lw_x64_rec_fast_run(lw_x64_rec_fast_plan* plan,
                               const float* input,
                               uint64_t input_element_count,

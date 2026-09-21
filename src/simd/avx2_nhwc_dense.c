@@ -54,13 +54,13 @@ static int dense_geometry(const lw_nhwc_dense_desc* desc, uint64_t* taps,
         !dense_add_u64(*patch_width, desc->kernel_w, patch_width)) {
         return 0;
     }
-    if (desc->input_height + (uint64_t)desc->pad_top * 2u < desc->kernel_h ||
-        desc->input_width + (uint64_t)desc->pad_left * 2u < desc->kernel_w) {
+    if (desc->input_height + (uint64_t)desc->pad_top + desc->pad_bottom < desc->kernel_h ||
+        desc->input_width + (uint64_t)desc->pad_left + desc->pad_right < desc->kernel_w) {
         return 0;
     }
-    expected_height = (desc->input_height + (uint64_t)desc->pad_top * 2u - desc->kernel_h) /
+    expected_height = (desc->input_height + (uint64_t)desc->pad_top + desc->pad_bottom - desc->kernel_h) /
                       desc->stride_h + 1u;
-    expected_width = (desc->input_width + (uint64_t)desc->pad_left * 2u - desc->kernel_w) /
+    expected_width = (desc->input_width + (uint64_t)desc->pad_left + desc->pad_right - desc->kernel_w) /
                      desc->stride_w + 1u;
     if (expected_height != desc->output_height || expected_width != desc->output_width ||
         *patch_width > UINT32_MAX ||

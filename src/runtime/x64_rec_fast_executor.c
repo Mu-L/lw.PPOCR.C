@@ -264,6 +264,8 @@ static lw_status fast_execute_dense(lw_x64_rec_fast_plan* plan,
     desc.stride_w = conv->stride_w;
     desc.pad_top = conv->pad_top;
     desc.pad_left = conv->pad_left;
+    desc.pad_bottom = conv->pad_bottom;
+    desc.pad_right = conv->pad_right;
     desc.dense_kc = conv->dense_kc;
     memset(&epilogue, 0, sizeof(epilogue));
     epilogue.bias = conv->bias;
@@ -539,6 +541,8 @@ static lw_status fast_execute_depthwise(lw_x64_rec_fast_plan* plan,
     desc.stride_w = conv->stride_w;
     desc.pad_top = conv->pad_top;
     desc.pad_left = conv->pad_left;
+    desc.pad_bottom = conv->pad_bottom;
+    desc.pad_right = conv->pad_right;
     status = lw_avx2_fma_nhwc_depthwise_f32(input, conv->packed_weights, conv->bias,
                                              output, &desc);
     if (status != LW_STATUS_OK) {
@@ -546,6 +550,40 @@ static lw_status fast_execute_depthwise(lw_x64_rec_fast_plan* plan,
         return status;
     }
     fast_publish_nhwc(plan, conv->output_index);
+    return LW_STATUS_OK;
+}
+static lw_status fast_execute_gelu(lw_x64_rec_fast_plan* plan,
+                                   const lw_x64_fast_node* node,
+                                   uint32_t graph_input_index,
+                                   const float* graph_input,
+                                   lw_error* error) {
+    const lw_x64_fast_elementwise* op = &node->data.elementwise;
+    const lw_runtime_tensor* tensor = &plan->session->tensors[op->output_index];
+    float* input;
+    float* output;
+    lw_status status;
+    if (plan->layout.node_layout[node->semantic_node_index] == LW_FAST_LAYOUT_NCHW) {
+        input = (float*)lw_executor_tensor_input_data(plan->session, op->input_index,
+                                                       graph_input_index, graph_input);
+        output = lw_executor_tensor_output_data(plan->session, op->output_index);
+        if (input == NULL || output == NULL) {
+            lw_set_error(error, LW_STATUS_UNSUPPORTED, "NCHW GELU buffers are unavailable");
+            return LW_STATUS_UNSUPPORTED;
+        }
+        lw_avx2_gelu_f32(input, output, tensor->byte_size / sizeof(float));
+        fast_publish_nchw(plan, op->output_index);
+        return LW_STATUS_OK;
+    }
+    status = fast_ensure_nhwc(plan, op->input_index, graph_input_index, graph_input, error);
+    if (status != LW_STATUS_OK) return status;
+    input = fast_nhwc_pointer(plan, op->input_index);
+    output = fast_nhwc_pointer(plan, op->output_index);
+    if (input == NULL || output == NULL) {
+        lw_set_error(error, LW_STATUS_UNSUPPORTED, "NHWC GELU buffers are unavailable");
+        return LW_STATUS_UNSUPPORTED;
+    }
+    lw_avx2_gelu_f32(input, output, tensor->byte_size / sizeof(float));
+    fast_publish_nhwc(plan, op->output_index);
     return LW_STATUS_OK;
 }
 static lw_status fast_execute_node(lw_x64_rec_fast_plan* plan, uint32_t node_index,
@@ -558,7 +596,9 @@ static lw_status fast_execute_node(lw_x64_rec_fast_plan* plan, uint32_t node_ind
         return LW_STATUS_INVALID_ARGUMENT;
     }
     node = &plan->nodes[node_index];
-    if (node->kind == LW_X64_FAST_NODE_BATCH_NORM) {
+    if (node->kind == LW_X64_FAST_NODE_GELU) {
+        status = fast_execute_gelu(plan, node, graph_input_index, graph_input, error);
+    } else if (node->kind == LW_X64_FAST_NODE_BATCH_NORM) {
         status = fast_execute_batch_norm(plan, node, graph_input_index, graph_input, error);
     } else if (node->kind == LW_X64_FAST_NODE_CONCAT) {
         status = fast_execute_concat(plan, node, graph_input_index, graph_input, error);
@@ -579,17 +619,32 @@ static lw_status fast_execute_node(lw_x64_rec_fast_plan* plan, uint32_t node_ind
         return fast_execute_generic_node(plan, node_index, graph_input_index, graph_input,
                                          consumed_nodes, error);
     }
-    if (status == LW_STATUS_OK && consumed_nodes != NULL) *consumed_nodes = 1u;
+    if (status == LW_STATUS_OK && consumed_nodes != NULL) {
+        *consumed_nodes = node->semantic_node_count == 0u ? 1u : node->semantic_node_count;
+    }
     return status;
 }
-lw_status lw_x64_rec_fast_run(lw_x64_rec_fast_plan* plan, const float* input,
-                              uint64_t input_element_count, float* output,
-                              uint64_t output_element_count, lw_error* error) {
+static void fast_profile_add(uint64_t* value, uint64_t amount) {
+    if (value == NULL) return;
+    if (*value > UINT64_MAX - amount) *value = UINT64_MAX;
+    else *value += amount;
+}
+lw_status lw_x64_rec_fast_run_profiled(lw_x64_rec_fast_plan* plan, const float* input,
+                                       uint64_t input_element_count, float* output,
+                                       uint64_t output_element_count,
+                                       lw_x64_fast_profile* profile, lw_error* error) {
     const lw_runtime_tensor* input_tensor;
     const lw_runtime_tensor* output_tensor;
     const float* graph_output;
     uint32_t node_index;
+    lw_x64_fast_profile_clock profile_clock_fn = profile == NULL ? NULL : profile->clock;
+    void* profile_clock_context = profile == NULL ? NULL : profile->clock_context;
     lw_status status;
+    if (profile != NULL) {
+        memset(profile, 0, sizeof(*profile));
+        profile->clock = profile_clock_fn;
+        profile->clock_context = profile_clock_context;
+    }
     if (plan == NULL || plan->session == NULL || plan->session->model == NULL || input == NULL ||
         output == NULL || plan->graph_input_index >= plan->tensor_count ||
         plan->graph_output_index >= plan->tensor_count) {
@@ -608,8 +663,29 @@ lw_status lw_x64_rec_fast_run(lw_x64_rec_fast_plan* plan, const float* input,
     node_index = 0u;
     while (node_index < plan->node_count) {
         uint32_t consumed = 1u;
+        uint64_t started = 0u;
+        uint64_t finished = 0u;
+        if (profile != NULL && profile->clock != NULL) started = profile->clock(profile->clock_context);
         status = fast_execute_node(plan, node_index, plan->graph_input_index, input,
                                    &consumed, error);
+        if (profile != NULL && profile->clock != NULL) {
+            finished = profile->clock(profile->clock_context);
+            if (finished < started) finished = started;
+            fast_profile_add(&profile->total_nanoseconds, finished - started);
+            if (node_index < LW_X64_FAST_PROFILE_NODE_CAPACITY) {
+                fast_profile_add(&profile->node_nanoseconds[node_index], finished - started);
+                fast_profile_add(&profile->node_invocations[node_index], 1u);
+                for (uint32_t offset = 1u; offset < consumed &&
+                     node_index + offset < LW_X64_FAST_PROFILE_NODE_CAPACITY; ++offset) {
+                    fast_profile_add(&profile->node_nanoseconds[node_index + offset], 1u);
+                    fast_profile_add(&profile->node_invocations[node_index + offset], 1u);
+                }
+            }
+            if (plan->nodes[node_index].kind < LW_X64_FAST_PROFILE_KIND_CAPACITY) {
+                fast_profile_add(&profile->kind_nanoseconds[plan->nodes[node_index].kind], finished - started);
+                fast_profile_add(&profile->kind_invocations[plan->nodes[node_index].kind], 1u);
+            }
+        }
         if (status != LW_STATUS_OK) return status;
         node_index += consumed;
     }
@@ -624,6 +700,17 @@ lw_status lw_x64_rec_fast_run(lw_x64_rec_fast_plan* plan, const float* input,
         return LW_STATUS_UNSUPPORTED;
     }
     memcpy(output, graph_output, (size_t)output_tensor->byte_size);
+    if (profile != NULL) {
+        profile->conversion_invocations = plan->conversion_count;
+        profile->conversion_bytes = plan->conversion_bytes;
+    }
     lw_set_error(error, LW_STATUS_OK, "");
     return LW_STATUS_OK;
+}
+
+lw_status lw_x64_rec_fast_run(lw_x64_rec_fast_plan* plan, const float* input,
+                              uint64_t input_element_count, float* output,
+                              uint64_t output_element_count, lw_error* error) {
+    return lw_x64_rec_fast_run_profiled(plan, input, input_element_count, output,
+                                        output_element_count, NULL, error);
 }

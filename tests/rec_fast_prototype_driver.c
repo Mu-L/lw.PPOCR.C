@@ -40,6 +40,10 @@ static int run_legacy(lw_session* session, const float* input, uint64_t input_co
     return lw_execute_session_f32(session, input, input_count, output, output_count, error) == LW_STATUS_OK;
 }
 
+static uint64_t profile_clock(void* context) {
+    (void)context;
+    return now_ns();
+}
 static int run_fast(lw_x64_rec_fast_plan* plan, const float* input, uint64_t input_count,
                     float* output, uint64_t output_count, lw_error* error) {
     return lw_x64_rec_fast_run(plan, input, input_count, output, output_count, error) == LW_STATUS_OK;
@@ -134,6 +138,7 @@ int main(int argc, char** argv) {
     uint32_t sample_index;
     double legacy_ms;
     double fast_ms;
+    lw_x64_fast_profile fast_profile;
 
     if (!test_layout_roundtrip()) {
         fprintf(stderr, "NCHW/NHWC layout roundtrip failed\n" );
@@ -238,9 +243,16 @@ int main(int argc, char** argv) {
             legacy_samples[sample_index] = (double)(finished - started) / 1000000.0;
         }
     }
+    memset(&fast_profile, 0, sizeof(fast_profile));
+    fast_profile.clock = profile_clock;
+    if (lw_x64_rec_fast_run_profiled(plan, input, input_count, actual, output_count,
+                                     &fast_profile, &error) != LW_STATUS_OK) {
+        fprintf(stderr, "profiled fast execution failed: %s\n", error.message);
+        goto cleanup;
+    }
     legacy_ms = median_ms(legacy_samples, 9u);
     fast_ms = median_ms(fast_samples, 9u);
-    printf("{\"width\":%u,\"legacy_ms\":%.6f,\"fast_ms\":%.6f,\"speedup\":%.6f,\"max_abs\":%.9g,\"mismatch\":%llu,\"argmax_mismatch\":%llu,\"fast_nodes\":%u,\"generic_nodes\":%u,\"pointwise_nodes\":%u,\"dense_nodes\":%u,\"depthwise_nodes\":%u,\"binary_nodes\":%u,\"relu_nodes\":%u,\"unary_nodes\":%u,\"reduce_mean_nodes\":%u,\"pool_nodes\":%u,\"concat_nodes\":%u,\"batch_norm_nodes\":%u,\"planner_conversion_count\":%u,\"unsupported_nhwc_node_count\":%u,\"conversion_count\":%llu,\"conversion_bytes\":%llu,\"nhwc_workspace_bytes\":%llu}\n",
+    printf("{\"width\":%u,\"legacy_ms\":%.6f,\"fast_ms\":%.6f,\"speedup\":%.6f,\"max_abs\":%.9g,\"mismatch\":%llu,\"argmax_mismatch\":%llu,\"fast_nodes\":%u,\"generic_nodes\":%u,\"pointwise_nodes\":%u,\"dense_nodes\":%u,\"depthwise_nodes\":%u,\"binary_nodes\":%u,\"relu_nodes\":%u,\"unary_nodes\":%u,\"reduce_mean_nodes\":%u,\"pool_nodes\":%u,\"concat_nodes\":%u,\"batch_norm_nodes\":%u,\"planner_conversion_count\":%u,\"unsupported_nhwc_node_count\":%u,\"conversion_count\":%llu,\"conversion_bytes\":%llu,\"nhwc_workspace_bytes\":%llu,\"fast_profile_total_ns\":%llu,\"fast_profile_conversion_invocations\":%llu,\"fast_profile_conversion_bytes\":%llu}\n",
            width, legacy_ms, fast_ms, fast_ms > 0.0 ? legacy_ms / fast_ms : 0.0,
            (double)max_abs, (unsigned long long)mismatch, (unsigned long long)argmax_mismatch, plan->fast_node_count,
            plan->generic_node_count, plan->pointwise_node_count, plan->dense_node_count,
@@ -249,8 +261,14 @@ int main(int argc, char** argv) {
            plan->layout.layout_conversion_count, plan->unsupported_nhwc_node_count,
            (unsigned long long)plan->conversion_count,
            (unsigned long long)plan->conversion_bytes,
-           (unsigned long long)plan->nhwc_workspace_bytes);
-    exit_code = mismatch == 0u && argmax_mismatch == 0u && plan->pointwise_node_count != 0u && plan->dense_node_count != 0u ? 0 : 1;
+           (unsigned long long)plan->nhwc_workspace_bytes,
+           (unsigned long long)fast_profile.total_nanoseconds,
+           (unsigned long long)fast_profile.conversion_invocations,
+           (unsigned long long)fast_profile.conversion_bytes);
+    exit_code = mismatch == 0u && argmax_mismatch == 0u &&
+                 plan->pointwise_node_count != 0u && plan->dense_node_count != 0u &&
+                 fast_profile.total_nanoseconds != 0u &&
+                 fast_profile.conversion_invocations == plan->conversion_count ? 0 : 1;
 
 cleanup:
     lw_x64_rec_fast_plan_free(plan);

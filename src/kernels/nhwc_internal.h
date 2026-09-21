@@ -55,6 +55,8 @@ typedef struct lw_nhwc_dense_desc {
     uint32_t stride_w;
     uint32_t pad_top;
     uint32_t pad_left;
+    uint32_t pad_bottom;
+    uint32_t pad_right;
     uint32_t dense_kc;
 } lw_nhwc_dense_desc;
 
@@ -81,6 +83,8 @@ typedef struct lw_nhwc_depthwise_desc {
     uint32_t stride_w;
     uint32_t pad_top;
     uint32_t pad_left;
+    uint32_t pad_bottom;
+    uint32_t pad_right;
 } lw_nhwc_depthwise_desc;
 
 int lw_nhwc_depthwise_packed_weight_count(uint32_t channels,
