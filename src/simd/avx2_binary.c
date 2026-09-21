@@ -76,3 +76,21 @@ void lw_avx2_binary_right_scalar_f32(
     lw_scalar_binary_right_scalar_f32(operation, left + (size_t)index, right,
                                       output + (size_t)index, element_count - index);
 }
+
+#if LW_COMPILES_AVX2_BINARY && (defined(__GNUC__) || defined(__clang__))
+__attribute__((target("avx2,no-fma")))
+#endif
+void lw_avx2_relu_contiguous_f32(const float* input, float* output, uint64_t element_count) {
+    uint64_t index = 0u;
+#if LW_COMPILES_AVX2_BINARY
+    __m256 zero = _mm256_setzero_ps();
+    for (; index + 8u <= element_count; index += 8u) {
+        __m256 value = _mm256_max_ps(_mm256_loadu_ps(input + (size_t)index), zero);
+        _mm256_storeu_ps(output + (size_t)index, value);
+    }
+#endif
+    for (; index < element_count; ++index) {
+        float value = input[(size_t)index];
+        output[(size_t)index] = value > 0.0f ? value : 0.0f;
+    }
+}

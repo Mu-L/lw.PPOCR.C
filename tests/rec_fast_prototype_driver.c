@@ -60,6 +60,23 @@ static double median_ms(double* values, uint32_t count) {
     return values[count / 2u];
 }
 
+static uint64_t argmax_mismatch_count(const float* expected, const float* actual,
+                                      uint64_t element_count, uint32_t columns) {
+    uint64_t rows;
+    uint64_t mismatch = 0u;
+    if (expected == NULL || actual == NULL || columns == 0u || element_count % columns != 0u) return UINT64_MAX;
+    rows = element_count / columns;
+    for (uint64_t row = 0u; row < rows; ++row) {
+        uint32_t expected_best = 0u;
+        uint32_t actual_best = 0u;
+        for (uint32_t column = 1u; column < columns; ++column) {
+            if (expected[(size_t)row * columns + column] > expected[(size_t)row * columns + expected_best]) expected_best = column;
+            if (actual[(size_t)row * columns + column] > actual[(size_t)row * columns + actual_best]) actual_best = column;
+        }
+        if (expected_best != actual_best) ++mismatch;
+    }
+    return mismatch;
+}
 static int test_layout_roundtrip(void) {
     const uint32_t dimensions[4] = {1u, 2u, 2u, 3u};
     float source[12];
@@ -110,6 +127,7 @@ int main(int argc, char** argv) {
     uint64_t index;
     float max_abs = 0.0f;
     uint64_t mismatch = 0u;
+    uint64_t argmax_mismatch = 0u;
     int exit_code = 1;
     double legacy_samples[9];
     double fast_samples[9];
@@ -184,6 +202,12 @@ int main(int argc, char** argv) {
         if (difference > max_abs) max_abs = difference;
         if (difference > 1.0e-4f) ++mismatch;
     }
+    argmax_mismatch = argmax_mismatch_count(expected, actual, output_count,
+        output_desc.rank == 0u ? 0u : (uint32_t)output_desc.dimensions[output_desc.rank - 1u]);
+    if (argmax_mismatch == UINT64_MAX) {
+        fprintf(stderr, "unable to calculate argmax mismatch\\n");
+        goto cleanup;
+    }
     for (sample_index = 0u; sample_index < 2u; ++sample_index) {
         if (!run_legacy(session, input, input_count, expected, output_count, &error) ||
             !run_fast(plan, input, input_count, actual, output_count, &error)) {
@@ -216,14 +240,15 @@ int main(int argc, char** argv) {
     }
     legacy_ms = median_ms(legacy_samples, 9u);
     fast_ms = median_ms(fast_samples, 9u);
-    printf("{\"width\":%u,\"legacy_ms\":%.6f,\"fast_ms\":%.6f,\"speedup\":%.6f,\"max_abs\":%.9g,\"mismatch\":%llu,\"fast_nodes\":%u,\"generic_nodes\":%u,\"pointwise_nodes\":%u,\"dense_nodes\":%u,\"conversion_count\":%llu,\"conversion_bytes\":%llu,\"nhwc_workspace_bytes\":%llu}\n",
+    printf("{\"width\":%u,\"legacy_ms\":%.6f,\"fast_ms\":%.6f,\"speedup\":%.6f,\"max_abs\":%.9g,\"mismatch\":%llu,\"argmax_mismatch\":%llu,\"fast_nodes\":%u,\"generic_nodes\":%u,\"pointwise_nodes\":%u,\"dense_nodes\":%u,\"depthwise_nodes\":%u,\"binary_nodes\":%u,\"relu_nodes\":%u,\"conversion_count\":%llu,\"conversion_bytes\":%llu,\"nhwc_workspace_bytes\":%llu}\n",
            width, legacy_ms, fast_ms, fast_ms > 0.0 ? legacy_ms / fast_ms : 0.0,
-           (double)max_abs, (unsigned long long)mismatch, plan->fast_node_count,
+           (double)max_abs, (unsigned long long)mismatch, (unsigned long long)argmax_mismatch, plan->fast_node_count,
            plan->generic_node_count, plan->pointwise_node_count, plan->dense_node_count,
+           plan->depthwise_node_count, plan->binary_node_count, plan->relu_node_count,
            (unsigned long long)plan->conversion_count,
            (unsigned long long)plan->conversion_bytes,
            (unsigned long long)plan->nhwc_workspace_bytes);
-    exit_code = mismatch == 0u && plan->pointwise_node_count != 0u && plan->dense_node_count != 0u ? 0 : 1;
+    exit_code = mismatch == 0u && argmax_mismatch == 0u && plan->pointwise_node_count != 0u && plan->dense_node_count != 0u ? 0 : 1;
 
 cleanup:
     lw_x64_rec_fast_plan_free(plan);

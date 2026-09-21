@@ -1,7 +1,9 @@
 #include "x64_rec_fast_internal.h"
 
 #include "executor_internal.h"
+#include "operator_internal.h"
 #include "lwm_read.h"
+#include "../simd/simd_kernels.h"
 
 #include <limits.h>
 #include <stdlib.h>
@@ -260,6 +262,85 @@ static lw_status fast_execute_dense(lw_x64_rec_fast_plan* plan,
     return LW_STATUS_OK;
 }
 
+static lw_status fast_execute_elementwise(lw_x64_rec_fast_plan* plan,
+                                          const lw_x64_fast_node* node,
+                                          uint32_t graph_input_index,
+                                          const float* graph_input,
+                                          lw_error* error) {
+    const lw_x64_fast_elementwise* op = &node->data.elementwise;
+    const lw_runtime_tensor* tensor = &plan->session->tensors[op->input_index];
+    float* input;
+    float* output;
+    lw_status status;
+    status = fast_ensure_nhwc(plan, op->input_index, graph_input_index, graph_input, error);
+    if (status != LW_STATUS_OK) return status;
+    input = fast_nhwc_pointer(plan, op->input_index);
+    output = fast_nhwc_pointer(plan, op->output_index);
+    if (input == NULL || output == NULL) {
+        lw_set_error(error, LW_STATUS_UNSUPPORTED, "elementwise fast buffers are unavailable");
+        return LW_STATUS_UNSUPPORTED;
+    }
+    if (node->kind == LW_X64_FAST_NODE_CONTIGUOUS_UNARY) {
+        lw_avx2_relu_contiguous_f32(input, output, tensor->byte_size / sizeof(float));
+    } else {
+        const float* right;
+        lw_scalar_binary_op operation;
+        status = fast_ensure_nhwc(plan, op->rhs_index, graph_input_index, graph_input, error);
+        if (status != LW_STATUS_OK) return status;
+        right = fast_nhwc_pointer(plan, op->rhs_index);
+        if (right == NULL) {
+            lw_set_error(error, LW_STATUS_UNSUPPORTED, "binary fast RHS is unavailable");
+            return LW_STATUS_UNSUPPORTED;
+        }
+        operation = op->operation == LW_OP_ADD ? LW_SCALAR_BINARY_ADD :
+                    (op->operation == LW_OP_MUL ? LW_SCALAR_BINARY_MUL :
+                     (op->operation == LW_OP_DIV ? LW_SCALAR_BINARY_DIV : LW_SCALAR_BINARY_SUB));
+        lw_avx2_binary_contiguous_f32(operation, input, right, output,
+                                      tensor->byte_size / sizeof(float));
+    }
+    fast_publish_nhwc(plan, op->output_index);
+    return LW_STATUS_OK;
+}
+static lw_status fast_execute_depthwise(lw_x64_rec_fast_plan* plan,
+                                        const lw_x64_fast_node* node,
+                                        uint32_t graph_input_index,
+                                        const float* graph_input,
+                                        lw_error* error) {
+    const lw_x64_fast_conv* conv = &node->data.conv;
+    lw_nhwc_depthwise_desc desc;
+    float* input;
+    float* output;
+    lw_status status;
+    status = fast_ensure_nhwc(plan, conv->input_index, graph_input_index, graph_input, error);
+    if (status != LW_STATUS_OK) return status;
+    input = fast_nhwc_pointer(plan, conv->input_index);
+    output = fast_nhwc_pointer(plan, conv->output_index);
+    if (input == NULL || output == NULL) {
+        lw_set_error(error, LW_STATUS_UNSUPPORTED, "depthwise fast buffers are unavailable");
+        return LW_STATUS_UNSUPPORTED;
+    }
+    memset(&desc, 0, sizeof(desc));
+    desc.batch = 1u;
+    desc.channels = conv->input_channels;
+    desc.input_height = conv->input_height;
+    desc.input_width = conv->input_width;
+    desc.output_height = conv->output_height;
+    desc.output_width = conv->output_width;
+    desc.kernel_h = conv->kernel_h;
+    desc.kernel_w = conv->kernel_w;
+    desc.stride_h = conv->stride_h;
+    desc.stride_w = conv->stride_w;
+    desc.pad_top = conv->pad_top;
+    desc.pad_left = conv->pad_left;
+    status = lw_avx2_fma_nhwc_depthwise_f32(input, conv->packed_weights, conv->bias,
+                                             output, &desc);
+    if (status != LW_STATUS_OK) {
+        lw_set_error(error, status, "depthwise fast kernel failed");
+        return status;
+    }
+    fast_publish_nhwc(plan, conv->output_index);
+    return LW_STATUS_OK;
+}
 static lw_status fast_execute_node(lw_x64_rec_fast_plan* plan, uint32_t node_index,
                                    uint32_t graph_input_index, const float* graph_input,
                                    uint32_t* consumed_nodes, lw_error* error) {
@@ -272,8 +353,13 @@ static lw_status fast_execute_node(lw_x64_rec_fast_plan* plan, uint32_t node_ind
     node = &plan->nodes[node_index];
     if (node->kind == LW_X64_FAST_NODE_POINTWISE) {
         status = fast_execute_pointwise(plan, node, graph_input_index, graph_input, error);
+    } else if (node->kind == LW_X64_FAST_NODE_CONTIGUOUS_UNARY ||
+               node->kind == LW_X64_FAST_NODE_CONTIGUOUS_BINARY) {
+        status = fast_execute_elementwise(plan, node, graph_input_index, graph_input, error);
     } else if (node->kind == LW_X64_FAST_NODE_DENSE) {
         status = fast_execute_dense(plan, node, graph_input_index, graph_input, error);
+    } else if (node->kind == LW_X64_FAST_NODE_DEPTHWISE) {
+        status = fast_execute_depthwise(plan, node, graph_input_index, graph_input, error);
     } else {
         return fast_execute_generic_node(plan, node_index, graph_input_index, graph_input,
                                          consumed_nodes, error);

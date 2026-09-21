@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #define LW_NHWC_OC_BLOCK 16u
+#define LW_NHWC_DEPTHWISE_BLOCK 32u
 #define LW_NHWC_PIXEL_TILE 6u
 #define LW_NHWC_POINTWISE_GROUP_TILES 8u
 #define LW_NHWC_DENSE_KC 512u
@@ -67,6 +68,37 @@ lw_status lw_avx2_fma_nhwc_dense_f32(const float* input,
                                      void* scratch,
                                      uint64_t scratch_bytes);
 /* Input/output are NHWC. This API is experimental and production-disabled. */
+typedef struct lw_nhwc_depthwise_desc {
+    uint32_t batch;
+    uint32_t channels;
+    uint32_t input_height;
+    uint32_t input_width;
+    uint32_t output_height;
+    uint32_t output_width;
+    uint32_t kernel_h;
+    uint32_t kernel_w;
+    uint32_t stride_h;
+    uint32_t stride_w;
+    uint32_t pad_top;
+    uint32_t pad_left;
+} lw_nhwc_depthwise_desc;
+
+int lw_nhwc_depthwise_packed_weight_count(uint32_t channels,
+                                          uint32_t kernel_h,
+                                          uint32_t kernel_w,
+                                          uint64_t* element_count);
+
+void lw_pack_nhwc_depthwise_f32(const float* weights,
+                                uint32_t channels,
+                                uint32_t kernel_h,
+                                uint32_t kernel_w,
+                                float* packed_weights);
+
+lw_status lw_avx2_fma_nhwc_depthwise_f32(const float* input,
+                                         const float* packed_weights,
+                                         const float* bias,
+                                         float* output,
+                                         const lw_nhwc_depthwise_desc* desc);
 void lw_avx2_fma_nhwc_pointwise_grouped_f32(const float* input,
                                              const float* packed_weights,
                                              const lw_nhwc_epilogue* epilogue,

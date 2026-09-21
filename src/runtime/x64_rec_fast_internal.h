@@ -62,6 +62,13 @@ typedef struct lw_x64_fast_conv {
     uint64_t scratch_bytes;
 } lw_x64_fast_conv;
 
+typedef struct lw_x64_fast_elementwise {
+    uint32_t input_index;
+    uint32_t rhs_index;
+    uint32_t output_index;
+    uint16_t operation;
+    uint16_t reserved;
+} lw_x64_fast_elementwise;
 typedef struct lw_x64_fast_node {
     uint32_t semantic_node_index;
     uint16_t kind;
@@ -69,6 +76,7 @@ typedef struct lw_x64_fast_node {
     uint32_t output_index;
     union {
         lw_x64_fast_conv conv;
+        lw_x64_fast_elementwise elementwise;
     } data;
 } lw_x64_fast_node;
 
@@ -90,6 +98,8 @@ typedef struct lw_x64_rec_fast_plan {
     uint32_t pointwise_node_count;
     uint32_t dense_node_count;
     uint32_t depthwise_node_count;
+    uint32_t binary_node_count;
+    uint32_t relu_node_count;
     uint64_t conversion_count;
     uint64_t conversion_bytes;
 } lw_x64_rec_fast_plan;
