@@ -556,6 +556,117 @@ static int fast_tensor_needs_nhwc(const lw_x64_rec_fast_plan* plan, uint32_t ten
            (plan->layout.tensor_available_layouts[tensor_index] & LW_LAYOUT_AVAILABLE_NHWC) != 0u;
 }
 
+
+static int fast_tensor_needs_nhwc(const lw_x64_rec_fast_plan* plan, uint32_t tensor_index);
+
+static lw_status fast_build_semantic_to_physical(lw_x64_rec_fast_plan* plan, lw_error* error) {
+    if (plan == NULL) return LW_STATUS_INVALID_ARGUMENT;
+    plan->semantic_to_physical = (uint32_t*)malloc((size_t)plan->node_count * sizeof(*plan->semantic_to_physical));
+    if (plan->semantic_to_physical == NULL && plan->node_count != 0u) {
+        lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "unable to allocate semantic-to-physical map");
+        return LW_STATUS_OUT_OF_MEMORY;
+    }
+    for (uint32_t index = 0u; index < plan->node_count; ++index) {
+        plan->semantic_to_physical[index] = UINT32_MAX;
+    }
+    for (uint32_t op_index = 0u; op_index < plan->op_count; ++op_index) {
+        const lw_x64_physical_op* op = &plan->ops[op_index];
+        uint32_t begin = op->semantic_begin;
+        uint32_t count = op->semantic_count == 0u ? 1u : op->semantic_count;
+        if (begin >= plan->node_count || count > plan->node_count - begin) {
+            lw_set_error(error, LW_STATUS_INVALID_SHAPE, "invalid x64 physical semantic span");
+            return LW_STATUS_INVALID_SHAPE;
+        }
+        for (uint32_t offset = 0u; offset < count; ++offset) {
+            uint32_t semantic = begin + offset;
+            if (plan->semantic_to_physical[semantic] != UINT32_MAX) {
+                lw_set_error(error, LW_STATUS_INVALID_SHAPE, "overlapping x64 physical semantic spans");
+                return LW_STATUS_INVALID_SHAPE;
+            }
+            plan->semantic_to_physical[semantic] = op_index;
+        }
+    }
+    for (uint32_t index = 0u; index < plan->node_count; ++index) {
+        if (plan->semantic_to_physical[index] == UINT32_MAX) {
+            lw_set_error(error, LW_STATUS_INVALID_SHAPE, "semantic node is missing from x64 physical plan");
+            return LW_STATUS_INVALID_SHAPE;
+        }
+    }
+    return LW_STATUS_OK;
+}
+
+static lw_status fast_build_physical_lifetimes(lw_x64_rec_fast_plan* plan, lw_error* error) {
+    if (plan == NULL || plan->session == NULL || plan->semantic_to_physical == NULL) {
+        return LW_STATUS_INVALID_ARGUMENT;
+    }
+    plan->physical_lifetimes = (lw_x64_fast_tensor_lifetime*)calloc(
+        plan->tensor_count, sizeof(*plan->physical_lifetimes));
+    if (plan->physical_lifetimes == NULL && plan->tensor_count != 0u) {
+        lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "unable to allocate physical tensor lifetimes");
+        return LW_STATUS_OUT_OF_MEMORY;
+    }
+    for (uint32_t index = 0u; index < plan->tensor_count; ++index) {
+        const lw_runtime_tensor* tensor = &plan->session->tensors[index];
+        lw_x64_fast_tensor_lifetime* lifetime = &plan->physical_lifetimes[index];
+        lifetime->birth_op = 0;
+        lifetime->last_use_op = 0;
+        if (tensor->birth_node >= 0) {
+            uint32_t semantic = (uint32_t)tensor->birth_node;
+            if (semantic >= plan->node_count || plan->semantic_to_physical[semantic] >= plan->op_count) {
+                lw_set_error(error, LW_STATUS_INVALID_SHAPE, "tensor birth semantic node is not in physical plan");
+                return LW_STATUS_INVALID_SHAPE;
+            }
+            lifetime->birth_op = (int32_t)plan->semantic_to_physical[semantic];
+        }
+        if (tensor->last_use_node >= 0) {
+            uint32_t semantic = (uint32_t)tensor->last_use_node;
+            if (semantic == plan->node_count && plan->op_count != 0u) {
+                /* The session planner uses node_count as the graph-output sentinel. */
+                lifetime->last_use_op = (int32_t)(plan->op_count - 1u);
+            } else {
+                if (semantic >= plan->node_count || plan->semantic_to_physical[semantic] >= plan->op_count) {
+                    lw_set_error(error, LW_STATUS_INVALID_SHAPE, "tensor last-use semantic node is not in physical plan");
+                    return LW_STATUS_INVALID_SHAPE;
+                }
+                lifetime->last_use_op = (int32_t)plan->semantic_to_physical[semantic];
+            }
+        }
+        if (lifetime->last_use_op < lifetime->birth_op) lifetime->last_use_op = lifetime->birth_op;
+    }
+    return LW_STATUS_OK;
+}
+
+static int fast_lifetimes_overlap(const lw_x64_fast_tensor_lifetime* left,
+                                  const lw_x64_fast_tensor_lifetime* right) {
+    return left != NULL && right != NULL &&
+           left->birth_op <= right->last_use_op &&
+           right->birth_op <= left->last_use_op;
+}
+
+static int fast_ranges_overlap(uint64_t left_offset, uint64_t left_bytes,
+                               uint64_t right_offset, uint64_t right_bytes) {
+    if (left_bytes == 0u || right_bytes == 0u) return 0;
+    return left_offset < right_offset
+        ? left_bytes > right_offset - left_offset
+        : right_bytes > left_offset - right_offset;
+}
+
+static int fast_validate_workspace_aliasing(const lw_x64_rec_fast_plan* plan) {
+    if (plan == NULL || plan->physical_lifetimes == NULL) return 1;
+    for (uint32_t left = 0u; left < plan->tensor_count; ++left) {
+        if (!fast_tensor_needs_nhwc(plan, left)) continue;
+        for (uint32_t right = left + 1u; right < plan->tensor_count; ++right) {
+            if (!fast_tensor_needs_nhwc(plan, right) ||
+                !fast_lifetimes_overlap(&plan->physical_lifetimes[left],
+                                        &plan->physical_lifetimes[right])) continue;
+            if (fast_ranges_overlap(plan->tensors[left].nhwc_offset,
+                                     plan->session->tensors[left].byte_size,
+                                     plan->tensors[right].nhwc_offset,
+                                     plan->session->tensors[right].byte_size)) return 0;
+        }
+    }
+    return 1;
+}
 static lw_status fast_allocate_nhwc_workspace(lw_x64_rec_fast_plan* plan, lw_error* error) {
     fast_workspace_interval* intervals = NULL;
     fast_workspace_slot* slots = NULL;
@@ -579,8 +690,13 @@ static lw_status fast_allocate_nhwc_workspace(lw_x64_rec_fast_plan* plan, lw_err
             return LW_STATUS_OUT_OF_BOUNDS;
         }
         intervals[interval_count].tensor_index = index;
-        intervals[interval_count].birth = tensor->birth_node < 0 ? 0 : tensor->birth_node;
-        intervals[interval_count].last_use = tensor->last_use_node < 0 ? 0 : tensor->last_use_node;
+        if (plan->physical_lifetimes == NULL) {
+            free(intervals); free(slots);
+            lw_set_error(error, LW_STATUS_INVALID_SHAPE, "physical tensor lifetimes are unavailable");
+            return LW_STATUS_INVALID_SHAPE;
+        }
+        intervals[interval_count].birth = plan->physical_lifetimes[index].birth_op;
+        intervals[interval_count].last_use = plan->physical_lifetimes[index].last_use_op;
         intervals[interval_count].bytes = fast_align64((size_t)tensor->byte_size);
         ++interval_count;
     }
@@ -633,8 +749,15 @@ static lw_status fast_allocate_nhwc_workspace(lw_x64_rec_fast_plan* plan, lw_err
     }
     return LW_STATUS_OK;
 }
+
 static int fast_conv_epilogue_supported(uint16_t kind) {
     return kind == LW_X64_FAST_NODE_POINTWISE || kind == LW_X64_FAST_NODE_DENSE;
+}
+
+static int fast_conv_bn_fold_supported(uint16_t kind) {
+    return kind == LW_X64_FAST_NODE_POINTWISE ||
+           kind == LW_X64_FAST_NODE_DENSE ||
+           kind == LW_X64_FAST_NODE_DEPTHWISE;
 }
 
 static int fast_scale_conv_weights(lw_x64_fast_conv* conv, uint16_t kind,
@@ -643,24 +766,31 @@ static int fast_scale_conv_weights(lw_x64_fast_conv* conv, uint16_t kind,
                                    float epsilon) {
     uint32_t c;
     float* folded_bias;
+    float* mul;
     if (conv == NULL || scale == NULL || bn_bias == NULL || mean == NULL || variance == NULL ||
         conv->packed_weights == NULL || conv->output_channels == 0u) return 0;
     folded_bias = (float*)malloc((size_t)conv->output_channels * sizeof(float));
-    if (folded_bias == NULL) return 0;
+    mul = (float*)malloc((size_t)conv->output_channels * sizeof(float));
+    if (folded_bias == NULL || mul == NULL) {
+        free(folded_bias);
+        free(mul);
+        return 0;
+    }
     for (c = 0u; c < conv->output_channels; ++c) {
         float variance_epsilon = variance[c] + epsilon;
-        float mul;
         float old_bias = conv->bias == NULL ? 0.0f : conv->bias[c];
-        if (!(variance_epsilon >= 0.0f) || !isfinite(variance_epsilon)) {
+        if (!(variance_epsilon > 0.0f) || !isfinite(variance_epsilon)) {
             free(folded_bias);
+            free(mul);
             return 0;
         }
-        mul = scale[c] / sqrtf(variance_epsilon);
-        if (!isfinite(mul)) {
+        mul[c] = scale[c] / sqrtf(variance_epsilon);
+        if (!isfinite(mul[c])) {
             free(folded_bias);
+            free(mul);
             return 0;
         }
-        folded_bias[c] = old_bias * mul + bn_bias[c] - mean[c] * mul;
+        folded_bias[c] = old_bias * mul[c] + bn_bias[c] - mean[c] * mul[c];
     }
     if (kind == LW_X64_FAST_NODE_DEPTHWISE) {
         uint32_t taps = conv->kernel_h * conv->kernel_w;
@@ -672,10 +802,7 @@ static int fast_scale_conv_weights(lw_x64_fast_conv* conv, uint16_t kind,
                     ((size_t)block * taps + tap) * LW_NHWC_DEPTHWISE_BLOCK;
                 for (uint32_t lane = 0u; lane < LW_NHWC_DEPTHWISE_BLOCK; ++lane) {
                     uint32_t channel = block * LW_NHWC_DEPTHWISE_BLOCK + lane;
-                    if (channel < conv->output_channels) {
-                        float variance_epsilon = variance[channel] + epsilon;
-                        weights[lane] *= scale[channel] / sqrtf(variance_epsilon);
-                    }
+                    if (channel < conv->output_channels) weights[lane] *= mul[channel];
                 }
             }
         }
@@ -688,16 +815,25 @@ static int fast_scale_conv_weights(lw_x64_fast_conv* conv, uint16_t kind,
                     ((size_t)block * k_total + (size_t)k) * LW_NHWC_OC_BLOCK;
                 for (uint32_t lane = 0u; lane < LW_NHWC_OC_BLOCK; ++lane) {
                     uint32_t channel = block * LW_NHWC_OC_BLOCK + lane;
-                    float variance_epsilon = variance[channel] + epsilon;
-                    weights[lane] *= scale[channel] / sqrtf(variance_epsilon);
+                    weights[lane] *= mul[channel];
                 }
             }
         }
     }
+    free(mul);
     free(conv->owned_bias);
     conv->owned_bias = folded_bias;
     conv->bias = folded_bias;
     return 1;
+}
+static void fast_set_physical_output(lw_x64_physical_op* op, uint32_t tensor_index) {
+    if (op == NULL) return;
+    op->output_index = tensor_index;
+    if (op->kind == LW_X64_FAST_NODE_POINTWISE ||
+        op->kind == LW_X64_FAST_NODE_DENSE ||
+        op->kind == LW_X64_FAST_NODE_DEPTHWISE) {
+        op->data.conv.output_index = tensor_index;
+    }
 }
 
 static int fast_fuse_conv_bn(lw_x64_rec_fast_plan* plan, lw_x64_physical_op* op,
@@ -717,7 +853,7 @@ static int fast_fuse_conv_bn(lw_x64_rec_fast_plan* plan, lw_x64_physical_op* op,
     const float* bias;
     const float* mean;
     const float* variance;
-    if (plan == NULL || op == NULL || !fast_conv_epilogue_supported(op->kind) ||
+    if (plan == NULL || op == NULL || !fast_conv_bn_fold_supported(op->kind) ||
         bn_node_index >= plan->node_count || op->data.conv.output_index >= plan->tensor_count ||
         plan->consumer_count == NULL || plan->consumer_count[op->data.conv.output_index] != 1u) return 0;
     node = plan->session->model->bytes + (size_t)plan->session->model->node_offset +
@@ -750,7 +886,7 @@ static int fast_fuse_conv_bn(lw_x64_rec_fast_plan* plan, lw_x64_physical_op* op,
         plan->session->tensors[variance_index].byte_size < (uint64_t)channels * sizeof(float)) return 0;
     if (!fast_scale_conv_weights(&op->data.conv, op->kind, scale, bias, mean,
                                  variance, fast_read_f32(params + 4u))) return 0;
-    op->data.conv.output_index = output_index;
+    fast_set_physical_output(op, output_index);
     ++op->semantic_count;
     fast_elide_tensor(plan, conv_output);
     return 1;
@@ -787,7 +923,7 @@ static int fast_fuse_conv_add(lw_x64_rec_fast_plan* plan, lw_x64_physical_op* op
                           &plan->session->tensors[output_index]) ||
         plan->layout.node_layout[add_node_index] != plan->layout.node_layout[op->semantic_begin]) return 0;
     op->data.conv.residual_index = residual;
-    op->data.conv.output_index = output_index;
+    fast_set_physical_output(op, output_index);
     ++op->semantic_count;
     fast_elide_tensor(plan, conv_output);
     return 1;
@@ -811,7 +947,7 @@ static int fast_fuse_conv_relu(lw_x64_rec_fast_plan* plan, lw_x64_physical_op* o
         !fast_same_shape4(&plan->session->tensors[input_index], &plan->session->tensors[output_index]) ||
         plan->layout.node_layout[relu_node_index] != plan->layout.node_layout[op->semantic_begin]) return 0;
     op->data.conv.activation = LW_NHWC_ACT_RELU;
-    op->data.conv.output_index = output_index;
+    fast_set_physical_output(op, output_index);
     ++op->semantic_count;
     fast_elide_tensor(plan, input_index);
     return 1;
@@ -969,10 +1105,25 @@ lw_status lw_x64_rec_fast_plan_create(lw_session* session,
         lw_x64_rec_fast_plan_free(plan);
         return status;
     }
+    status = fast_build_semantic_to_physical(plan, error);
+    if (status != LW_STATUS_OK) {
+        lw_x64_rec_fast_plan_free(plan);
+        return status;
+    }
+    status = fast_build_physical_lifetimes(plan, error);
+    if (status != LW_STATUS_OK) {
+        lw_x64_rec_fast_plan_free(plan);
+        return status;
+    }
     status = fast_allocate_nhwc_workspace(plan, error);
     if (status != LW_STATUS_OK) {
         lw_x64_rec_fast_plan_free(plan);
         return status;
+    }
+    if (!fast_validate_workspace_aliasing(plan)) {
+        lw_set_error(error, LW_STATUS_INVALID_SHAPE, "x64 physical workspace alias detected");
+        lw_x64_rec_fast_plan_free(plan);
+        return LW_STATUS_INVALID_SHAPE;
     }
     plan->generic_node_count = plan->node_count - plan->fast_node_count;
     if (plan->scratch_bytes != 0u) {
@@ -1011,6 +1162,8 @@ void lw_x64_rec_fast_plan_free(lw_x64_rec_fast_plan* plan) {
     free(plan->tensors);
     free(plan->consumer_count);
     free(plan->elided_tensor);
+    free(plan->physical_lifetimes);
+    free(plan->semantic_to_physical);
     free(plan->nodes);
     free(plan->ops);
     lw_layout_plan_free(&plan->layout);

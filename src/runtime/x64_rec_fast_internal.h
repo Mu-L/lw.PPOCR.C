@@ -35,6 +35,11 @@ typedef enum lw_x64_fast_node_kind {
     LW_X64_FAST_NODE_GELU = 12
 } lw_x64_fast_node_kind;
 
+typedef struct lw_x64_fast_tensor_lifetime {
+    int32_t birth_op;
+    int32_t last_use_op;
+} lw_x64_fast_tensor_lifetime;
+
 typedef struct lw_x64_fast_tensor_state {
     uint64_t nhwc_offset;
     uint8_t available_layouts;
@@ -169,6 +174,8 @@ typedef struct lw_x64_rec_fast_plan {
     uint8_t* elided_tensor;
     uint32_t elided_tensor_count;
     uint32_t tensor_count;
+    lw_x64_fast_tensor_lifetime* physical_lifetimes;
+    uint32_t* semantic_to_physical;
     uint8_t* nhwc_workspace;
     size_t nhwc_workspace_bytes;
     uint8_t* scratch;
