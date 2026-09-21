@@ -20,11 +20,11 @@
 LW_DW_TARGET
 static void depthwise_block32(const float* input, const float* weights, const float* bias,
                               float* output, const lw_nhwc_depthwise_desc* desc,
-                              uint32_t output_y, uint32_t output_x, uint32_t channel_base) {
+                              uint32_t output_y, uint32_t output_x, uint32_t channel_base, uint32_t vector_count) {
     __m256 sums[4];
     int32_t input_y0 = (int32_t)((uint64_t)output_y * desc->stride_h) - (int32_t)desc->pad_top;
     int32_t input_x0 = (int32_t)((uint64_t)output_x * desc->stride_w) - (int32_t)desc->pad_left;
-    for (uint32_t lane = 0u; lane < 4u; ++lane) {
+    for (uint32_t lane = 0u; lane < vector_count; ++lane) {
         sums[lane] = bias == NULL ? _mm256_setzero_ps() :
             _mm256_loadu_ps(bias + channel_base + lane * 8u);
     }
@@ -38,7 +38,7 @@ static void depthwise_block32(const float* input, const float* weights, const fl
             const float* source = input + (((size_t)iy * desc->input_width + (uint32_t)ix) *
                                            desc->channels + channel_base);
             const float* weight = weights + (size_t)tap * LW_NHWC_DEPTHWISE_BLOCK;
-            for (uint32_t lane = 0u; lane < 4u; ++lane) {
+            for (uint32_t lane = 0u; lane < vector_count; ++lane) {
                 sums[lane] = _mm256_fmadd_ps(_mm256_loadu_ps(source + lane * 8u),
                                              _mm256_loadu_ps(weight + lane * 8u), sums[lane]);
             }
@@ -46,7 +46,7 @@ static void depthwise_block32(const float* input, const float* weights, const fl
     }
     float* destination = output + (((size_t)output_y * desc->output_width + output_x) *
                                    desc->channels + channel_base);
-    for (uint32_t lane = 0u; lane < 4u; ++lane) _mm256_storeu_ps(destination + lane * 8u, sums[lane]);
+    for (uint32_t lane = 0u; lane < vector_count; ++lane) _mm256_storeu_ps(destination + lane * 8u, sums[lane]);
 }
 #endif
 
@@ -55,7 +55,7 @@ lw_status lw_avx2_fma_nhwc_depthwise_f32(const float* input, const float* packed
                                          const lw_nhwc_depthwise_desc* desc) {
     if (input == NULL || packed_weights == NULL || output == NULL || desc == NULL ||
         desc->batch == 0u || desc->channels == 0u ||
-        (desc->channels % LW_NHWC_DEPTHWISE_BLOCK) != 0u ||
+        (desc->channels & 7u) != 0u ||
         desc->input_height == 0u || desc->input_width == 0u || desc->output_height == 0u ||
         desc->output_width == 0u || desc->kernel_h == 0u || desc->kernel_w == 0u ||
         desc->stride_h == 0u || desc->stride_w == 0u) return LW_STATUS_INVALID_ARGUMENT;
@@ -66,21 +66,22 @@ lw_status lw_avx2_fma_nhwc_depthwise_f32(const float* input, const float* packed
         ((uint64_t)desc->input_width + (uint64_t)desc->pad_left * 2u - desc->kernel_w) /
             desc->stride_w + 1u != desc->output_width) return LW_STATUS_INVALID_SHAPE;
 #if LW_DW_X86
-    uint32_t blocks = desc->channels / LW_NHWC_DEPTHWISE_BLOCK;
     uint32_t taps = desc->kernel_h * desc->kernel_w;
+    uint32_t blocks = (desc->channels + LW_NHWC_DEPTHWISE_BLOCK - 1u) / LW_NHWC_DEPTHWISE_BLOCK;
     for (uint32_t batch = 0u; batch < desc->batch; ++batch) {
         const float* input_batch = input + (size_t)batch * desc->input_height * desc->input_width * desc->channels;
         float* output_batch = output + (size_t)batch * desc->output_height * desc->output_width * desc->channels;
-        (void)input_batch;
-        (void)output_batch;
         for (uint32_t output_y = 0u; output_y < desc->output_height; ++output_y) {
-            for (uint32_t output_x = 0u; output_x < desc->output_width; ++output_x) {
-                for (uint32_t block = 0u; block < blocks; ++block) {
-                    const float* block_weights = packed_weights + (size_t)block * taps * LW_NHWC_DEPTHWISE_BLOCK;
-                    const float* block_input = input_batch;
-                    float* block_output = output_batch;
-                    depthwise_block32(block_input, block_weights, bias, block_output, desc,
-                                      output_y, output_x, block * LW_NHWC_DEPTHWISE_BLOCK);
+            for (uint32_t block = 0u; block < blocks; ++block) {
+                uint32_t channel_base = block * LW_NHWC_DEPTHWISE_BLOCK;
+                uint32_t remaining = desc->channels - channel_base;
+                uint32_t current_channels = remaining > LW_NHWC_DEPTHWISE_BLOCK ? LW_NHWC_DEPTHWISE_BLOCK : remaining;
+                uint32_t vector_count = current_channels / 8u;
+                const float* block_weights = packed_weights +
+                    (size_t)block * taps * LW_NHWC_DEPTHWISE_BLOCK;
+                for (uint32_t output_x = 0u; output_x < desc->output_width; ++output_x) {
+                    depthwise_block32(input_batch, block_weights, bias, output_batch, desc,
+                                      output_y, output_x, channel_base, vector_count);
                 }
             }
         }

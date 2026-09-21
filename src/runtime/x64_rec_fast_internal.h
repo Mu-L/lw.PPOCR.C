@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #define LW_X64_FAST_OFFSET_NONE UINT64_MAX
+#define LW_X64_FAST_OPERATOR_CAPACITY 64u
 
 enum {
     LW_X64_FAST_HAVE_NCHW = 1u << 0,
@@ -62,13 +63,48 @@ typedef struct lw_x64_fast_conv {
     uint64_t scratch_bytes;
 } lw_x64_fast_conv;
 
+typedef enum lw_x64_fast_broadcast_kind {
+    LW_X64_FAST_BROADCAST_NONE = 0,
+    LW_X64_FAST_BROADCAST_RIGHT_SCALAR = 1,
+    LW_X64_FAST_BROADCAST_LEFT_SCALAR = 2,
+    LW_X64_FAST_BROADCAST_RIGHT_CHANNEL = 3,
+    LW_X64_FAST_BROADCAST_LEFT_CHANNEL = 4
+} lw_x64_fast_broadcast_kind;
+
 typedef struct lw_x64_fast_elementwise {
     uint32_t input_index;
     uint32_t rhs_index;
     uint32_t output_index;
     uint16_t operation;
-    uint16_t reserved;
+    uint8_t broadcast_kind;
+    uint8_t reserved;
+    uint32_t channels;
+    float alpha;
+    float beta;
 } lw_x64_fast_elementwise;
+typedef struct lw_x64_fast_spatial {
+    uint32_t input_index;
+    uint32_t output_index;
+    uint32_t kernel_h;
+    uint32_t kernel_w;
+    uint32_t stride_h;
+    uint32_t stride_w;
+    uint32_t pad_top;
+    uint32_t pad_left;
+    uint32_t pad_bottom;
+    uint32_t pad_right;
+    uint8_t count_include_pad;
+    uint8_t is_max;
+    uint16_t reserved;
+    uint32_t input_count;
+    uint32_t input_indices[LWM_V0_MAX_NODE_INPUTS];
+    uint32_t input_channels[LWM_V0_MAX_NODE_INPUTS];
+    const float* scale;
+    const float* bias;
+    const float* mean;
+    const float* variance;
+    float epsilon;
+} lw_x64_fast_spatial;
 typedef struct lw_x64_fast_node {
     uint32_t semantic_node_index;
     uint16_t kind;
@@ -77,6 +113,7 @@ typedef struct lw_x64_fast_node {
     union {
         lw_x64_fast_conv conv;
         lw_x64_fast_elementwise elementwise;
+        lw_x64_fast_spatial spatial;
     } data;
 } lw_x64_fast_node;
 
@@ -100,6 +137,13 @@ typedef struct lw_x64_rec_fast_plan {
     uint32_t depthwise_node_count;
     uint32_t binary_node_count;
     uint32_t relu_node_count;
+    uint32_t unary_node_count;
+    uint32_t reduce_mean_node_count;
+    uint32_t pool_node_count;
+    uint32_t concat_node_count;
+    uint32_t batch_norm_node_count;
+    uint32_t unsupported_nhwc_node_count;
+    uint32_t unsupported_nhwc_by_operator[LW_X64_FAST_OPERATOR_CAPACITY];
     uint64_t conversion_count;
     uint64_t conversion_bytes;
 } lw_x64_rec_fast_plan;

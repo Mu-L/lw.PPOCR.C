@@ -240,11 +240,13 @@ int main(int argc, char** argv) {
     }
     legacy_ms = median_ms(legacy_samples, 9u);
     fast_ms = median_ms(fast_samples, 9u);
-    printf("{\"width\":%u,\"legacy_ms\":%.6f,\"fast_ms\":%.6f,\"speedup\":%.6f,\"max_abs\":%.9g,\"mismatch\":%llu,\"argmax_mismatch\":%llu,\"fast_nodes\":%u,\"generic_nodes\":%u,\"pointwise_nodes\":%u,\"dense_nodes\":%u,\"depthwise_nodes\":%u,\"binary_nodes\":%u,\"relu_nodes\":%u,\"conversion_count\":%llu,\"conversion_bytes\":%llu,\"nhwc_workspace_bytes\":%llu}\n",
+    printf("{\"width\":%u,\"legacy_ms\":%.6f,\"fast_ms\":%.6f,\"speedup\":%.6f,\"max_abs\":%.9g,\"mismatch\":%llu,\"argmax_mismatch\":%llu,\"fast_nodes\":%u,\"generic_nodes\":%u,\"pointwise_nodes\":%u,\"dense_nodes\":%u,\"depthwise_nodes\":%u,\"binary_nodes\":%u,\"relu_nodes\":%u,\"unary_nodes\":%u,\"reduce_mean_nodes\":%u,\"pool_nodes\":%u,\"concat_nodes\":%u,\"batch_norm_nodes\":%u,\"planner_conversion_count\":%u,\"unsupported_nhwc_node_count\":%u,\"conversion_count\":%llu,\"conversion_bytes\":%llu,\"nhwc_workspace_bytes\":%llu}\n",
            width, legacy_ms, fast_ms, fast_ms > 0.0 ? legacy_ms / fast_ms : 0.0,
            (double)max_abs, (unsigned long long)mismatch, (unsigned long long)argmax_mismatch, plan->fast_node_count,
            plan->generic_node_count, plan->pointwise_node_count, plan->dense_node_count,
-           plan->depthwise_node_count, plan->binary_node_count, plan->relu_node_count,
+           plan->depthwise_node_count, plan->binary_node_count, plan->relu_node_count, plan->unary_node_count,
+           plan->reduce_mean_node_count, plan->pool_node_count, plan->concat_node_count, plan->batch_norm_node_count,
+           plan->layout.layout_conversion_count, plan->unsupported_nhwc_node_count,
            (unsigned long long)plan->conversion_count,
            (unsigned long long)plan->conversion_bytes,
            (unsigned long long)plan->nhwc_workspace_bytes);

@@ -46,9 +46,66 @@ static int fast_same_shape4(const lw_runtime_tensor* left, const lw_runtime_tens
     return 1;
 }
 
+static uint64_t fast_tensor_elements(const lw_runtime_tensor* tensor) {
+    return tensor == NULL || tensor->dtype != LW_DTYPE_F32 || tensor->byte_size % sizeof(float) != 0u
+        ? 0u : tensor->byte_size / sizeof(float);
+}
+
+static float fast_read_f32(const uint8_t* bytes) {
+    float value = 0.0f;
+    if (bytes != NULL) memcpy(&value, bytes, sizeof(value));
+    return value;
+}
+
+static int fast_channel_broadcast(const lw_session* session, uint32_t tensor_index,
+                                  const lw_runtime_tensor* full) {
+    const lw_runtime_tensor* tensor;
+    uint64_t elements;
+    if (session == NULL || full == NULL || tensor_index >= session->model->info.tensor_count) return 0;
+    tensor = &session->tensors[tensor_index];
+    elements = fast_tensor_elements(tensor);
+    if (elements == 1u) return 1;
+    if ((tensor->flags & LWM_V0_TENSOR_FLAG_CONSTANT) != 0u &&
+        elements == (uint64_t)(uint32_t)full->dimensions[1]) return 1;
+    return tensor->rank == 4u && tensor->dtype == LW_DTYPE_F32 &&
+           tensor->dimensions[1] == full->dimensions[1] && tensor->dimensions[2] == 1 &&
+           tensor->dimensions[3] == 1 &&
+           (tensor->dimensions[0] == 1);
+}
+
+static int fast_classify_binary(const lw_session* session, uint32_t left_index,
+                                uint32_t right_index, uint32_t output_index,
+                                uint8_t* broadcast_kind) {
+    const lw_runtime_tensor* left;
+    const lw_runtime_tensor* right;
+    const lw_runtime_tensor* output;
+    if (session == NULL || broadcast_kind == NULL || left_index >= session->model->info.tensor_count ||
+        right_index >= session->model->info.tensor_count || output_index >= session->model->info.tensor_count) return 0;
+    left = &session->tensors[left_index]; right = &session->tensors[right_index];
+    output = &session->tensors[output_index];
+    if (!fast_tensor_eligible(output)) return 0;
+    if (fast_same_shape4(left, output) && fast_same_shape4(right, output)) {
+        *broadcast_kind = LW_X64_FAST_BROADCAST_NONE; return 1;
+    }
+    if (fast_same_shape4(left, output) && fast_tensor_elements(right) == 1u) {
+        *broadcast_kind = LW_X64_FAST_BROADCAST_RIGHT_SCALAR; return 1;
+    }
+    if (fast_same_shape4(right, output) && fast_tensor_elements(left) == 1u) {
+        *broadcast_kind = LW_X64_FAST_BROADCAST_LEFT_SCALAR; return 1;
+    }
+    if (fast_same_shape4(left, output) && fast_channel_broadcast(session, right_index, output)) {
+        *broadcast_kind = LW_X64_FAST_BROADCAST_RIGHT_CHANNEL; return 1;
+    }
+    if (fast_same_shape4(right, output) && fast_channel_broadcast(session, left_index, output)) {
+        *broadcast_kind = LW_X64_FAST_BROADCAST_LEFT_CHANNEL; return 1;
+    }
+    return 0;
+}
+
 static int fast_prepare_elementwise(lw_x64_rec_fast_plan* plan, uint32_t node_index,
                                     lw_x64_fast_node* fast_node) {
     const uint8_t* node;
+    const uint8_t* params;
     uint16_t operation;
     uint16_t input_count;
     uint32_t input_index;
@@ -57,36 +114,190 @@ static int fast_prepare_elementwise(lw_x64_rec_fast_plan* plan, uint32_t node_in
     const lw_runtime_tensor* input;
     const lw_runtime_tensor* output;
     int is_binary;
+    int is_unary;
     if (plan == NULL || fast_node == NULL || node_index >= plan->node_count ||
         plan->layout.node_layout[node_index] != LW_FAST_LAYOUT_NHWC) return 0;
     node = plan->session->model->bytes + (size_t)plan->session->model->node_offset +
            (size_t)node_index * LWM_V0_NODE_SIZE;
-    operation = lwm_read_u16(node);
-    input_count = lwm_read_u16(node + 2u);
-    input_index = lwm_read_u32(node + 8u);
-    output_index = lwm_read_u32(node + 40u);
-    is_binary = operation == LW_OP_ADD || operation == LW_OP_MUL || operation == LW_OP_DIV || operation == LW_OP_SUB;
-    if ((!is_binary && operation != LW_OP_RELU) || input_index >= plan->tensor_count ||
-        output_index >= plan->tensor_count) return 0;
+    operation = lwm_read_u16(node); input_count = lwm_read_u16(node + 2u);
+    input_index = lwm_read_u32(node + 8u); output_index = lwm_read_u32(node + 40u);
+    is_binary = operation == LW_OP_ADD || operation == LW_OP_MUL || operation == LW_OP_DIV ||
+                operation == LW_OP_SUB || operation == LW_OP_POW;
+    is_unary = operation == LW_OP_RELU || operation == LW_OP_SIGMOID || operation == LW_OP_SQRT ||
+               operation == LW_OP_ERF || operation == LW_OP_HARD_SIGMOID;
+    if ((!is_binary && !is_unary) || input_index >= plan->tensor_count || output_index >= plan->tensor_count) return 0;
     if (operation == LW_OP_DIV && lw_execution_plan_is_fused_gelu_start(plan->session, node_index)) return 0;
-    if ((operation == LW_OP_RELU && input_count != 1u) || (is_binary && input_count != 2u)) return 0;
-    if (is_binary) {
-        rhs_index = lwm_read_u32(node + 12u);
-        if (rhs_index >= plan->tensor_count ||
-            (plan->session->tensors[rhs_index].flags & LWM_V0_TENSOR_FLAG_CONSTANT) != 0u ||
-            !fast_same_shape4(&plan->session->tensors[input_index], &plan->session->tensors[rhs_index])) return 0;
-    }
-    input = &plan->session->tensors[input_index];
-    output = &plan->session->tensors[output_index];
+    if ((is_unary && input_count != 1u) || (is_binary && input_count != 2u)) return 0;
+    input = &plan->session->tensors[input_index]; output = &plan->session->tensors[output_index];
     if (!fast_same_shape4(input, output)) return 0;
+    memset(&fast_node->data.elementwise, 0, sizeof(fast_node->data.elementwise));
     fast_node->data.elementwise.input_index = input_index;
-    fast_node->data.elementwise.rhs_index = rhs_index;
     fast_node->data.elementwise.output_index = output_index;
     fast_node->data.elementwise.operation = operation;
-    fast_node->kind = operation == LW_OP_RELU ? LW_X64_FAST_NODE_CONTIGUOUS_UNARY
-                                               : LW_X64_FAST_NODE_CONTIGUOUS_BINARY;
-    if (operation == LW_OP_RELU) ++plan->relu_node_count;
-    else ++plan->binary_node_count;
+    fast_node->data.elementwise.channels = (uint32_t)output->dimensions[1];
+    if (is_binary) {
+        uint8_t broadcast_kind;
+        rhs_index = lwm_read_u32(node + 12u);
+        if (!fast_classify_binary(plan->session, input_index, rhs_index, output_index, &broadcast_kind)) return 0;
+        fast_node->data.elementwise.rhs_index = rhs_index;
+        fast_node->data.elementwise.broadcast_kind = broadcast_kind;
+        fast_node->kind = LW_X64_FAST_NODE_CONTIGUOUS_BINARY;
+        ++plan->binary_node_count;
+    } else {
+        fast_node->kind = LW_X64_FAST_NODE_CONTIGUOUS_UNARY;
+        if (operation == LW_OP_HARD_SIGMOID) {
+            params = plan->session->model->bytes + (size_t)lwm_read_u64(node + 56u);
+            fast_node->data.elementwise.alpha = fast_read_f32(params + 4u);
+            fast_node->data.elementwise.beta = fast_read_f32(params + 8u);
+        }
+        ++plan->unary_node_count;
+        if (operation == LW_OP_RELU) ++plan->relu_node_count;
+    }
+    return 1;
+}
+
+static void fast_record_nhwc_blocker(lw_x64_rec_fast_plan* plan, const uint8_t* node) {
+    uint32_t operation;
+    if (plan == NULL || node == NULL) return;
+    operation = (uint32_t)lwm_read_u16(node);
+    if (plan->unsupported_nhwc_node_count != UINT32_MAX) ++plan->unsupported_nhwc_node_count;
+    if (operation < LW_X64_FAST_OPERATOR_CAPACITY &&
+        plan->unsupported_nhwc_by_operator[operation] != UINT32_MAX) {
+        ++plan->unsupported_nhwc_by_operator[operation];
+    }
+}
+
+static int fast_prepare_reduce_mean(lw_x64_rec_fast_plan* plan, uint32_t node_index,
+                                    lw_x64_fast_node* fast_node) {
+    const uint8_t* node;
+    const uint8_t* params;
+    const lw_runtime_tensor* input;
+    const lw_runtime_tensor* output;
+    int32_t axis0;
+    int32_t axis1;
+    if (plan == NULL || fast_node == NULL || node_index >= plan->node_count ||
+        plan->layout.node_layout[node_index] != LW_FAST_LAYOUT_NHWC) return 0;
+    node = plan->session->model->bytes + (size_t)plan->session->model->node_offset + (size_t)node_index * LWM_V0_NODE_SIZE;
+    params = plan->session->model->bytes + (size_t)lwm_read_u64(node + 56u);
+    if (lwm_read_u16(node) != LW_OP_REDUCE_MEAN || lwm_read_u16(node + 2u) != 1u ||
+        lwm_read_u16(node + 4u) != 1u || lwm_read_u16(params + 2u) != 2u || lwm_read_u32(params + 4u) == 0u) return 0;
+    input = &plan->session->tensors[lwm_read_u32(node + 8u)]; output = &plan->session->tensors[lwm_read_u32(node + 40u)];
+    axis0 = lwm_read_i32(params + 12u); axis1 = lwm_read_i32(params + 16u);
+    if (axis0 < 0) axis0 += 4; if (axis1 < 0) axis1 += 4;
+    if (!fast_tensor_eligible(input) || !fast_tensor_eligible(output) ||
+        !((axis0 == 2 && axis1 == 3) || (axis0 == 3 && axis1 == 2)) ||
+        output->dimensions[0] != input->dimensions[0] || output->dimensions[1] != input->dimensions[1] ||
+        output->dimensions[2] != 1 || output->dimensions[3] != 1) return 0;
+    memset(&fast_node->data.spatial, 0, sizeof(fast_node->data.spatial));
+    fast_node->data.spatial.input_index = lwm_read_u32(node + 8u);
+    fast_node->data.spatial.output_index = lwm_read_u32(node + 40u);
+    fast_node->kind = LW_X64_FAST_NODE_REDUCE_MEAN;
+    ++plan->reduce_mean_node_count;
+    return 1;
+}
+
+static int fast_prepare_pool(lw_x64_rec_fast_plan* plan, uint32_t node_index,
+                             lw_x64_fast_node* fast_node) {
+    const uint8_t* node;
+    const uint8_t* params;
+    const lw_runtime_tensor* input;
+    const lw_runtime_tensor* output;
+    if (plan == NULL || fast_node == NULL || node_index >= plan->node_count ||
+        plan->layout.node_layout[node_index] != LW_FAST_LAYOUT_NHWC) return 0;
+    node = plan->session->model->bytes + (size_t)plan->session->model->node_offset + (size_t)node_index * LWM_V0_NODE_SIZE;
+    params = plan->session->model->bytes + (size_t)lwm_read_u64(node + 56u);
+    if ((lwm_read_u16(node) != LW_OP_AVERAGE_POOL && lwm_read_u16(node) != LW_OP_MAX_POOL) ||
+        lwm_read_u16(node + 2u) != 1u || lwm_read_u16(node + 4u) != 1u) return 0;
+    input = &plan->session->tensors[lwm_read_u32(node + 8u)]; output = &plan->session->tensors[lwm_read_u32(node + 40u)];
+    if (!fast_tensor_eligible(input) || !fast_tensor_eligible(output)) return 0;
+    if (lwm_read_i32(params + 8u) <= 0 || lwm_read_i32(params + 12u) <= 0 || lwm_read_i32(params + 16u) <= 0 || lwm_read_i32(params + 20u) <= 0) return 0;
+    memset(&fast_node->data.spatial, 0, sizeof(fast_node->data.spatial));
+    fast_node->data.spatial.input_index = lwm_read_u32(node + 8u); fast_node->data.spatial.output_index = lwm_read_u32(node + 40u);
+    fast_node->data.spatial.kernel_h = (uint32_t)lwm_read_i32(params + 8u); fast_node->data.spatial.kernel_w = (uint32_t)lwm_read_i32(params + 12u);
+    fast_node->data.spatial.stride_h = (uint32_t)lwm_read_i32(params + 16u); fast_node->data.spatial.stride_w = (uint32_t)lwm_read_i32(params + 20u);
+    fast_node->data.spatial.pad_top = (uint32_t)lwm_read_i32(params + 24u); fast_node->data.spatial.pad_left = (uint32_t)lwm_read_i32(params + 28u);
+    fast_node->data.spatial.pad_bottom = (uint32_t)lwm_read_i32(params + 32u); fast_node->data.spatial.pad_right = (uint32_t)lwm_read_i32(params + 36u);
+    fast_node->data.spatial.count_include_pad = (uint8_t)lwm_read_u32(params + 44u);
+    fast_node->data.spatial.is_max = (uint8_t)(lwm_read_u16(node) == LW_OP_MAX_POOL);
+    fast_node->kind = LW_X64_FAST_NODE_POOL;
+    ++plan->pool_node_count;
+    return 1;
+}
+static int fast_prepare_concat(lw_x64_rec_fast_plan* plan, uint32_t node_index,
+                               lw_x64_fast_node* fast_node) {
+    const uint8_t* node;
+    const uint8_t* params;
+    const lw_runtime_tensor* output;
+    uint32_t count;
+    uint32_t slot;
+    int32_t axis;
+    if (plan == NULL || fast_node == NULL || node_index >= plan->node_count ||
+        plan->layout.node_layout[node_index] != LW_FAST_LAYOUT_NHWC) return 0;
+    node = plan->session->model->bytes + (size_t)plan->session->model->node_offset + (size_t)node_index * LWM_V0_NODE_SIZE;
+    params = plan->session->model->bytes + (size_t)lwm_read_u64(node + 56u);
+    count = lwm_read_u16(node + 2u);
+    axis = lwm_read_i32(params + 4u); if (axis < 0) axis += 4;
+    if (lwm_read_u16(node) != LW_OP_CONCAT || count == 0u || count > LWM_V0_MAX_NODE_INPUTS ||
+        lwm_read_u16(node + 4u) != 1u || axis != 1) return 0;
+    output = &plan->session->tensors[lwm_read_u32(node + 40u)];
+    if (!fast_tensor_eligible(output)) return 0;
+    memset(&fast_node->data.spatial, 0, sizeof(fast_node->data.spatial));
+    fast_node->data.spatial.output_index = lwm_read_u32(node + 40u);
+    fast_node->data.spatial.input_count = count;
+    for (slot = 0u; slot < count; ++slot) {
+        uint32_t input_index = lwm_read_u32(node + 8u + (size_t)slot * sizeof(uint32_t));
+        const lw_runtime_tensor* input;
+        if (input_index >= plan->tensor_count || !fast_tensor_eligible(input = &plan->session->tensors[input_index]) ||
+            input->dimensions[0] != output->dimensions[0] || input->dimensions[2] != output->dimensions[2] ||
+            input->dimensions[3] != output->dimensions[3]) return 0;
+        fast_node->data.spatial.input_indices[slot] = input_index;
+        fast_node->data.spatial.input_channels[slot] = (uint32_t)input->dimensions[1];
+    }
+    fast_node->kind = LW_X64_FAST_NODE_CONCAT;
+    ++plan->concat_node_count;
+    return 1;
+}
+static int fast_prepare_batch_norm(lw_x64_rec_fast_plan* plan, uint32_t node_index,
+                                   lw_x64_fast_node* fast_node) {
+    const uint8_t* node;
+    const uint8_t* params;
+    const lw_runtime_tensor* input;
+    const lw_runtime_tensor* output;
+    uint32_t input_index;
+    uint32_t output_index;
+    uint32_t c;
+    const float* scale;
+    const float* bias;
+    const float* mean;
+    const float* variance;
+    if (plan == NULL || fast_node == NULL || node_index >= plan->node_count ||
+        plan->layout.node_layout[node_index] != LW_FAST_LAYOUT_NHWC) return 0;
+    node = plan->session->model->bytes + (size_t)plan->session->model->node_offset + (size_t)node_index * LWM_V0_NODE_SIZE;
+    params = plan->session->model->bytes + (size_t)lwm_read_u64(node + 56u);
+    if (lwm_read_u16(node) != LW_OP_BATCH_NORMALIZATION || lwm_read_u16(node + 2u) < 5u || lwm_read_u16(node + 4u) != 1u) return 0;
+    input_index = lwm_read_u32(node + 8u); output_index = lwm_read_u32(node + 40u);
+    if (input_index >= plan->tensor_count || output_index >= plan->tensor_count) return 0;
+    input = &plan->session->tensors[input_index]; output = &plan->session->tensors[output_index];
+    if (!fast_tensor_eligible(input) || !fast_tensor_eligible(output) ||
+        input->dimensions[0] != output->dimensions[0] || input->dimensions[1] != output->dimensions[1] ||
+        input->dimensions[2] != output->dimensions[2] || input->dimensions[3] != output->dimensions[3]) return 0;
+    scale = fast_constant_f32(plan->session, lwm_read_u32(node + 12u));
+    bias = fast_constant_f32(plan->session, lwm_read_u32(node + 16u));
+    mean = fast_constant_f32(plan->session, lwm_read_u32(node + 20u));
+    variance = fast_constant_f32(plan->session, lwm_read_u32(node + 24u));
+    c = (uint32_t)input->dimensions[1];
+    if (scale == NULL || bias == NULL || mean == NULL || variance == NULL ||
+        plan->session->tensors[lwm_read_u32(node + 12u)].byte_size < (uint64_t)c * sizeof(float) ||
+        plan->session->tensors[lwm_read_u32(node + 16u)].byte_size < (uint64_t)c * sizeof(float) ||
+        plan->session->tensors[lwm_read_u32(node + 20u)].byte_size < (uint64_t)c * sizeof(float) ||
+        plan->session->tensors[lwm_read_u32(node + 24u)].byte_size < (uint64_t)c * sizeof(float)) return 0;
+    memset(&fast_node->data.spatial, 0, sizeof(fast_node->data.spatial));
+    fast_node->data.spatial.input_index = input_index; fast_node->data.spatial.output_index = output_index;
+    fast_node->data.spatial.scale = scale; fast_node->data.spatial.bias = bias;
+    fast_node->data.spatial.mean = mean; fast_node->data.spatial.variance = variance;
+    fast_node->data.spatial.epsilon = fast_read_f32(params + 4u);
+    fast_node->kind = LW_X64_FAST_NODE_BATCH_NORM;
+    ++plan->batch_norm_node_count;
     return 1;
 }
 static int fast_prepare_conv(lw_x64_rec_fast_plan* plan, uint32_t node_index,
@@ -130,7 +341,7 @@ static int fast_prepare_conv(lw_x64_rec_fast_plan* plan, uint32_t node_index,
     pb = lwm_read_i32(params + 40u); pr = lwm_read_i32(params + 44u);
     is_depthwise = group == (uint32_t)input->dimensions[1] && group > 1u &&
                   output->dimensions[1] == input->dimensions[1] &&
-                  (input->dimensions[1] % LW_NHWC_DEPTHWISE_BLOCK) == 0u &&
+                  (input->dimensions[1] & 7) == 0u &&
                   weight->dimensions[1] == 1;
     if ((!is_depthwise && group != 1u) || kh <= 0 || kw <= 0 || sh <= 0 || sw <= 0 || dh != 1 || dw != 1 ||
         pt < 0 || pl < 0 || pt != pb || pl != pr || !fast_tensor_eligible(input) ||
@@ -139,8 +350,9 @@ static int fast_prepare_conv(lw_x64_rec_fast_plan* plan, uint32_t node_index,
         weight->dimensions[0] != output->dimensions[1] ||
         (is_depthwise ? weight->dimensions[1] != 1 : weight->dimensions[1] != input->dimensions[1]) ||
         weight->dimensions[2] != kh ||
-        weight->dimensions[3] != kw || output->dimensions[1] < 16 ||
-        ((uint32_t)output->dimensions[1] % LW_NHWC_OC_BLOCK) != 0u) return 0;
+        weight->dimensions[3] != kw ||
+        (is_depthwise ? ((uint32_t)output->dimensions[1] < 8u || ((uint32_t)output->dimensions[1] & 7u) != 0u) :
+         ((uint32_t)output->dimensions[1] < 16u || ((uint32_t)output->dimensions[1] % LW_NHWC_OC_BLOCK) != 0u))) return 0;
     conv = &fast_node->data.conv;
     memset(conv, 0, sizeof(*conv));
     conv->input_index = input_index; conv->output_index = lwm_read_u32(node + 40u);
@@ -288,8 +500,14 @@ lw_status lw_x64_rec_fast_plan_create(lw_session* session,
         plan->nodes[node_index].semantic_node_count = 1u;
         plan->nodes[node_index].output_index = lwm_read_u32(node + 40u);
         if (fast_prepare_elementwise(plan, node_index, &plan->nodes[node_index]) ||
+            fast_prepare_reduce_mean(plan, node_index, &plan->nodes[node_index]) ||
+            fast_prepare_pool(plan, node_index, &plan->nodes[node_index]) ||
+            fast_prepare_concat(plan, node_index, &plan->nodes[node_index]) ||
+            fast_prepare_batch_norm(plan, node_index, &plan->nodes[node_index]) ||
             fast_prepare_conv(plan, node_index, &plan->nodes[node_index])) {
             ++plan->fast_node_count;
+        } else if (plan->layout.node_layout[node_index] == LW_FAST_LAYOUT_NHWC) {
+            fast_record_nhwc_blocker(plan, node);
         }
     }
     plan->generic_node_count = plan->node_count - plan->fast_node_count;

@@ -16,6 +16,8 @@ void lw_avx2_binary_contiguous_f32(lw_scalar_binary_op operation, const float* l
 void lw_avx2_binary_right_scalar_f32(lw_scalar_binary_op operation, const float* left, float right,
                                      float* output, uint64_t element_count);
 void lw_avx2_relu_contiguous_f32(const float* input, float* output, uint64_t element_count);
+void lw_avx2_binary_channel_f32(lw_scalar_binary_op operation, const float* full, const float* channel, float* output, uint64_t pixels, uint32_t channels, int broadcast_is_left);
+void lw_avx2_hard_sigmoid_contiguous_f32(const float* input, float* output, uint64_t element_count, float alpha, float beta);
 void lw_avx2_erf_f32(const float* input, float* output, uint64_t element_count);
 void lw_avx2_gelu_f32(const float* input, float* output, uint64_t element_count);
 void lw_avx2_softmax_contiguous_f32(const float* input, float* output, uint64_t row_count,
