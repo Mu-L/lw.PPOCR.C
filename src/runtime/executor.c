@@ -635,12 +635,22 @@ static lw_status dispatch_node(lw_session* session, const uint8_t* node, uint32_
 #endif
         return lw_scalar_erf_f32(inputs[0], output, element_count);
     }
-    case LW_OP_HARD_SIGMOID:
-        return input_count == 1u
-                   ? lw_scalar_hard_sigmoid_f32(inputs[0], output,
-                                                tensor_element_count(input_tensors[0]),
-                                                read_f32(params + 4), read_f32(params + 8))
-                   : LW_STATUS_INVALID_SHAPE;
+    case LW_OP_HARD_SIGMOID: {
+        float alpha;
+        float beta;
+        uint64_t element_count;
+        if (input_count != 1u) {
+            return LW_STATUS_INVALID_SHAPE;
+        }
+        alpha = read_f32(params + 4);
+        beta = read_f32(params + 8);
+        element_count = tensor_element_count(input_tensors[0]);
+        if (lw_simd_level_is_avx2(simd_level)) {
+            lw_avx2_hard_sigmoid_exact_f32(inputs[0], output, element_count, alpha, beta);
+            return LW_STATUS_OK;
+        }
+        return lw_scalar_hard_sigmoid_f32(inputs[0], output, element_count, alpha, beta);
+    }
     case LW_OP_BATCH_NORMALIZATION:
         return input_count == 5u
                    ? lw_scalar_batch_normalization_f32(
@@ -662,10 +672,18 @@ static lw_status dispatch_node(lw_session* session, const uint8_t* node, uint32_
                                          lwm_read_u32(params + 4), lwm_read_u32(params + 8),
                                          output_tensor->rank, output_tensor->dimensions);
     }
-    case LW_OP_RELU:
-        return input_count == 1u
-                   ? lw_scalar_relu_f32(inputs[0], output, tensor_element_count(input_tensors[0]))
-                   : LW_STATUS_INVALID_SHAPE;
+    case LW_OP_RELU: {
+        uint64_t element_count;
+        if (input_count != 1u) {
+            return LW_STATUS_INVALID_SHAPE;
+        }
+        element_count = tensor_element_count(input_tensors[0]);
+        if (lw_simd_level_is_avx2(simd_level)) {
+            lw_avx2_relu_f32(inputs[0], output, element_count);
+            return LW_STATUS_OK;
+        }
+        return lw_scalar_relu_f32(inputs[0], output, element_count);
+    }
     case LW_OP_AVERAGE_POOL: {
         int32_t kernel[2] = {lwm_read_i32(params + 8), lwm_read_i32(params + 12)};
         int32_t strides[2] = {lwm_read_i32(params + 16), lwm_read_i32(params + 20)};

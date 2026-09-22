@@ -420,11 +420,14 @@ int main(int argc, char** argv) {
            (unsigned long long)profile.total_nanoseconds,
            (unsigned long long)profile.detector.preprocess_nanoseconds,
            (unsigned long long)profile.detector.graph_nanoseconds);
-    printf("\"det_postprocess\":%llu,\"crop\":%llu,\"line_workers\":%llu,"
+    printf("\"det_postprocess\":%llu,\"det_unclip\":%llu,\"crop\":%llu,\"crop_setup\":%llu,"
+           "\"line_workers\":%llu,"
            "\"line_worker_critical\":%llu,\"line_dispatch_overhead\":%llu,"
            "\"output\":%llu},",
            (unsigned long long)profile.detector.postprocess_nanoseconds,
+           (unsigned long long)profile.detector.unclip_nanoseconds,
            (unsigned long long)profile.crop_nanoseconds,
+           (unsigned long long)profile.crop_setup_nanoseconds,
            (unsigned long long)profile.line_workers_nanoseconds,
            (unsigned long long)profile.line_worker_critical_nanoseconds,
            (unsigned long long)profile.line_dispatch_overhead_nanoseconds,

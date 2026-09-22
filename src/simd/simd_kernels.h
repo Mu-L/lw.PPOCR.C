@@ -19,6 +19,8 @@ void lw_avx2_relu_contiguous_f32(const float* input, float* output, uint64_t ele
 void lw_avx2_binary_channel_f32(lw_scalar_binary_op operation, const float* full, const float* channel, float* output, uint64_t pixels, uint32_t channels, int broadcast_is_left);
 void lw_avx2_binary_channel_nchw_f32(lw_scalar_binary_op operation, const float* full, const float* channel, float* output, uint64_t spatial, uint32_t channels, int broadcast_is_left);
 void lw_avx2_hard_sigmoid_contiguous_f32(const float* input, float* output, uint64_t element_count, float alpha, float beta);
+void lw_avx2_hard_sigmoid_exact_f32(const float* input, float* output, uint64_t element_count, float alpha, float beta);
+void lw_avx2_relu_f32(const float* input, float* output, uint64_t element_count);
 void lw_avx2_erf_f32(const float* input, float* output, uint64_t element_count);
 void lw_avx2_gelu_f32(const float* input, float* output, uint64_t element_count);
 void lw_avx2_softmax_contiguous_f32(const float* input, float* output, uint64_t row_count,
@@ -46,6 +48,18 @@ void lw_avx2_fma_packed_matmul_bias_argmax_f32(
     const float* input, const float* packed_weights, const float* bias, float* output,
     uint32_t* best_indices, uint32_t batch_count, uint32_t rows,
     uint32_t inner_dimension, uint32_t columns);
+void lw_avx2_fma_packed_matmul_argmax_scores_f32(
+    const float* input, const float* packed_weights, const float* bias,
+    uint32_t* best_indices, float* scores, uint32_t batch_count, uint32_t rows,
+    uint32_t inner_dimension, uint32_t columns);
+void lw_avx2_ctc_row_probabilities_f32(
+    const float* input, const float* packed_weights, const float* bias,
+    const uint32_t* best_indices, const float* scores, float* probabilities,
+    uint32_t rows, uint32_t inner_dimension, uint32_t columns);
+int lw_avx2_threshold_bitmap_f32(const float* prediction, uint8_t* bitmap,
+                                 uint64_t pixel_count, float threshold);
+void lw_avx2_interior_bitmap_u8(const uint8_t* bitmap, uint8_t* interior,
+                                uint32_t width, uint32_t height);
 void lw_sse2_conv1x1_unit_f32(const float* input, const float* weights, const float* bias,
                               float* output, const int32_t input_dimensions[4],
                               const int32_t output_dimensions[4], uint32_t groups,

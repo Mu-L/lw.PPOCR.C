@@ -2,6 +2,8 @@
 
 /* AVX2 Softmax for the long, contiguous REC classification axis. */
 
+#include "../kernels/packed_matmul_internal.h"
+
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -205,6 +207,128 @@ void lw_avx2_ctc_emitted_softmax_contiguous_f32(const float* input,
                 sum += expf(input_row[(size_t)index] - maximum);
             }
             emitted_probabilities[(size_t)row] = 1.0f / sum;
+        }
+    }
+#endif
+}
+
+#if LW_COMPILES_AVX2_SOFTMAX && (defined(__GNUC__) || defined(__clang__))
+__attribute__((target("avx2,fma")))
+#endif
+void lw_avx2_ctc_row_probabilities_f32(
+    const float* input, const float* packed_weights, const float* bias,
+    const uint32_t* best_indices, const float* scores, float* probabilities,
+    uint32_t rows, uint32_t inner_dimension, uint32_t columns) {
+#if LW_COMPILES_AVX2_SOFTMAX
+    const uint32_t column_panels =
+        (columns + LW_PACKED_MATMUL_COLUMN_TILE - 1u) / LW_PACKED_MATMUL_COLUMN_TILE;
+    uint32_t row;
+    /* Only emitted rows need a probability: recompute that row's logits as a
+     * single packed matvec and fold the softmax denominator into the same
+     * pass, so the [rows x columns] logit tensor never exists. The 8-lane
+     * batches and per-lane accumulation order match
+     * lw_avx2_ctc_emitted_softmax_contiguous_f32 for bit-comparable sums. */
+    for (row = 0u; row < rows; ++row) {
+        uint32_t best_index = best_indices[(size_t)row];
+        if (best_index != 0u &&
+            (row == 0u || best_index != best_indices[(size_t)row - 1u])) {
+            const float maximum = scores[(size_t)row];
+            const __m256 maximum_vector = _mm256_set1_ps(maximum);
+            const float* input_row = input + (size_t)row * inner_dimension;
+            float sum = 0.0f;
+            uint32_t column_panel;
+            for (column_panel = 0u; column_panel < column_panels; ++column_panel) {
+                const float* packed =
+                    packed_weights +
+                    (size_t)(column_panel * inner_dimension *
+                             LW_PACKED_MATMUL_COLUMN_TILE);
+                __m256 accumulator_low = _mm256_setzero_ps();
+                __m256 accumulator_high = _mm256_setzero_ps();
+                uint32_t inner;
+                for (inner = 0u; inner < inner_dimension; ++inner) {
+                    const __m256 weight_low = _mm256_loadu_ps(packed);
+                    const __m256 weight_high = _mm256_loadu_ps(packed + 8u);
+                    const __m256 input_value = _mm256_set1_ps(input_row[inner]);
+                    accumulator_low =
+                        _mm256_fmadd_ps(input_value, weight_low, accumulator_low);
+                    accumulator_high =
+                        _mm256_fmadd_ps(input_value, weight_high, accumulator_high);
+                    packed += LW_PACKED_MATMUL_COLUMN_TILE;
+                }
+                {
+                    const uint32_t column_base =
+                        column_panel * LW_PACKED_MATMUL_COLUMN_TILE;
+                    const uint32_t valid_columns =
+                        columns - column_base < LW_PACKED_MATMUL_COLUMN_TILE
+                            ? columns - column_base
+                            : LW_PACKED_MATMUL_COLUMN_TILE;
+                    if (bias != NULL) {
+                        accumulator_low = _mm256_add_ps(
+                            accumulator_low, _mm256_loadu_ps(bias + column_base));
+                        accumulator_high = _mm256_add_ps(
+                            accumulator_high, _mm256_loadu_ps(bias + column_base + 8u));
+                    }
+                    if (valid_columns == LW_PACKED_MATMUL_COLUMN_TILE) {
+                        float lanes[8];
+                        __m256 values;
+                        uint32_t lane;
+                        values = exp_approximation_f32(
+                            _mm256_sub_ps(accumulator_low, maximum_vector));
+                        _mm256_storeu_ps(lanes, values);
+                        for (lane = 0u; lane < 8u; ++lane) sum += lanes[lane];
+                        values = exp_approximation_f32(
+                            _mm256_sub_ps(accumulator_high, maximum_vector));
+                        _mm256_storeu_ps(lanes, values);
+                        for (lane = 0u; lane < 8u; ++lane) sum += lanes[lane];
+                    } else {
+                        float lanes[LW_PACKED_MATMUL_COLUMN_TILE];
+                        uint32_t lane = 0u;
+                        _mm256_storeu_ps(lanes, accumulator_low);
+                        _mm256_storeu_ps(lanes + 8u, accumulator_high);
+                        while (lane + 8u <= valid_columns) {
+                            float batch[8];
+                            __m256 values = exp_approximation_f32(_mm256_sub_ps(
+                                _mm256_loadu_ps(lanes + lane), maximum_vector));
+                            uint32_t sub_lane;
+                            _mm256_storeu_ps(batch, values);
+                            for (sub_lane = 0u; sub_lane < 8u; ++sub_lane) {
+                                sum += batch[sub_lane];
+                            }
+                            lane += 8u;
+                        }
+                        for (; lane < valid_columns; ++lane) {
+                            sum += expf(lanes[lane] - maximum);
+                        }
+                    }
+                }
+            }
+            probabilities[(size_t)row] = 1.0f / sum;
+        }
+    }
+#else
+    uint32_t row;
+    for (row = 0u; row < rows; ++row) {
+        uint32_t best_index = best_indices[(size_t)row];
+        if (best_index != 0u &&
+            (row == 0u || best_index != best_indices[(size_t)row - 1u])) {
+            const float maximum = scores[(size_t)row];
+            const float* input_row = input + (size_t)row * inner_dimension;
+            float sum = 0.0f;
+            uint32_t column;
+            for (column = 0u; column < columns; ++column) {
+                float value = bias != NULL ? bias[column] : 0.0f;
+                uint32_t inner;
+                const float* weights = packed_weights +
+                    (size_t)((column / LW_PACKED_MATMUL_COLUMN_TILE) *
+                             inner_dimension * LW_PACKED_MATMUL_COLUMN_TILE +
+                             (column % LW_PACKED_MATMUL_COLUMN_TILE));
+                for (inner = 0u; inner < inner_dimension; ++inner) {
+                    value += input_row[inner] *
+                             weights[(size_t)inner * LW_PACKED_MATMUL_COLUMN_TILE];
+                }
+                sum += expf(value - maximum);
+            }
+            probabilities[(size_t)row] = 1.0f / sum;
         }
     }
 #endif

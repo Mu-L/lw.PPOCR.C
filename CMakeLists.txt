@@ -23,7 +23,15 @@ option(LW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH
 option(LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH
     "Use the experimental AVX2+FMA terminal MatMul dispatch in native builds" OFF)
 option(LW_EXPERIMENTAL_AVX2_FAST_PATH
-    "Build the experimental graph-level AVX2/FMA NHWC fast-path benchmark" OFF)
+    "Enable the compiled AVX2/FMA x64 REC backend (NCHW strategy, width 960)" ON)
+option(LW_EXPERIMENTAL_DET_FIXED_POINT_RESIZE
+    "Use the OpenCV-parity fixed-point DET resize with LUT normalization" ON)
+option(LW_EXPERIMENTAL_CLS_FIXED_POINT_RESIZE
+    "Use the keep-aspect fixed-point CLS resize with -1 padding" ON)
+option(LW_EXPERIMENTAL_PERSISTENT_LINE_POOL
+    "Reuse a persistent line-worker thread pool across OCR requests" ON)
+option(LW_EXPERIMENTAL_PARALLEL_CROP_PHASE
+    "Rasterize perspective crops as parallel row-band jobs" ON)
 option(LW_EXPERIMENTAL_PREPARED_EXECUTION
     "Build the experimental session-local prepared execution table" OFF)
 option(LW_EXPERIMENTAL_WORKSPACE_PLANNER_V2
@@ -250,6 +258,7 @@ set(LW_PPOCR_C_SOURCES
     src/ppocr/crop_buffer.c
     src/ppocr/db_postprocess.c
     src/ppocr/det_preprocess.c
+    src/ppocr/det_preprocess_fixed.c
     src/ppocr/detector.c
     src/ppocr/ocr.c
     src/ppocr/profile.c
@@ -267,6 +276,7 @@ set(LW_PPOCR_C_SOURCES
     src/runtime/shape.c
     src/runtime/validate.c
     src/simd/avx2_binary.c
+    src/simd/avx2_bitmap.c
     src/simd/avx2_conv1x1.c
     src/simd/avx2_conv2x2.c
     src/simd/avx2_conv3x3.c
@@ -414,6 +424,18 @@ if(LW_X64_REC_FAST_ENABLED)
             COMPILE_OPTIONS /arch:AVX2 /fp:strict)
     endif()
 endif()
+if(LW_EXPERIMENTAL_DET_FIXED_POINT_RESIZE)
+    target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_DET_FIXED_POINT_RESIZE=1)
+endif()
+if(LW_EXPERIMENTAL_CLS_FIXED_POINT_RESIZE)
+    target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_CLS_FIXED_POINT_RESIZE=1)
+endif()
+if(LW_EXPERIMENTAL_PERSISTENT_LINE_POOL)
+    target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_PERSISTENT_LINE_POOL=1)
+endif()
+if(LW_EXPERIMENTAL_PARALLEL_CROP_PHASE)
+    target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_PARALLEL_CROP_PHASE=1)
+endif()
 if(LW_REC_RESIDENT_WIDTHS AND NOT EMSCRIPTEN)
     target_compile_definitions(lw_ppocr_c PRIVATE LW_REC_RESIDENT_WIDTHS=1)
 endif()
@@ -463,6 +485,18 @@ if(LW_X64_REC_FAST_ENABLED)
         set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c src/simd/avx2_nhwc_depthwise.c src/simd/avx2_nhwc_support.c APPEND PROPERTY
             COMPILE_OPTIONS /arch:AVX2 /fp:strict)
     endif()
+endif()
+if(LW_EXPERIMENTAL_DET_FIXED_POINT_RESIZE)
+    target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_DET_FIXED_POINT_RESIZE=1)
+endif()
+if(LW_EXPERIMENTAL_CLS_FIXED_POINT_RESIZE)
+    target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_CLS_FIXED_POINT_RESIZE=1)
+endif()
+if(LW_EXPERIMENTAL_PERSISTENT_LINE_POOL)
+    target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_PERSISTENT_LINE_POOL=1)
+endif()
+if(LW_EXPERIMENTAL_PARALLEL_CROP_PHASE)
+    target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_PARALLEL_CROP_PHASE=1)
 endif()
 if(LW_REC_RESIDENT_WIDTHS)
     target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_REC_RESIDENT_WIDTHS=1)
@@ -2290,6 +2324,52 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
         add_test(NAME x64_rec_backend_benchmark
             COMMAND x64-rec-backend-benchmark-driver ${LW_PPOCR_C_REC_LWM} 5)
         set_tests_properties(x64_rec_backend_benchmark PROPERTIES TIMEOUT 120)
+        add_test(NAME x64_rec_backend_benchmark_nchw
+            COMMAND x64-rec-backend-benchmark-driver ${LW_PPOCR_C_REC_LWM} 5 nchw)
+        set_tests_properties(x64_rec_backend_benchmark_nchw PROPERTIES TIMEOUT 120)
+        add_executable(x64-rec-recognizer-benchmark-driver
+            tests/x64_rec_recognizer_benchmark_driver.c)
+        target_link_libraries(x64-rec-recognizer-benchmark-driver PRIVATE lw_ppocr_c)
+        target_include_directories(x64-rec-recognizer-benchmark-driver PRIVATE
+            src/ppocr)
+        target_compile_features(x64-rec-recognizer-benchmark-driver PRIVATE c_std_11)
+        target_compile_definitions(x64-rec-recognizer-benchmark-driver PRIVATE
+            LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+        add_dependencies(x64-rec-recognizer-benchmark-driver convert_rec_model)
+        if(MSVC)
+            target_compile_definitions(x64-rec-recognizer-benchmark-driver PRIVATE
+                _CRT_SECURE_NO_WARNINGS)
+            target_compile_options(x64-rec-recognizer-benchmark-driver PRIVATE /W4 /WX /utf-8)
+        else()
+            target_compile_options(x64-rec-recognizer-benchmark-driver PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+        endif()
+        add_test(NAME x64_rec_recognizer_benchmark
+            COMMAND x64-rec-recognizer-benchmark-driver ${LW_PPOCR_C_REC_LWM}
+                ${CMAKE_CURRENT_SOURCE_DIR}/models/ppocrv6-tiny/ppocr_keys.txt 5)
+        set_tests_properties(x64_rec_recognizer_benchmark PROPERTIES TIMEOUT 120)
+        add_executable(x64-rec-pointwise-layout-driver
+            tests/x64_rec_pointwise_layout_driver.c)
+        target_link_libraries(x64-rec-pointwise-layout-driver PRIVATE lw_ppocr_c)
+        target_include_directories(x64-rec-pointwise-layout-driver PRIVATE
+            src/runtime
+            src/kernels
+            src/simd)
+        target_compile_features(x64-rec-pointwise-layout-driver PRIVATE c_std_11)
+        target_compile_definitions(x64-rec-pointwise-layout-driver PRIVATE
+            LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+        add_dependencies(x64-rec-pointwise-layout-driver convert_rec_model)
+        if(MSVC)
+            target_compile_definitions(x64-rec-pointwise-layout-driver PRIVATE
+                _CRT_SECURE_NO_WARNINGS)
+            target_compile_options(x64-rec-pointwise-layout-driver PRIVATE /W4 /WX /utf-8)
+        else()
+            target_compile_options(x64-rec-pointwise-layout-driver PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+        endif()
+        add_test(NAME x64_rec_pointwise_layout
+            COMMAND x64-rec-pointwise-layout-driver ${LW_PPOCR_C_REC_LWM} 5)
+        set_tests_properties(x64_rec_pointwise_layout PROPERTIES TIMEOUT 120)
         add_executable(x64-rec-pointwise-tuning-driver
             tests/x64_rec_pointwise_tuning_driver.c)
         target_link_libraries(x64-rec-pointwise-tuning-driver PRIVATE lw_ppocr_c)

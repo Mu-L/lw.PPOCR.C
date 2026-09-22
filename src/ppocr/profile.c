@@ -61,6 +61,7 @@ void lw_pipeline_component_profile_accumulate(lw_pipeline_component_profile* des
     add_saturated(&destination->preprocess_nanoseconds, source->preprocess_nanoseconds);
     add_saturated(&destination->graph_nanoseconds, source->graph_nanoseconds);
     add_saturated(&destination->postprocess_nanoseconds, source->postprocess_nanoseconds);
+    add_saturated(&destination->unclip_nanoseconds, source->unclip_nanoseconds);
     add_saturated(&destination->session_cache_hits, source->session_cache_hits);
     add_saturated(&destination->session_cache_misses, source->session_cache_misses);
     add_saturated(&destination->session_reconfigurations, source->session_reconfigurations);

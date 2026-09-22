@@ -105,9 +105,15 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         output = offset_ptr(instance, op->data.conv.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
         if (op->kind == LW_X64_REC_OP_POINTWISE_NCHW) {
-            lw_avx2_fma_packed_conv1x1_f32(
-                input, op->data.conv.packed_weights, op->data.conv.bias,
-                output, input_dimensions, output_dimensions);
+            if (op->data.conv.nchw_pointwise_kernel == LW_X64_REC_NCHW_PW_FMA8) {
+                lw_avx2_fma_packed_conv1x1_8x8_f32(
+                    input, op->data.conv.packed_weights, op->data.conv.bias,
+                    output, input_dimensions, output_dimensions);
+            } else {
+                lw_avx2_fma_packed_conv1x1_f32(
+                    input, op->data.conv.packed_weights, op->data.conv.bias,
+                    output, input_dimensions, output_dimensions);
+            }
         } else if (op->kind == LW_X64_REC_OP_STEM_NCHW) {
             lw_avx2_fma_packed_conv3x3_stride2_pad1_f32(
                 input, op->data.conv.packed_weights, op->data.conv.bias,
@@ -374,11 +380,11 @@ lw_status lw_x64_rec_instance_create(const lw_x64_rec_program* program, lw_x64_r
     if (program->arena_bytes > 0u) instance->arena = (uint8_t*)rec_aligned_alloc(64u, (size_t)program->arena_bytes);
     if (program->scratch_bytes > 0u) instance->scratch = (uint8_t*)rec_aligned_alloc(64u, (size_t)program->scratch_bytes);
     if ((program->arena_bytes > 0u && instance->arena == NULL) || (program->scratch_bytes > 0u && instance->scratch == NULL)) { lw_x64_rec_instance_free(instance); lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "REC instance workspace allocation failed"); return LW_STATUS_OUT_OF_MEMORY; }
-    if (program->ctc.enabled) { uint64_t rows = program->ctc.rows, classes = program->ctc.classes; if (rows == 0u || classes == 0u || rows > SIZE_MAX / classes || rows * classes > SIZE_MAX / sizeof(float)) { lw_x64_rec_instance_free(instance); return LW_STATUS_INVALID_SHAPE; } instance->ctc_logits = (float*)rec_aligned_alloc(64u, (size_t)(rows * classes * sizeof(float))); instance->best_indices = (uint32_t*)rec_aligned_alloc(64u, (size_t)(rows * sizeof(uint32_t))); instance->best_probabilities = (float*)rec_aligned_alloc(64u, (size_t)(rows * sizeof(float))); if (instance->ctc_logits == NULL || instance->best_indices == NULL || instance->best_probabilities == NULL) { lw_x64_rec_instance_free(instance); lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "REC CTC workspace allocation failed"); return LW_STATUS_OUT_OF_MEMORY; } }
+    if (program->ctc.enabled) { uint64_t rows = program->ctc.rows; if (rows == 0u || rows > SIZE_MAX / sizeof(float)) { lw_x64_rec_instance_free(instance); return LW_STATUS_INVALID_SHAPE; } instance->ctc_scores = (float*)rec_aligned_alloc(64u, (size_t)(rows * sizeof(float))); instance->best_indices = (uint32_t*)rec_aligned_alloc(64u, (size_t)(rows * sizeof(uint32_t))); instance->best_probabilities = (float*)rec_aligned_alloc(64u, (size_t)(rows * sizeof(float))); if (instance->ctc_scores == NULL || instance->best_indices == NULL || instance->best_probabilities == NULL) { lw_x64_rec_instance_free(instance); lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "REC CTC workspace allocation failed"); return LW_STATUS_OUT_OF_MEMORY; } }
     *out = instance; lw_set_error(error, LW_STATUS_OK, ""); return LW_STATUS_OK;
 }
 
-void lw_x64_rec_instance_free(lw_x64_rec_instance* instance) { if (instance == NULL) return; rec_aligned_free(instance->ctc_logits); rec_aligned_free(instance->best_indices); rec_aligned_free(instance->best_probabilities); rec_aligned_free(instance->scratch); rec_aligned_free(instance->arena); free(instance); }
+void lw_x64_rec_instance_free(lw_x64_rec_instance* instance) { if (instance == NULL) return; rec_aligned_free(instance->ctc_scores); rec_aligned_free(instance->best_indices); rec_aligned_free(instance->best_probabilities); rec_aligned_free(instance->scratch); rec_aligned_free(instance->arena); free(instance); }
 
 float* lw_x64_rec_instance_input(lw_x64_rec_instance* instance, uint64_t* element_count) { const lw_x64_rec_value* value; if (element_count != NULL) *element_count = 0u; if (instance == NULL || instance->program == NULL || instance->program->input_value >= instance->program->value_count) return NULL; value=&instance->program->values[instance->program->input_value]; if (element_count != NULL) *element_count=value->bytes/sizeof(float); return offset_ptr(instance,value->offset); }
 

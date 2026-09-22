@@ -141,6 +141,19 @@ static lw_x64_rec_op* push_op(lw_x64_rec_program* program, uint32_t* count, uint
     return op;
 }
 
+static uint8_t choose_nchw_pointwise_kernel(uint32_t height,
+                                               uint32_t input_channels,
+                                               uint32_t output_channels,
+                                               uint32_t spatial) {
+    if (output_channels >= 8u && (output_channels & 7u) == 0u && spatial >= 8u &&
+        ((height == 6u && input_channels == 512u && output_channels == 1024u) ||
+         (height == 3u && ((input_channels == 768u && output_channels == 384u) ||
+                           (input_channels == 1536u && output_channels == 768u))))) {
+        return LW_X64_REC_NCHW_PW_FMA8;
+    }
+    return LW_X64_REC_NCHW_PW_FMA4;
+}
+
 static uint8_t choose_pointwise_kernel(uint32_t pixels, uint32_t output_channels) {
     if (pixels <= 1u && output_channels % 32u == 0u) return LW_X64_REC_PW_2X32;
     if (pixels <= 1u && output_channels % 16u == 0u) return LW_X64_REC_PW_4X16;
@@ -238,6 +251,12 @@ static lw_status compile_conv(const lw_model* model, const lw_session* session,
             op->kind = LW_X64_REC_OP_POINTWISE_NCHW;
             op->data.conv.kernel_kind = LW_X64_REC_CONV_POINTWISE;
             op->data.conv.packed_weights = packed;
+            op->data.conv.nchw_pointwise_kernel =
+                choose_nchw_pointwise_kernel(op->data.conv.input_height,
+                                             op->data.conv.input_channels,
+                                             op->data.conv.output_channels,
+                                             op->data.conv.input_height *
+                                                 op->data.conv.input_width);
             return LW_STATUS_OK;
         }
         if (groups == 1u && kh == 3u && kw == 3u && sh == 2u && sw == 2u &&
@@ -390,12 +409,182 @@ static lw_status compile_node(const lw_model* model, const lw_session* session,
     return LW_STATUS_OK;
 }
 
+static uint32_t resolve_alias_root(const lw_x64_rec_program* program, uint32_t index) {
+    uint32_t guard = 0u;
+    while (program->values[index].alias != 0u && guard++ < program->value_count) {
+        index = program->values[index].alias_of;
+    }
+    return index;
+}
+
+typedef struct arena_candidate {
+    uint32_t value_index;
+    uint64_t bytes;
+    int32_t first;
+    int32_t last;
+    uint64_t offset;
+} arena_candidate;
+
+static int candidate_before(const arena_candidate* a, const arena_candidate* b) {
+    if (a->bytes != b->bytes) return a->bytes > b->bytes;
+    if (a->first != b->first) return a->first < b->first;
+    return a->value_index < b->value_index;
+}
+
+/* Offline greedy-by-size interval placement: each value gets a lifetime
+ * [first,last] in physical-op space; values whose intervals overlap cannot
+ * share an offset. Values never produced by a physical op (GELU fusion
+ * temporaries, the CTC-excluded tail tensors, dead model tensors) get no slot,
+ * which also removes their storage. */
+static lw_status plan_arena_offsets(lw_x64_rec_program* program, lw_error* error) {
+    arena_candidate* candidates;
+    uint32_t count = 0u;
+    uint32_t i;
+    uint64_t arena_bytes = 0u;
+    candidates = (arena_candidate*)calloc(program->value_count, sizeof(*candidates));
+    if (candidates == NULL) {
+        lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "REC arena plan allocation failed");
+        return LW_STATUS_OUT_OF_MEMORY;
+    }
+    if (program->ctc_fused) {
+        /* The CTC tail reads the activation after the op loop; keep it live
+         * until the end so no other value may overlap it. */
+        lw_x64_rec_value* activation = &program->values[program->ctc.activation_value];
+        if (activation->last_use < (int32_t)program->op_count) {
+            activation->last_use = (int32_t)program->op_count;
+        }
+    }
+    for (i = 0u; i < program->value_count; ++i) {
+        const lw_x64_rec_value* value = &program->values[i];
+        int32_t first;
+        int32_t last;
+        uint32_t a;
+        if (value->alias != 0u || value->constant_data != NULL) continue;
+        if ((int32_t)i == (int32_t)program->input_value) {
+            /* The caller rewrites the input between runs, so it must never
+             * share its offset with any value produced inside the program. */
+            first = 0;
+            last = (int32_t)program->op_count;
+        } else if (value->producer >= 0) {
+            first = value->producer;
+            last = value->last_use > value->producer ? value->last_use : value->producer;
+        } else {
+            continue; /* never produced: fusion temporaries, CTC tail, dead tensors */
+        }
+        for (a = 0u; a < program->value_count; ++a) {
+            const lw_x64_rec_value* alias = &program->values[a];
+            if (alias->alias != 0u && resolve_alias_root(program, a) == i &&
+                alias->last_use > last) {
+                last = alias->last_use;
+            }
+        }
+        candidates[count].value_index = i;
+        candidates[count].bytes = value->bytes;
+        candidates[count].first = first;
+        candidates[count].last = last;
+        ++count;
+    }
+    for (i = 1u; i < count; ++i) {
+        arena_candidate current = candidates[i];
+        uint32_t j = i;
+        while (j > 0u && candidate_before(&current, &candidates[j - 1u])) {
+            candidates[j] = candidates[j - 1u];
+            --j;
+        }
+        candidates[j] = current;
+    }
+    for (i = 0u; i < count; ++i) {
+        arena_candidate* current = &candidates[i];
+        uint64_t offset = 0u;
+        int collided = 1;
+        while (collided) {
+            uint32_t p;
+            collided = 0;
+            for (p = 0u; p < i; ++p) {
+                const arena_candidate* placed = &candidates[p];
+                if (placed->first > current->last || current->first > placed->last) continue;
+                if (offset < placed->offset + placed->bytes &&
+                    placed->offset < offset + current->bytes) {
+                    offset = lw_x64_rec_arena_align(placed->offset + placed->bytes, 64u);
+                    if (offset == UINT64_MAX) {
+                        free(candidates);
+                        lw_set_error(error, LW_STATUS_OUT_OF_BOUNDS,
+                                     "REC arena plan overflows");
+                        return LW_STATUS_OUT_OF_BOUNDS;
+                    }
+                    collided = 1;
+                    break;
+                }
+            }
+        }
+        offset = lw_x64_rec_arena_align(offset, 64u);
+        if (offset == UINT64_MAX || current->bytes > UINT64_MAX - offset) {
+            free(candidates);
+            lw_set_error(error, LW_STATUS_OUT_OF_BOUNDS, "REC arena plan overflows");
+            return LW_STATUS_OUT_OF_BOUNDS;
+        }
+        current->offset = offset;
+        if (offset + current->bytes > arena_bytes) arena_bytes = offset + current->bytes;
+        program->values[current->value_index].offset = offset;
+    }
+    for (i = 0u; i < program->value_count; ++i) {
+        if (program->values[i].alias != 0u) {
+            program->values[i].offset =
+                program->values[resolve_alias_root(program, i)].offset;
+        }
+    }
+    program->arena_bytes = arena_bytes;
+    free(candidates);
+    lw_set_error(error, LW_STATUS_OK, "");
+    return LW_STATUS_OK;
+}
+
+/* Reset program state owned by a lowering pass so the second pass restarts
+ * from the same zero counters and empty constant list. */
+static void reset_lowering(lw_x64_rec_program* program, uint32_t limit) {
+    uint32_t i;
+    for (i = 0u; i < program->packed_constant_count; ++i) free(program->constants[i].data);
+    free(program->constants);
+    program->constants = NULL;
+    program->packed_constant_count = 0u;
+    memset(program->ops, 0, (size_t)limit * sizeof(*program->ops));
+    program->op_count = 0u;
+    program->semantic_consumed = 0u;
+    program->semantic_elided = 0u;
+    program->scratch_bytes = 0u;
+    program->unsupported_nodes = 0u;
+}
+
+static lw_x64_rec_compile_result lower_ops(const lw_model* model, const lw_session* session,
+                                           lw_x64_rec_program* program, uint32_t limit,
+                                           lw_error* error);
+
 lw_x64_rec_compile_result lw_x64_rec_backend_compile_ex(const lw_model* model, uint32_t target_width,
                                                       lw_x64_rec_compile_strategy strategy,
                                                       lw_x64_rec_program** out_program, lw_error* error) {
-    lw_session* session=NULL; lw_x64_rec_program* program=NULL; lw_model_info info; lw_status status; uint64_t cursor=0u; uint32_t i, physical=0u, limit;
+    lw_session* session=NULL; lw_x64_rec_program* program=NULL; lw_model_info info; lw_status status; uint32_t i, limit; lw_x64_rec_compile_result lowered;
     if(out_program==NULL||model==NULL||target_width==0u||target_width>INT32_MAX){lw_set_error(error,LW_STATUS_INVALID_ARGUMENT,"REC backend arguments are invalid");return LW_X64_REC_COMPILE_INVALID_GRAPH;} *out_program=NULL; lw_model_info_init(&info); status=lw_model_get_info(model,&info); if(status!=LW_STATUS_OK)return LW_X64_REC_COMPILE_INVALID_GRAPH; status=make_shape_session(model,target_width,&session,error); if(status!=LW_STATUS_OK)return status==LW_STATUS_OUT_OF_MEMORY?LW_X64_REC_COMPILE_OUT_OF_MEMORY:LW_X64_REC_COMPILE_INVALID_GRAPH; program=(lw_x64_rec_program*)calloc(1u,sizeof(*program)); if(program==NULL){lw_session_free(session);lw_set_error(error,LW_STATUS_OUT_OF_MEMORY,"REC program allocation failed");return LW_X64_REC_COMPILE_OUT_OF_MEMORY;} program->model=model;program->cpu=lw_get_cpu_capabilities();program->model_signature=info.content_checksum;program->target_width=target_width;program->backend_layout=(uint8_t)strategy;program->value_count=info.tensor_count;program->direct_nhwc=(uint8_t)(strategy == LW_X64_REC_COMPILE_NHWC); if(!lw_simd_level_is_avx2(program->cpu.simd)||!program->cpu.has_avx2_fma){lw_session_free(session);lw_x64_rec_program_free(program);lw_set_error(error,LW_STATUS_UNSUPPORTED,"standalone x64 REC backend requires AVX2 and FMA");return LW_X64_REC_COMPILE_UNSUPPORTED;} program->ctc_fused=detect_ctc(model,session,&program->ctc)?1u:0u; limit=program->ctc_fused?info.node_count-3u:info.node_count; program->ops=(lw_x64_rec_op*)calloc(limit,sizeof(*program->ops));program->values=(lw_x64_rec_value*)calloc(program->value_count,sizeof(*program->values));if(program->ops==NULL||program->values==NULL){lw_session_free(session);lw_x64_rec_program_free(program);lw_set_error(error,LW_STATUS_OUT_OF_MEMORY,"REC program tables allocation failed");return LW_X64_REC_COMPILE_OUT_OF_MEMORY;}
-    for(i=0u;i<program->value_count;++i){fill_value(session,i,&program->values[i],strategy);if((session->tensors[i].flags&LWM_V0_TENSOR_FLAG_CONSTANT)==0u){status=lw_x64_rec_arena_alloc(&cursor,session->tensors[i].byte_size,64u,&program->values[i].offset,error);if(status!=LW_STATUS_OK){lw_session_free(session);lw_x64_rec_program_free(program);return LW_X64_REC_COMPILE_INVALID_GRAPH;}if((session->tensors[i].flags&LWM_V0_TENSOR_FLAG_INPUT)!=0u)program->input_value=i;}}
+    for(i=0u;i<program->value_count;++i){fill_value(session,i,&program->values[i],strategy);if((session->tensors[i].flags&LWM_V0_TENSOR_FLAG_INPUT)!=0u)program->input_value=i;}
+    lowered=lower_ops(model,session,program,limit,error);
+    if(lowered!=LW_X64_REC_COMPILE_OK){lw_session_free(session);lw_x64_rec_program_free(program);return lowered;}
+    status=plan_arena_offsets(program,error);
+    if(status!=LW_STATUS_OK){lw_session_free(session);lw_x64_rec_program_free(program);return status==LW_STATUS_OUT_OF_MEMORY?LW_X64_REC_COMPILE_OUT_OF_MEMORY:LW_X64_REC_COMPILE_INVALID_GRAPH;}
+    reset_lowering(program,limit);
+    lowered=lower_ops(model,session,program,limit,error);
+    if(lowered!=LW_X64_REC_COMPILE_OK){lw_session_free(session);lw_x64_rec_program_free(program);return lowered;}
+    program->semantic_consumed+=program->semantic_elided; if(program->ctc_fused){status=lw_x64_rec_ctc_prepare(model,session,&program->ctc,error);if(status!=LW_STATUS_OK){lw_session_free(session);lw_x64_rec_program_free(program);return status==LW_STATUS_OUT_OF_MEMORY?LW_X64_REC_COMPILE_OUT_OF_MEMORY:LW_X64_REC_COMPILE_INVALID_GRAPH;}}
+    program->class_count=program->ctc.classes;program->time_steps=program->ctc.rows;program->output_value=info.output_count?lwm_read_u32(model->bytes+(size_t)model->output_offset):0u; if(program->arena_bytes==0u){lw_session_free(session);lw_x64_rec_program_free(program);lw_set_error(error,LW_STATUS_INVALID_SHAPE,"REC graph has no runtime arena");return LW_X64_REC_COMPILE_INVALID_GRAPH;} lw_session_free(session);lw_set_error(error,LW_STATUS_OK,"");*out_program=program;return LW_X64_REC_COMPILE_OK;
+}
+
+/* Lower semantic nodes into the physical op table. Runs twice: the first pass
+ * discovers value lifetimes (producer/last_use/fusions/aliases) before arena
+ * offsets are planned; the second pass embeds the final offsets. */
+static lw_x64_rec_compile_result lower_ops(const lw_model* model, const lw_session* session,
+                                           lw_x64_rec_program* program, uint32_t limit,
+                                           lw_error* error) {
+    uint32_t i;
+    uint32_t physical = 0u;
+    lw_status status = LW_STATUS_OK;
     for(i=0u;i<limit;++i){const uint8_t* node=node_bytes(model,i);uint16_t semantic=lwm_read_u16(node);
     {
         lw_fused_gelu_match match;
@@ -444,9 +633,9 @@ lw_x64_rec_compile_result lw_x64_rec_backend_compile_ex(const lw_model* model, u
         program->values[out].producer = (int32_t)i;
         continue;
     }
-    if(semantic==LW_OP_RESHAPE||semantic==LW_OP_SQUEEZE||semantic==LW_OP_UNSQUEEZE){uint32_t in=lwm_read_u32(node+8u),out=lwm_read_u32(node+40u); const lw_runtime_tensor* in_tensor=&session->tensors[in]; const lw_runtime_tensor* out_tensor=&session->tensors[out]; if(in_tensor->rank==3u && out_tensor->rank==4u && physical<limit){ lw_x64_rec_op* repack=&program->ops[physical++]; memset(repack,0,sizeof(*repack)); repack->kind=LW_X64_REC_OP_TRANSPOSE; repack->semantic_begin=i; repack->semantic_count=1u; repack->data.transpose.input_offset=program->values[in].offset; repack->data.transpose.output_offset=program->values[out].offset; repack->data.transpose.rank=4u; repack->data.transpose.input_dimensions[0]=in_tensor->dimensions[0]; repack->data.transpose.input_dimensions[1]=in_tensor->dimensions[1]; repack->data.transpose.input_dimensions[2]=out_tensor->dimensions[2]; repack->data.transpose.input_dimensions[3]=out_tensor->dimensions[3]; repack->data.transpose.output_dimensions[0]=out_tensor->dimensions[0]; repack->data.transpose.output_dimensions[1]=out_tensor->dimensions[2]; repack->data.transpose.output_dimensions[2]=out_tensor->dimensions[3]; repack->data.transpose.output_dimensions[3]=out_tensor->dimensions[1]; repack->data.transpose.permutation[0]=0; repack->data.transpose.permutation[1]=2; repack->data.transpose.permutation[2]=3; repack->data.transpose.permutation[3]=1; program->values[out].producer=(int32_t)(physical-1u); program->semantic_consumed++; continue; } if(in_tensor->rank==4u && out_tensor->rank==3u && physical<limit){ lw_x64_rec_op* repack=&program->ops[physical++]; memset(repack,0,sizeof(*repack)); repack->kind=LW_X64_REC_OP_TRANSPOSE; repack->semantic_begin=i; repack->semantic_count=1u; repack->data.transpose.input_offset=program->values[in].offset; repack->data.transpose.output_offset=program->values[out].offset; repack->data.transpose.rank=4u; repack->data.transpose.input_dimensions[0]=in_tensor->dimensions[0]; repack->data.transpose.input_dimensions[1]=in_tensor->dimensions[2]; repack->data.transpose.input_dimensions[2]=in_tensor->dimensions[3]; repack->data.transpose.input_dimensions[3]=in_tensor->dimensions[1]; repack->data.transpose.output_dimensions[0]=out_tensor->dimensions[0]; repack->data.transpose.output_dimensions[1]=in_tensor->dimensions[1]; repack->data.transpose.output_dimensions[2]=in_tensor->dimensions[2]; repack->data.transpose.output_dimensions[3]=in_tensor->dimensions[3]; repack->data.transpose.permutation[0]=0; repack->data.transpose.permutation[1]=3; repack->data.transpose.permutation[2]=1; repack->data.transpose.permutation[3]=2; program->values[out].producer=(int32_t)(physical-1u); program->semantic_consumed++; continue; } program->values[out].alias=1u;program->values[out].alias_of=in;program->values[out].offset=program->values[in].offset;++program->semantic_elided;program->values[out].producer=(int32_t)i;continue;} if(physical>=limit){lw_session_free(session);lw_x64_rec_program_free(program);return LW_X64_REC_COMPILE_INVALID_GRAPH;} {lw_x64_rec_op* op=&program->ops[physical];memset(op,0,sizeof(*op));status=compile_node(model,session,program,i,op,error);if(status!=LW_STATUS_OK||op->kind==LW_X64_REC_OP_GENERIC_UNSUPPORTED){++program->unsupported_nodes;if (status == LW_STATUS_OK || error == NULL || error->message[0] == 0) { char message[128]; (void)snprintf(message,sizeof(message),"REC node %u (op %u) lowering failed (status %d, kind %u)",(unsigned)i,(unsigned)semantic,(int)status,(unsigned)op->kind); lw_set_error(error,status!=LW_STATUS_OK?status:LW_STATUS_UNSUPPORTED,message); }lw_session_free(session);lw_x64_rec_program_free(program);return LW_X64_REC_COMPILE_UNSUPPORTED;}op->semantic_begin=i;op->semantic_count=1u;program->semantic_consumed++;program->values[lwm_read_u32(node+40u)].producer=(int32_t)physical;for(uint32_t j=0u;j<lwm_read_u16(node+2u);++j){uint32_t in=lwm_read_u32(node+8u+j*4u);if(program->values[in].last_use<(int32_t)physical)program->values[in].last_use=(int32_t)physical;}++physical;}}
-    program->op_count=physical;program->semantic_consumed+=program->semantic_elided; if(program->ctc_fused){status=lw_x64_rec_ctc_prepare(model,session,&program->ctc,error);if(status!=LW_STATUS_OK){lw_session_free(session);lw_x64_rec_program_free(program);return status==LW_STATUS_OUT_OF_MEMORY?LW_X64_REC_COMPILE_OUT_OF_MEMORY:LW_X64_REC_COMPILE_INVALID_GRAPH;}}
-    program->class_count=program->ctc.classes;program->time_steps=program->ctc.rows;program->output_value=info.output_count?lwm_read_u32(model->bytes+(size_t)model->output_offset):0u;program->arena_bytes=cursor; if(cursor==0u){lw_session_free(session);lw_x64_rec_program_free(program);lw_set_error(error,LW_STATUS_INVALID_SHAPE,"REC graph has no runtime arena");return LW_X64_REC_COMPILE_INVALID_GRAPH;} lw_session_free(session);lw_set_error(error,LW_STATUS_OK,"");*out_program=program;return LW_X64_REC_COMPILE_OK;
+    if(semantic==LW_OP_RESHAPE||semantic==LW_OP_SQUEEZE||semantic==LW_OP_UNSQUEEZE){uint32_t in=lwm_read_u32(node+8u),out=lwm_read_u32(node+40u); const lw_runtime_tensor* in_tensor=&session->tensors[in]; const lw_runtime_tensor* out_tensor=&session->tensors[out]; if(in_tensor->rank==3u && out_tensor->rank==4u && physical<limit){ lw_x64_rec_op* repack=&program->ops[physical++]; memset(repack,0,sizeof(*repack)); repack->kind=LW_X64_REC_OP_TRANSPOSE; repack->semantic_begin=i; repack->semantic_count=1u; repack->data.transpose.input_offset=program->values[in].offset; repack->data.transpose.output_offset=program->values[out].offset; repack->data.transpose.rank=4u; repack->data.transpose.input_dimensions[0]=in_tensor->dimensions[0]; repack->data.transpose.input_dimensions[1]=in_tensor->dimensions[1]; repack->data.transpose.input_dimensions[2]=out_tensor->dimensions[2]; repack->data.transpose.input_dimensions[3]=out_tensor->dimensions[3]; repack->data.transpose.output_dimensions[0]=out_tensor->dimensions[0]; repack->data.transpose.output_dimensions[1]=out_tensor->dimensions[2]; repack->data.transpose.output_dimensions[2]=out_tensor->dimensions[3]; repack->data.transpose.output_dimensions[3]=out_tensor->dimensions[1]; repack->data.transpose.permutation[0]=0; repack->data.transpose.permutation[1]=2; repack->data.transpose.permutation[2]=3; repack->data.transpose.permutation[3]=1; program->values[out].producer=(int32_t)(physical-1u); if(program->values[in].last_use<(int32_t)(physical-1u))program->values[in].last_use=(int32_t)(physical-1u); program->semantic_consumed++; continue; } if(in_tensor->rank==4u && out_tensor->rank==3u && physical<limit){ lw_x64_rec_op* repack=&program->ops[physical++]; memset(repack,0,sizeof(*repack)); repack->kind=LW_X64_REC_OP_TRANSPOSE; repack->semantic_begin=i; repack->semantic_count=1u; repack->data.transpose.input_offset=program->values[in].offset; repack->data.transpose.output_offset=program->values[out].offset; repack->data.transpose.rank=4u; repack->data.transpose.input_dimensions[0]=in_tensor->dimensions[0]; repack->data.transpose.input_dimensions[1]=in_tensor->dimensions[2]; repack->data.transpose.input_dimensions[2]=in_tensor->dimensions[3]; repack->data.transpose.input_dimensions[3]=in_tensor->dimensions[1]; repack->data.transpose.output_dimensions[0]=out_tensor->dimensions[0]; repack->data.transpose.output_dimensions[1]=in_tensor->dimensions[1]; repack->data.transpose.output_dimensions[2]=in_tensor->dimensions[2]; repack->data.transpose.output_dimensions[3]=in_tensor->dimensions[3]; repack->data.transpose.permutation[0]=0; repack->data.transpose.permutation[1]=3; repack->data.transpose.permutation[2]=1; repack->data.transpose.permutation[3]=2; program->values[out].producer=(int32_t)(physical-1u); if(program->values[in].last_use<(int32_t)(physical-1u))program->values[in].last_use=(int32_t)(physical-1u); program->semantic_consumed++; continue; } program->values[out].alias=1u;program->values[out].alias_of=in;program->values[out].offset=program->values[in].offset;++program->semantic_elided;program->values[out].producer=(int32_t)i;continue;} if(physical>=limit)return LW_X64_REC_COMPILE_INVALID_GRAPH; {lw_x64_rec_op* op=&program->ops[physical];memset(op,0,sizeof(*op));status=compile_node(model,session,program,i,op,error);if(status!=LW_STATUS_OK||op->kind==LW_X64_REC_OP_GENERIC_UNSUPPORTED){++program->unsupported_nodes;if (status == LW_STATUS_OK || error == NULL || error->message[0] == 0) { char message[128]; (void)snprintf(message,sizeof(message),"REC node %u (op %u) lowering failed (status %d, kind %u)",(unsigned)i,(unsigned)semantic,(int)status,(unsigned)op->kind); lw_set_error(error,status!=LW_STATUS_OK?status:LW_STATUS_UNSUPPORTED,message); }return LW_X64_REC_COMPILE_UNSUPPORTED;}op->semantic_begin=i;op->semantic_count=1u;program->semantic_consumed++;program->values[lwm_read_u32(node+40u)].producer=(int32_t)physical;for(uint32_t j=0u;j<lwm_read_u16(node+2u);++j){uint32_t in=lwm_read_u32(node+8u+j*4u);if(program->values[in].last_use<(int32_t)physical)program->values[in].last_use=(int32_t)physical;}++physical;}}
+    program->op_count=physical;
+    return LW_X64_REC_COMPILE_OK;
 }
 
 lw_x64_rec_compile_result lw_x64_rec_backend_compile(

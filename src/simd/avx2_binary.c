@@ -211,3 +211,53 @@ void lw_avx2_hard_sigmoid_contiguous_f32(const float* input, float* output,
         output[(size_t)index] = value;
     }
 }
+
+#if LW_COMPILES_AVX2_BINARY && (defined(__GNUC__) || defined(__clang__))
+__attribute__((target("avx2,no-fma")))
+#endif
+void lw_avx2_hard_sigmoid_exact_f32(const float* input, float* output,
+                                    uint64_t element_count, float alpha, float beta) {
+    uint64_t index = 0u;
+#if LW_COMPILES_AVX2_BINARY
+    const __m256 alpha_v = _mm256_set1_ps(alpha);
+    const __m256 beta_v = _mm256_set1_ps(beta);
+    const __m256 zero = _mm256_setzero_ps();
+    const __m256 one = _mm256_set1_ps(1.0f);
+    /* Separate multiply-add on purpose: the scalar reference evaluates
+     * alpha * x + beta with two roundings, and the FMA variant is not
+     * bit-identical. */
+    for (; index + 8u <= element_count; index += 8u) {
+        __m256 value =
+            _mm256_add_ps(_mm256_mul_ps(_mm256_loadu_ps(input + (size_t)index), alpha_v),
+                          beta_v);
+        value = _mm256_max_ps(_mm256_min_ps(value, one), zero);
+        _mm256_storeu_ps(output + (size_t)index, value);
+    }
+#endif
+    for (; index < element_count; ++index) {
+        float value = input[(size_t)index] * alpha + beta;
+        if (value < 0.0f) value = 0.0f;
+        else if (value > 1.0f) value = 1.0f;
+        output[(size_t)index] = value;
+    }
+}
+
+#if LW_COMPILES_AVX2_BINARY && (defined(__GNUC__) || defined(__clang__))
+__attribute__((target("avx2,no-fma")))
+#endif
+void lw_avx2_relu_f32(const float* input, float* output, uint64_t element_count) {
+    uint64_t index = 0u;
+#if LW_COMPILES_AVX2_BINARY
+    const __m256 zero = _mm256_setzero_ps();
+    /* max(v, 0) matches the scalar v > 0 ? v : 0 for every value including
+     * NaN (max_ps returns the second operand when either is NaN). */
+    for (; index + 8u <= element_count; index += 8u) {
+        _mm256_storeu_ps(output + (size_t)index,
+                         _mm256_max_ps(_mm256_loadu_ps(input + (size_t)index), zero));
+    }
+#endif
+    for (; index < element_count; ++index) {
+        float value = input[(size_t)index];
+        output[(size_t)index] = value > 0.0f ? value : 0.0f;
+    }
+}

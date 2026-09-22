@@ -17,6 +17,7 @@ typedef struct lw_pipeline_component_profile {
     uint64_t preprocess_nanoseconds;
     uint64_t graph_nanoseconds;
     uint64_t postprocess_nanoseconds;
+    uint64_t unclip_nanoseconds;
     uint64_t session_cache_hits;
     uint64_t session_cache_misses;
     uint64_t session_reconfigurations;
@@ -37,6 +38,7 @@ typedef struct lw_ocr_execution_profile {
     uint64_t line_workers_nanoseconds;
     uint64_t line_worker_critical_nanoseconds;
     uint64_t line_dispatch_overhead_nanoseconds;
+    uint64_t crop_setup_nanoseconds;
     uint64_t output_nanoseconds;
     uint64_t rec_width_sample_count;
     uint64_t rec_resized_width_sum;

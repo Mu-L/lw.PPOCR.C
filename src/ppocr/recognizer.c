@@ -555,6 +555,10 @@ uint32_t lw_recognizer_current_target_width(const lw_recognizer* recognizer) {
     return recognizer == NULL ? 0u : recognizer->current_target_width;
 }
 
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+static void recognizer_try_backend(lw_recognizer* recognizer);
+#endif
+
 lw_status lw_recognizer_create(const char* model_path_utf8, const char* dictionary_path_utf8,
                                const lw_recognizer_options* options, lw_recognizer** out_recognizer,
                                lw_error* error) {
@@ -616,15 +620,7 @@ lw_status lw_recognizer_create(const char* model_path_utf8, const char* dictiona
     recognizer->info.workspace_size = session_info.workspace_size;
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
     if (target_width == 960u) {
-        lw_error backend_error;
-        lw_error_init(&backend_error);
-        if (lw_x64_rec_backend_compile(recognizer->model, 960u, &recognizer->x64_program,
-                                       &backend_error) == LW_X64_REC_COMPILE_OK &&
-            lw_x64_rec_instance_create(recognizer->x64_program, &recognizer->x64_instance,
-                                       &backend_error) != LW_STATUS_OK) {
-            lw_x64_rec_program_free(recognizer->x64_program);
-            recognizer->x64_program = NULL;
-        }
+        recognizer_try_backend(recognizer);
     }
 #endif
     *out_recognizer = recognizer;
@@ -635,6 +631,33 @@ fail:
     lw_recognizer_free(recognizer);
     return status;
 }
+
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+/* Compile and instantiate the x64 REC backend (NCHW preferred, NHWC fallback)
+ * for this recognizer. Failure leaves x64_program/x64_instance NULL, which
+ * keeps the canonical path. Called from both create and clone so every
+ * worker recognizer gets the same backend behavior at width 960. */
+static void recognizer_try_backend(lw_recognizer* recognizer) {
+    lw_error backend_error;
+    lw_error_init(&backend_error);
+    if (lw_x64_rec_backend_compile_ex(recognizer->model, 960u, LW_X64_REC_COMPILE_NCHW,
+                                      &recognizer->x64_program,
+                                      &backend_error) != LW_X64_REC_COMPILE_OK ||
+        lw_x64_rec_instance_create(recognizer->x64_program, &recognizer->x64_instance,
+                                   &backend_error) != LW_STATUS_OK) {
+        lw_x64_rec_program_free(recognizer->x64_program);
+        recognizer->x64_program = NULL;
+        recognizer->x64_instance = NULL;
+        if (lw_x64_rec_backend_compile(recognizer->model, 960u, &recognizer->x64_program,
+                                       &backend_error) == LW_X64_REC_COMPILE_OK &&
+            lw_x64_rec_instance_create(recognizer->x64_program, &recognizer->x64_instance,
+                                       &backend_error) != LW_STATUS_OK) {
+            lw_x64_rec_program_free(recognizer->x64_program);
+            recognizer->x64_program = NULL;
+        }
+    }
+}
+#endif
 
 lw_status lw_recognizer_clone(const lw_recognizer* source, lw_recognizer** out_recognizer,
                               lw_error* error) {
@@ -676,10 +699,27 @@ lw_status lw_recognizer_clone(const lw_recognizer* source, lw_recognizer** out_r
     }
     clone->info.time_steps = clone->current_time_steps;
     clone->info.workspace_size = session_info.workspace_size;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    if (clone->current_target_width == 960u) {
+        recognizer_try_backend(clone);
+    }
+#endif
     *out_recognizer = clone;
     lw_set_error(error, LW_STATUS_OK, "");
     return LW_STATUS_OK;
 }
+
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+/* Test-only internal hook: disable the compiled x64 REC backend so the same
+ * binary can measure canonical recognizer timing. */
+void lw_recognizer_test_disable_x64_backend(lw_recognizer* recognizer) {
+    if (recognizer == NULL) return;
+    lw_x64_rec_instance_free(recognizer->x64_instance);
+    recognizer->x64_instance = NULL;
+    lw_x64_rec_program_free(recognizer->x64_program);
+    recognizer->x64_program = NULL;
+}
+#endif
 
 void lw_recognizer_free(lw_recognizer* recognizer) {
     if (recognizer == NULL) {
@@ -787,9 +827,17 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
     backend_active = recognizer->x64_instance != NULL && recognizer->current_target_width == 960u;
     if (backend_active) {
         backend_input = lw_x64_rec_instance_input(recognizer->x64_instance, &backend_input_count);
-        status = lw_rec_preprocess_bgr_u8_nhwc(source, source_byte_count, source_width, source_height,
-                                               source_stride, 960u, backend_input,
-                                               backend_input_count, &resized_width);
+        if (recognizer->x64_program != NULL &&
+            recognizer->x64_program->backend_layout == LW_X64_REC_BACKEND_NCHW) {
+            status = lw_rec_preprocess_bgr_u8(source, source_byte_count, source_width,
+                                              source_height, source_stride, 960u, backend_input,
+                                              backend_input_count, &resized_width);
+        } else {
+            status = lw_rec_preprocess_bgr_u8_nhwc(source, source_byte_count, source_width,
+                                                   source_height, source_stride, 960u,
+                                                   backend_input, backend_input_count,
+                                                   &resized_width);
+        }
     } else
 #endif
     {
@@ -825,7 +873,10 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
             execution_best_indices = recognizer->x64_instance->best_indices;
             execution_best_probabilities = recognizer->x64_instance->best_probabilities;
         } else {
-            backend_active = 0;
+            /* The recognizer input contains the backend layout after a successful
+             * backend preprocess. Do not silently feed that NHWC buffer to the
+             * canonical NCHW executor after a runtime backend failure. */
+            return status;
         }
     }
 #endif

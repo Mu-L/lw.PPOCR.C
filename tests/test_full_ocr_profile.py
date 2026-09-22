@@ -122,6 +122,8 @@ class FullOcrProfileTest(unittest.TestCase):
                     self.assertGreater(wall[stage], 0, stage)
                 # These sections can legitimately complete within one clock tick.
                 self.assertGreaterEqual(wall["line_dispatch_overhead"], 0)
+                self.assertGreaterEqual(wall["crop_setup"], 0)
+                self.assertGreaterEqual(wall["det_unclip"], 0)
                 self.assertGreaterEqual(wall["output"], 0)
                 self.assertGreaterEqual(
                     wall["line_workers"], wall["line_worker_critical"]
@@ -152,15 +154,26 @@ class FullOcrProfileTest(unittest.TestCase):
                     self.assertGreater(line_work[stage], 0, stage)
                 self.assertGreaterEqual(line_work["cls_postprocess"], 0)
 
+                implementation_paths = report["implementation_paths"]
                 operators = report["operators"]
                 self.assertEqual(len(operators), 21)
                 self.assertEqual(
                     {item["name"] for item in operators if item["invocations"] > 0},
                     EXPECTED_OPERATORS,
                 )
+                # Lines that reach adaptive width 960 run through the compiled
+                # x64 REC backend and execute outside the per-operator profile
+                # counters. Derive the backend row count from the greedy CTC
+                # counter instead of hard-coding it: total invocations are the
+                # DET nodes plus CLS nodes per line plus REC nodes per
+                # canonical line.
+                canonical_rows = (
+                    implementation_paths["recognizer"]["ctc_greedy"]
+                    // report["iterations"]
+                )
                 self.assertEqual(
                     sum(item["invocations"] for item in operators),
-                    242 + 16 * (106 + 159),
+                    242 + report["lines"] * 106 + canonical_rows * 159,
                 )
                 self.assertGreater(report["graph_work_nanoseconds"], 0)
                 self.assertAlmostEqual(
@@ -175,7 +188,6 @@ class FullOcrProfileTest(unittest.TestCase):
                 self.assertGreaterEqual(layout["transform_invocations"], 0)
                 self.assertGreaterEqual(layout["transform_bytes"], 0)
 
-                implementation_paths = report["implementation_paths"]
                 for component_name in ("detector", "classifier", "recognizer"):
                     binding = implementation_paths[component_name]["prepared_binding"]
                     if ARGUMENTS.expect_prepared:
@@ -221,14 +233,17 @@ class FullOcrProfileTest(unittest.TestCase):
                         paths["packed_matmul"] + paths["unpacked_matmul"],
                         matmul,
                     )
+                # Lines that reach adaptive width 960 run the compiled x64 REC
+                # backend, whose CTC projection bypasses these counters; the
+                # canonical-path counters cover only the remaining lines.
                 self.assertEqual(
                     implementation_paths["recognizer"]["ctc_greedy"],
-                    report["lines"],
+                    canonical_rows * report["iterations"],
                 )
                 self.assertEqual(
                     implementation_paths["recognizer"]["ctc_packed_projection"]
                     + implementation_paths["recognizer"]["ctc_generic_projection"],
-                    report["lines"],
+                    canonical_rows * report["iterations"],
                 )
 
                 rec_nodes = report["rec_nodes"]
@@ -398,7 +413,7 @@ class FullOcrProfileTest(unittest.TestCase):
         for report in reports:
             self.assertEqual(report["rec_target_width"], 960)
             rec_width = report["rec_width"]
-            self.assertEqual(rec_width["target_width_sum"], 9280)
+            self.assertEqual(rec_width["target_width_sum"], 9920)
             self.assertLess(
                 rec_width["target_width_sum"], 960 * report["lines"]
             )

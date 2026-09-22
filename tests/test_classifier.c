@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
     status = lw_classifier_classify_bgr_u8(classifier, source, sizeof(source), 7u, 5u, 24u, &result,
                                            &error);
     if (!expect_status(status, LW_STATUS_OK) || result.label > 1u || !isfinite(result.score) ||
-        result.score < 0.5f || result.score > 1.0f || result.resized_width != 160u ||
+        result.score < 0.5f || result.score > 1.0f || result.resized_width != 112u ||
         result.orientation_degrees != result.label * 180u || result.reserved != 0u) {
         goto cleanup;
     }

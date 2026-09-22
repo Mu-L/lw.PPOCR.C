@@ -73,6 +73,7 @@ static int run_preprocess(int argc, char** argv) {
     uint32_t stride;
     uint32_t resized_width;
     float* output = NULL;
+    lw_cls_preprocess_workspace workspace;
     lw_status status;
     int result = 1;
     if (argc != 7 || !parse_u32(argv[3], &width) || !parse_u32(argv[4], &height) ||
@@ -85,14 +86,15 @@ static int run_preprocess(int argc, char** argv) {
         fprintf(stderr, "preprocess output allocation failed\n");
         goto cleanup;
     }
-    status = lw_cls_preprocess_bgr_u8(source, source_bytes, width, height, stride, output,
-                                      output_count - 1u, &resized_width);
+    lw_cls_preprocess_workspace_init(&workspace);
+    status = lw_cls_preprocess_bgr_u8_fixed(source, source_bytes, width, height, stride, output,
+                                            output_count - 1u, &resized_width, &workspace);
     if (status != LW_STATUS_INVALID_SHAPE) {
         fprintf(stderr, "preprocessor accepted an incorrect output element count\n");
         goto cleanup;
     }
-    status = lw_cls_preprocess_bgr_u8(source, source_bytes, width, height, stride, output,
-                                      output_count, &resized_width);
+    status = lw_cls_preprocess_bgr_u8_fixed(source, source_bytes, width, height, stride, output,
+                                            output_count, &resized_width, &workspace);
     if (status != LW_STATUS_OK ||
         !write_file(argv[6], output, (size_t)output_count * sizeof(*output))) {
         fprintf(stderr, "preprocess failed: %s\n", lw_status_string(status));
@@ -102,6 +104,7 @@ static int run_preprocess(int argc, char** argv) {
     result = 0;
 
 cleanup:
+    lw_cls_preprocess_workspace_free(&workspace);
     free(output);
     free(source);
     return result;

@@ -43,6 +43,24 @@ static int compare_ctc(const uint32_t* a, const float* ap, const uint32_t* b, co
     for (uint32_t i = 0u; i < count; ++i) if (a[i] != b[i] || fabsf(ap[i] - bp[i]) > 1.0e-5f) return 0;
     return 1;
 }
+static int run_canonical(lw_session* session, const uint8_t* source, uint64_t source_bytes,
+                          float* input, uint64_t input_count, uint32_t width, uint32_t height,
+                          uint32_t* indices, float* probabilities, uint32_t rows,
+                          uint32_t classes, double* elapsed) {
+    uint64_t start = clock_ns();
+    lw_error error;
+    lw_error_init(&error);
+    if (lw_rec_preprocess_bgr_u8(source, source_bytes, width, height, width * 3u, 960u,
+                                 input, input_count, NULL) != LW_STATUS_OK ||
+        lw_execute_session_f32_ctc_greedy(session, input, input_count, indices, probabilities,
+                                          rows, classes, NULL, &error) != LW_STATUS_OK) {
+        fprintf(stderr, "canonical run failed: %s\n", error.message);
+        return 0;
+    }
+    if (elapsed != NULL) *elapsed = (double)(clock_ns() - start) / 1000000.0;
+    return 1;
+}
+
 static int run_backend(lw_x64_rec_instance* instance, int nchw, const uint8_t* source,
                        uint64_t source_bytes, uint32_t width, uint32_t height,
                        uint32_t* indices, float* probabilities, uint32_t rows,
@@ -73,8 +91,8 @@ int main(int argc, char** argv) {
     lw_error error;
     uint8_t* source = NULL;
     float* canonical_input = NULL;
-    uint32_t* canonical_indices = NULL, *backend_indices = NULL;
-    float* canonical_probabilities = NULL, *backend_probabilities = NULL;
+    uint32_t* canonical_indices = NULL, *nhwc_indices = NULL, *backend_indices = NULL;
+    float* canonical_probabilities = NULL, *nhwc_probabilities = NULL, *backend_probabilities = NULL;
     double* canonical_ms = NULL, *nhwc_ms = NULL, *nchw_ms = NULL;
     int code = 1;
     if (argc < 2 || argc > 3) { fprintf(stderr, "usage: x64-rec-layout-benchmark-driver rec.lwm [repeats]\n"); return 2; }
@@ -91,40 +109,77 @@ int main(int argc, char** argv) {
     source = (uint8_t*)malloc((size_t)source_bytes);
     canonical_input = (float*)malloc((size_t)input_count * sizeof(float));
     canonical_indices = (uint32_t*)malloc((size_t)nhwc_program->time_steps * sizeof(uint32_t));
+    nhwc_indices = (uint32_t*)malloc((size_t)nhwc_program->time_steps * sizeof(uint32_t));
     backend_indices = (uint32_t*)malloc((size_t)nhwc_program->time_steps * sizeof(uint32_t));
     canonical_probabilities = (float*)malloc((size_t)nhwc_program->time_steps * sizeof(float));
+    nhwc_probabilities = (float*)malloc((size_t)nhwc_program->time_steps * sizeof(float));
     backend_probabilities = (float*)malloc((size_t)nhwc_program->time_steps * sizeof(float));
     canonical_ms = (double*)malloc((size_t)repeats * sizeof(double));
     nhwc_ms = (double*)malloc((size_t)repeats * sizeof(double));
     nchw_ms = (double*)malloc((size_t)repeats * sizeof(double));
-    if (!source || !canonical_input || !canonical_indices || !backend_indices || !canonical_probabilities || !backend_probabilities || !canonical_ms || !nhwc_ms || !nchw_ms) goto cleanup;
+    if (!source || !canonical_input || !canonical_indices || !nhwc_indices || !backend_indices || !canonical_probabilities || !nhwc_probabilities || !backend_probabilities || !canonical_ms || !nhwc_ms || !nchw_ms) goto cleanup;
     fill_source(source, width, height);
     for (uint32_t i = 0u; i < warmups; ++i) {
-        if (!run_backend(nhwc, 0, source, source_bytes, width, height, NULL, NULL, 0u, NULL) ||
-            !run_backend(nchw, 1, source, source_bytes, width, height, NULL, NULL, 0u, NULL)) goto cleanup;
+        uint32_t order[3] = { i % 3u, (i + 1u) % 3u, (i + 2u) % 3u };
+        for (uint32_t j = 0u; j < 3u; ++j) {
+            if (order[j] == 0u) {
+                if (!run_canonical(canonical, source, source_bytes, canonical_input, input_count,
+                                   width, height, canonical_indices, canonical_probabilities,
+                                   nhwc_program->time_steps, nhwc_program->class_count, NULL)) goto cleanup;
+            } else if (order[j] == 1u) {
+                if (!run_backend(nhwc, 0, source, source_bytes, width, height, NULL, NULL, 0u, NULL)) goto cleanup;
+            } else {
+                if (!run_backend(nchw, 1, source, source_bytes, width, height, NULL, NULL, 0u, NULL)) goto cleanup;
+            }
+        }
     }
     for (uint32_t i = 0u; i < repeats; ++i) {
-        uint64_t start = clock_ns();
-        if (lw_rec_preprocess_bgr_u8(source, source_bytes, width, height, width * 3u, 960u, canonical_input, input_count, NULL) != LW_STATUS_OK ||
-            lw_execute_session_f32_ctc_greedy(canonical, canonical_input, input_count, canonical_indices, canonical_probabilities, nhwc_program->time_steps, nhwc_program->class_count, NULL, &error) != LW_STATUS_OK) goto cleanup;
-        canonical_ms[i] = (double)(clock_ns() - start) / 1000000.0;
-        if (!run_backend(nhwc, 0, source, source_bytes, width, height, backend_indices, backend_probabilities, nhwc_program->time_steps, &nhwc_ms[i]) ||
-            !compare_ctc(canonical_indices, canonical_probabilities, backend_indices, backend_probabilities, nhwc_program->time_steps)) { fprintf(stderr, "NHWC mismatch\n"); goto cleanup; }
-        if (!run_backend(nchw, 1, source, source_bytes, width, height, backend_indices, backend_probabilities, nchw_program->time_steps, &nchw_ms[i]) ||
-            !compare_ctc(canonical_indices, canonical_probabilities, backend_indices, backend_probabilities, nchw_program->time_steps)) { fprintf(stderr, "NCHW mismatch\n"); goto cleanup; }
+        uint32_t order[3] = { i % 3u, (i + 1u) % 3u, (i + 2u) % 3u };
+        for (uint32_t j = 0u; j < 3u; ++j) {
+            if (order[j] == 0u) {
+                if (!run_canonical(canonical, source, source_bytes, canonical_input, input_count,
+                                   width, height, canonical_indices, canonical_probabilities,
+                                   nhwc_program->time_steps, nhwc_program->class_count,
+                                   &canonical_ms[i])) goto cleanup;
+            } else if (order[j] == 1u) {
+                if (!run_backend(nhwc, 0, source, source_bytes, width, height, nhwc_indices,
+                                 nhwc_probabilities, nhwc_program->time_steps, &nhwc_ms[i])) goto cleanup;
+            } else {
+                if (!run_backend(nchw, 1, source, source_bytes, width, height, backend_indices,
+                                 backend_probabilities, nchw_program->time_steps, &nchw_ms[i])) goto cleanup;
+            }
+        }
+        if (!compare_ctc(canonical_indices, canonical_probabilities, nhwc_indices,
+                         nhwc_probabilities, nhwc_program->time_steps) ||
+            !compare_ctc(canonical_indices, canonical_probabilities, backend_indices,
+                         backend_probabilities, nhwc_program->time_steps)) {
+            fprintf(stderr, "rotated backend CTC mismatch at round %u\n", i);
+            goto cleanup;
+        }
     }
     {
         double canonical_median = median(canonical_ms, repeats);
         double nhwc_median = median(nhwc_ms, repeats);
         double nchw_median = median(nchw_ms, repeats);
-        printf("{\"schema_version\":1,\"width\":%u,\"height\":%u,\"repeats\":%u,\"canonical_ms\":%.3f,\"nhwc_ms\":%.3f,\"nchw_ms\":%.3f,\"nhwc_speedup\":%.6f,\"nchw_speedup\":%.6f,\"nhwc_arena_bytes\":%llu,\"nchw_arena_bytes\":%llu}\n",
+        printf("{\"schema_version\":1,\"order_rotated\":true,\"width\":%u,\"height\":%u,\"repeats\":%u,\"canonical_ms\":%.3f,\"nhwc_ms\":%.3f,\"nchw_ms\":%.3f,\"nhwc_speedup\":%.6f,\"nchw_speedup\":%.6f,\"nhwc_arena_bytes\":%llu,\"nchw_arena_bytes\":%llu}\n",
                width, height, repeats, canonical_median, nhwc_median, nchw_median,
                canonical_median / nhwc_median, canonical_median / nchw_median,
                (unsigned long long)nhwc_program->arena_bytes, (unsigned long long)nchw_program->arena_bytes);
+        /* The lifetime planner must reuse arena space aggressively; the
+         * monotonic baseline was 99,806,656 bytes and the planned Tiny REC960
+         * high-water mark is a few MiB. Guard against silent regressions back
+         * to monotonic allocation. */
+        if (nhwc_program->arena_bytes > 10000000u ||
+            nchw_program->arena_bytes > 10000000u) {
+            fprintf(stderr, "arena lifetime planner regression: nhwc=%llu nchw=%llu bytes\n",
+                    (unsigned long long)nhwc_program->arena_bytes,
+                    (unsigned long long)nchw_program->arena_bytes);
+            goto cleanup;
+        }
     }
     code = 0;
 cleanup:
-    free(nchw_ms); free(nhwc_ms); free(canonical_ms); free(backend_probabilities); free(canonical_probabilities); free(backend_indices); free(canonical_indices); free(canonical_input); free(source);
+    free(nchw_ms); free(nhwc_ms); free(canonical_ms); free(backend_probabilities); free(nhwc_probabilities); free(canonical_probabilities); free(backend_indices); free(nhwc_indices); free(canonical_indices); free(canonical_input); free(source);
     lw_session_free(canonical); lw_x64_rec_instance_free(nchw); lw_x64_rec_instance_free(nhwc); lw_x64_rec_program_free(nchw_program); lw_x64_rec_program_free(nhwc_program); lw_model_free(model);
     return code;
 }

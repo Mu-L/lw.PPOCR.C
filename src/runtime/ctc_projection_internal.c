@@ -45,19 +45,23 @@ lw_status lw_x64_rec_ctc_execute(const lw_x64_rec_program* program,
                                  lw_x64_rec_instance* instance, const float* activation,
                                  lw_error* error) {
     if (program == NULL || instance == NULL || activation == NULL || !program->ctc.enabled ||
-        instance->ctc_logits == NULL || instance->best_indices == NULL ||
+        instance->ctc_scores == NULL || instance->best_indices == NULL ||
         instance->best_probabilities == NULL) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "invalid CTC runtime state");
         return LW_STATUS_INVALID_ARGUMENT;
     }
     memset(instance->best_probabilities, 0, (size_t)program->ctc.rows * sizeof(*instance->best_probabilities));
-    lw_avx2_fma_packed_matmul_bias_argmax_f32(
-        activation, program->ctc.packed_weights, program->ctc.bias, instance->ctc_logits,
-        instance->best_indices, 1u, program->ctc.rows, program->ctc.inner,
-        program->ctc.classes);
-    lw_avx2_ctc_emitted_softmax_contiguous_f32(
-        instance->ctc_logits, instance->best_indices, instance->best_probabilities,
-        program->ctc.rows, program->ctc.classes);
+    /* The logit tensor is never materialized: the argmax pass keeps only the
+     * per-row maximum and index, and the probability pass recomputes one row
+     * of logits per emitted step. */
+    lw_avx2_fma_packed_matmul_argmax_scores_f32(
+        activation, program->ctc.packed_weights, program->ctc.bias,
+        instance->best_indices, instance->ctc_scores, 1u, program->ctc.rows,
+        program->ctc.inner, program->ctc.classes);
+    lw_avx2_ctc_row_probabilities_f32(
+        activation, program->ctc.packed_weights, program->ctc.bias,
+        instance->best_indices, instance->ctc_scores, instance->best_probabilities,
+        program->ctc.rows, program->ctc.inner, program->ctc.classes);
     lw_set_error(error, LW_STATUS_OK, "");
     return LW_STATUS_OK;
 }

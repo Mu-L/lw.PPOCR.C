@@ -66,4 +66,10 @@ lw_status lw_rec_ctc_decode_greedy_known_capacity_f32(
 lw_status lw_recognizer_clone(const lw_recognizer* source, lw_recognizer** out_recognizer,
                               lw_error* error);
 
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+/* Test-only internal hook: disable the compiled x64 REC backend so the same
+ * binary can measure canonical recognizer timing. */
+void lw_recognizer_test_disable_x64_backend(lw_recognizer* recognizer);
+#endif
+
 #endif

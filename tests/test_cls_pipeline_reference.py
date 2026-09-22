@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import re
 import shutil
 import subprocess
@@ -24,37 +25,68 @@ def make_bgr_source(width: int, height: int, stride: int) -> tuple[np.ndarray, b
     return pixels, bytes(raw)
 
 
+def round_to_short(value: float) -> int:
+    """CvRoundToShort: round-half-even to an int16 coefficient."""
+    rounded = math.floor(value + 0.5)
+    if rounded - value == 0.5 and int(rounded) & 1:
+        rounded -= 1.0
+    return int(rounded)
+
+
 def preprocess_reference(source: np.ndarray) -> tuple[np.ndarray, int]:
+    """OpenCV-parity fixed-point keep-aspect resize + RecNorm LUT + -1 pad."""
     source_height, source_width, _ = source.shape
-    source_window_width = min(source_width, 4 * source_height)
-    output = np.empty((3, 80, 160), dtype=np.float32)
+    window_width = source_width
+    if 80 * window_width > 320 * source_height:
+        window_width = (320 * source_height) // 80
+    actual_width = min(160, (80 * window_width + source_height - 1) // source_height)
+    scale = 2048
+    offsets = np.empty(actual_width, dtype=np.int32)
+    coefficients = np.empty((actual_width, 2), dtype=np.int32)
+    for x in range(actual_width):
+        coordinate = (x + 0.5) * window_width / actual_width - 0.5
+        source_index = int(np.floor(coordinate))
+        fraction = coordinate - source_index
+        if source_index < 0:
+            source_index = 0
+            fraction = 0.0
+        if source_index >= window_width - 1:
+            source_index = window_width - 1
+            fraction = 0.0
+        offsets[x] = source_index
+        coefficients[x, 0] = round_to_short((1.0 - fraction) * scale)
+        coefficients[x, 1] = round_to_short(fraction * scale)
+    output = np.full((3, 80, 160), -1.0, dtype=np.float32)
     for output_y in range(80):
-        source_y = (output_y + 0.5) * source_height / 80.0 - 0.5
-        source_y0_raw = int(np.floor(source_y))
-        source_y1_raw = source_y0_raw + 1
-        source_y0 = min(max(source_y0_raw, 0), source_height - 1)
-        source_y1 = min(max(source_y1_raw, 0), source_height - 1)
-        weight_y = source_y - source_y0_raw
-        for output_x in range(160):
-            source_x = (output_x + 0.5) * source_window_width / 160.0 - 0.5
-            source_x0_raw = int(np.floor(source_x))
-            source_x1_raw = source_x0_raw + 1
-            source_x0 = min(max(source_x0_raw, 0), source_window_width - 1)
-            source_x1 = min(max(source_x1_raw, 0), source_window_width - 1)
-            weight_x = source_x - source_x0_raw
-            top = source[source_y0, source_x0].astype(np.float64) + (
-                source[source_y0, source_x1].astype(np.float64)
-                - source[source_y0, source_x0].astype(np.float64)
-            ) * weight_x
-            bottom = source[source_y1, source_x0].astype(np.float64) + (
-                source[source_y1, source_x1].astype(np.float64)
-                - source[source_y1, source_x0].astype(np.float64)
-            ) * weight_x
-            value = top + (bottom - top) * weight_y
-            output[:, output_y, output_x] = (
-                value * (2.0 / 255.0) - 1.0
-            ).astype(np.float32)
-    return output, 160
+        coordinate = (output_y + 0.5) * source_height / 80.0 - 0.5
+        source_y = int(np.floor(coordinate))
+        fraction = coordinate - source_y
+        beta0 = round_to_short((1.0 - fraction) * scale)
+        beta1 = round_to_short(fraction * scale)
+        source_y0 = min(max(source_y, 0), source_height - 1)
+        source_y1 = min(max(source_y + 1, 0), source_height - 1)
+        rows = []
+        for row_index in (source_y0, source_y1):
+            row = np.empty(actual_width * 3, dtype=np.int32)
+            for x in range(actual_width):
+                sx = offsets[x]
+                sx1 = min(sx + 1, window_width - 1)
+                c0 = coefficients[x, 0]
+                c1 = coefficients[x, 1]
+                for channel in range(3):
+                    row[x * 3 + channel] = (
+                        int(source[row_index, sx, channel]) * c0
+                        + int(source[row_index, sx1, channel]) * c1
+                    )
+            rows.append(row)
+        for x in range(actual_width):
+            for channel in range(3):
+                h0 = rows[0][x * 3 + channel]
+                h1 = rows[1][x * 3 + channel]
+                value = (((h0 >> 4) * beta0 >> 16) + ((h1 >> 4) * beta1 >> 16) + 2) >> 2
+                value = min(max(value, 0), 255)
+                output[channel, output_y, x] = np.float32(value * (2.0 / 255.0) - 1.0)
+    return output, actual_width
 
 class ClsPipelineReferenceTest(unittest.TestCase):
     driver: Path
@@ -139,9 +171,12 @@ class ClsPipelineReferenceTest(unittest.TestCase):
         width, height, stride = 14, 8, 14 * 3
         pixels, _ = make_bgr_source(width, height, stride)
         expected, expected_width = preprocess_reference(pixels)
-        self.assertEqual(expected_width, 160)
+        # Keep-aspect: a 14x8 crop maps to ceil(80*14/8)=140 columns and the
+        # trailing 20 columns stay at the -1 padding value.
+        self.assertEqual(expected_width, 140)
         self.assertEqual(expected.shape, (3, 80, 160))
-        self.assertTrue(np.all(np.isfinite(expected)))
+        self.assertTrue(np.all(np.isfinite(expected[:, :, :expected_width])))
+        self.assertTrue(np.all(expected[:, :, expected_width:] == -1.0))
 
     def test_left_four_h_window_ignores_tail_pixels(self) -> None:
         width, height, stride = 64, 8, 64 * 3

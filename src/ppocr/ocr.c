@@ -14,6 +14,7 @@
 #include "det_internal.h"
 #include "error_internal.h"
 #include "ocr_internal.h"
+#include "parallel_internal.h"
 #include "profile_internal.h"
 #include "rec_internal.h"
 
@@ -45,6 +46,15 @@ typedef struct lw_ocr_crop {
     uint32_t target_width;
     uint8_t scheduled;
 } lw_ocr_crop;
+
+/* Row-band job for the parallel crop phase: bands are row-disjoint output
+ * ranges with identical per-pixel math, so the phase is bit-identical to the
+ * serial crop loop. */
+typedef struct lw_ocr_crop_band {
+    uint32_t crop_index;
+    uint32_t row_begin;
+    uint32_t row_end;
+} lw_ocr_crop_band;
 
 typedef struct lw_ocr_worker_task {
     lw_ocr* ocr;
@@ -101,6 +111,11 @@ struct lw_ocr {
     uint64_t max_crop_pixels;
     uint64_t text_capacity_per_line;
     float classifier_threshold;
+    lw_thread_pool* line_pool;
+    lw_ocr_crop_band* crop_bands;
+    uint32_t crop_band_capacity;
+    uint32_t crop_band_count;
+    volatile lw_status crop_band_status;
     lw_ocr_info info;
 };
 
@@ -440,6 +455,8 @@ void lw_ocr_free(lw_ocr* ocr) {
 #if defined(_WIN32) || !defined(__EMSCRIPTEN__)
     free(ocr->worker_threads);
 #endif
+    lw_thread_pool_free(ocr->line_pool);
+    free(ocr->crop_bands);
     free(ocr->worker_tasks);
     free(ocr->crop_schedule);
     free(ocr->crops);
@@ -653,6 +670,79 @@ static void* worker_entry(void* context) {
 }
 #endif
 
+#if defined(LW_EXPERIMENTAL_PERSISTENT_LINE_POOL)
+/* Pool callback for the persistent line workers; worker 0 runs on the
+ * caller thread inside lw_thread_pool_run, the rest on pool threads. */
+static void execute_line_worker(void* context, uint32_t worker_index, uint32_t worker_count) {
+    lw_ocr* ocr = (lw_ocr*)context;
+    (void)worker_count;
+    execute_worker_task(&ocr->worker_tasks[worker_index]);
+}
+#endif
+
+#if defined(LW_EXPERIMENTAL_PARALLEL_CROP_PHASE) && !defined(LW_EXPERIMENTAL_STREAMING_CROPS)
+#define LW_OCR_CROP_ROWS_PER_BAND 16u
+
+typedef struct crop_band_context {
+    lw_ocr* ocr;
+    const uint8_t* source;
+    uint64_t source_byte_count;
+    uint32_t source_width;
+    uint32_t source_height;
+    uint32_t source_stride;
+} crop_band_context;
+
+/* Pool callback for the parallel crop phase; workers stride over the band
+ * list and write disjoint crop ranges. */
+static void execute_crop_bands(void* context_void, uint32_t worker_index,
+                               uint32_t worker_count) {
+    crop_band_context* context = (crop_band_context*)context_void;
+    lw_ocr* ocr = context->ocr;
+    uint32_t band_index;
+    for (band_index = worker_index; band_index < ocr->crop_band_count;
+         band_index += worker_count) {
+        const lw_ocr_crop_band* band = &ocr->crop_bands[band_index];
+        const lw_ocr_crop* crop = &ocr->crops[band->crop_index];
+        uint32_t band_width;
+        uint32_t band_height;
+        uint64_t band_bytes;
+        lw_status status = lw_crop_quad_bgr_u8_band(
+            context->source, context->source_byte_count, context->source_width,
+            context->source_height, context->source_stride,
+            &ocr->detected_boxes[crop->box_index], ocr->crop + (size_t)crop->offset,
+            crop->byte_count, &band_width, &band_height, &band_bytes, band->row_begin,
+            band->row_end);
+        if (status != LW_STATUS_OK && ocr->crop_band_status == LW_STATUS_OK) {
+            ocr->crop_band_status = status;
+        }
+    }
+}
+
+static lw_status ensure_crop_bands(lw_ocr* ocr, uint32_t required, lw_error* error) {
+    if (ocr->crop_band_capacity >= required) return LW_STATUS_OK;
+    {
+        uint32_t capacity = ocr->crop_band_capacity == 0u ? 64u : ocr->crop_band_capacity;
+        lw_ocr_crop_band* bands;
+        while (capacity < required) {
+            if (capacity > UINT32_MAX / 2u) {
+                lw_set_error(error, LW_STATUS_OUT_OF_BOUNDS, "OCR crop band capacity overflows");
+                return LW_STATUS_OUT_OF_BOUNDS;
+            }
+            capacity *= 2u;
+        }
+        bands = (lw_ocr_crop_band*)realloc(ocr->crop_bands,
+                                           (size_t)capacity * sizeof(*bands));
+        if (bands == NULL) {
+            lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "OCR crop band allocation failed");
+            return LW_STATUS_OUT_OF_MEMORY;
+        }
+        ocr->crop_bands = bands;
+        ocr->crop_band_capacity = capacity;
+    }
+    return LW_STATUS_OK;
+}
+#endif
+
 static lw_status run_worker_tasks(lw_ocr* ocr, const uint8_t* source, uint64_t source_byte_count,
                                   uint32_t source_width, uint32_t source_height,
                                   uint32_t source_stride, uint32_t crop_count,
@@ -739,8 +829,22 @@ static lw_status run_worker_tasks(lw_ocr* ocr, const uint8_t* source, uint64_t s
     }
 
     /* Every active worker claims the next longest remaining crop. Keep worker
-     * zero on the calling thread. If another thread cannot be created, run
-     * that worker synchronously so its reserved width-affine crop is not lost. */
+     * zero on the calling thread. The persistent pool runs the remaining
+     * workers and barriers before this returns; per-request thread creation
+     * stays as the fallback when the pool is unavailable. */
+#if defined(LW_EXPERIMENTAL_PERSISTENT_LINE_POOL)
+    if (ocr->line_pool == NULL && active_worker_count > 1u) {
+        ocr->line_pool = lw_thread_pool_create(ocr->worker_count);
+    }
+    if (ocr->line_pool != NULL) {
+        lw_thread_pool_run(ocr->line_pool, active_worker_count, execute_line_worker, ocr);
+    } else {
+        execute_worker_task(&ocr->worker_tasks[0]);
+        for (slot = 1u; slot < active_worker_count; ++slot) {
+            execute_worker_task(&ocr->worker_tasks[slot]);
+        }
+    }
+#else
     for (slot = 1u; slot < active_worker_count; ++slot) {
         uint32_t worker_index = slot;
 #if defined(_WIN32)
@@ -775,6 +879,7 @@ static lw_status run_worker_tasks(lw_ocr* ocr, const uint8_t* source, uint64_t s
         (void)pthread_join(ocr->worker_threads[worker_index], NULL);
 #endif
     }
+#endif
     if (profile != NULL) {
         uint64_t finished = lw_ocr_profile_now(profile);
         uint64_t batch_nanoseconds = finished >= started ? finished - started : 0u;
@@ -869,12 +974,14 @@ static lw_status crop_and_run_adaptive(lw_ocr* ocr, const uint8_t* source,
         uint32_t selected_width = 0u;
         uint32_t index;
         lw_ocr_crop* crop;
-#if !defined(LW_EXPERIMENTAL_STREAMING_CROPS)
+#if !defined(LW_EXPERIMENTAL_STREAMING_CROPS) && !defined(LW_EXPERIMENTAL_PARALLEL_CROP_PHASE)
         lw_detection_box* box;
         uint32_t crop_width;
         uint32_t crop_height;
         uint64_t crop_bytes;
         uint64_t crop_started;
+#endif
+#if defined(LW_EXPERIMENTAL_PARALLEL_CROP_PHASE) || !defined(LW_EXPERIMENTAL_STREAMING_CROPS)
         lw_status status;
 #endif
         for (index = 0u; index < line_count; ++index) {
@@ -908,6 +1015,33 @@ static lw_status crop_and_run_adaptive(lw_ocr* ocr, const uint8_t* source,
                 return status;
             }
         }
+#if defined(LW_EXPERIMENTAL_PARALLEL_CROP_PHASE)
+        /* Serial geometry assignment plus band-list construction; the actual
+         * rasterization runs in the parallel phase below. */
+        crop->offset = crop_used;
+        crop->scheduled = 1u;
+        ocr->crop_schedule[scheduled_count] = selected_index;
+        crop_used += crop->byte_count;
+        ++scheduled_count;
+        {
+            uint32_t unrotated_height =
+                lw_crop_quad_unrotated_height(&ocr->detected_boxes[crop->box_index]);
+            uint32_t band_row;
+            for (band_row = 0u; band_row < unrotated_height;
+                 band_row += LW_OCR_CROP_ROWS_PER_BAND) {
+                uint32_t band_end = band_row + LW_OCR_CROP_ROWS_PER_BAND;
+                if (band_end > unrotated_height) band_end = unrotated_height;
+                status = ensure_crop_bands(ocr, ocr->crop_band_count + 1u, error);
+                if (status != LW_STATUS_OK) {
+                    return status;
+                }
+                ocr->crop_bands[ocr->crop_band_count].crop_index = selected_index;
+                ocr->crop_bands[ocr->crop_band_count].row_begin = band_row;
+                ocr->crop_bands[ocr->crop_band_count].row_end = band_end;
+                ++ocr->crop_band_count;
+            }
+        }
+#else
         box = &ocr->detected_boxes[crop->box_index];
         crop_width = crop->width;
         crop_height = crop->height;
@@ -931,7 +1065,42 @@ static lw_status crop_and_run_adaptive(lw_ocr* ocr, const uint8_t* source,
         crop_used += crop_bytes;
         ++scheduled_count;
 #endif
+#endif
     }
+#if defined(LW_EXPERIMENTAL_PARALLEL_CROP_PHASE) && !defined(LW_EXPERIMENTAL_STREAMING_CROPS)
+    if (ocr->crop_band_count != 0u) {
+        crop_band_context context;
+        uint32_t band_workers;
+        uint64_t crop_started = lw_ocr_profile_now(profile);
+        ocr->crop_band_status = LW_STATUS_OK;
+        context.ocr = ocr;
+        context.source = source;
+        context.source_byte_count = source_byte_count;
+        context.source_width = source_width;
+        context.source_height = source_height;
+        context.source_stride = source_stride;
+        if (ocr->line_pool == NULL && ocr->crop_band_count > 1u) {
+            ocr->line_pool = lw_thread_pool_create(ocr->worker_count);
+        }
+        band_workers = ocr->worker_count < ocr->crop_band_count ? ocr->worker_count
+                                                                : ocr->crop_band_count;
+        if (ocr->line_pool != NULL && band_workers > 1u) {
+            lw_thread_pool_run(ocr->line_pool, band_workers, execute_crop_bands, &context);
+        } else {
+            execute_crop_bands(&context, 0u, 1u);
+        }
+        lw_ocr_profile_add_elapsed(profile == NULL ? NULL : &profile->crop_nanoseconds,
+                                   crop_started, profile);
+        {
+            lw_status band_status = ocr->crop_band_status;
+            ocr->crop_band_count = 0u;
+            if (band_status != LW_STATUS_OK) {
+                lw_set_error(error, band_status, "OCR perspective crop failed");
+                return band_status;
+            }
+        }
+    }
+#endif
     return run_worker_tasks(ocr, source, source_byte_count, source_width, source_height,
                             source_stride, line_count, profile, error);
 }
@@ -947,6 +1116,7 @@ static lw_status ocr_run_bgr_u8_impl(lw_ocr* ocr, const uint8_t* source, uint64_
     uint64_t text_used = 0u;
     uint64_t total_started;
     uint64_t output_started;
+    uint64_t crop_setup_started;
     uint32_t index;
     int capacity_query;
     lw_ocr_result output;
@@ -986,6 +1156,7 @@ static lw_status ocr_run_bgr_u8_impl(lw_ocr* ocr, const uint8_t* source, uint64_
     /* Resolve crop geometry before running REC. The private scheduler can then
      * materialize every crop in longest-first order and dynamically balance
      * the complete request across the available line workers. */
+    crop_setup_started = lw_ocr_profile_now(profile);
     for (index = 0u; index < detection.box_count; ++index) {
         lw_detection_box* box = &ocr->detected_boxes[index];
         lw_ocr_crop* crop;
@@ -1023,6 +1194,8 @@ static lw_status ocr_run_bgr_u8_impl(lw_ocr* ocr, const uint8_t* source, uint64_
         crop->scheduled = 0u;
         ++line_count;
     }
+    lw_ocr_profile_add_elapsed(profile == NULL ? NULL : &profile->crop_setup_nanoseconds,
+                               crop_setup_started, profile);
     status = crop_and_run_adaptive(ocr, source, source_byte_count, source_width, source_height,
                                    source_stride, line_count, profile, error);
     if (status != LW_STATUS_OK) {

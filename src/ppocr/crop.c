@@ -99,11 +99,27 @@ static uint8_t sample_channel(const uint8_t* source, uint32_t source_width, uint
     return (uint8_t)floor(value + 0.5);
 }
 
-lw_status lw_crop_quad_bgr_u8(const uint8_t* source, uint64_t source_byte_count,
-                              uint32_t source_width, uint32_t source_height, uint32_t source_stride,
-                              const lw_detection_box* box, uint8_t* crop, uint64_t crop_capacity,
-                              uint32_t* crop_width, uint32_t* crop_height,
-                              uint64_t* crop_byte_count) {
+lw_status lw_crop_quad_bgr_u8_band(const uint8_t* source, uint64_t source_byte_count,
+                                   uint32_t source_width, uint32_t source_height,
+                                   uint32_t source_stride, const lw_detection_box* box,
+                                   uint8_t* crop, uint64_t crop_capacity,
+                                   uint32_t* crop_width, uint32_t* crop_height,
+                                   uint64_t* crop_byte_count, uint32_t row_begin,
+                                   uint32_t row_end);
+
+uint32_t lw_crop_quad_unrotated_height(const lw_detection_box* box) {
+    crop_point points[4];
+    if (box == NULL || !load_points(box, points)) return 0u;
+    return (uint32_t)floor(point_distance(points[0], points[3]) + 0.5);
+}
+
+lw_status lw_crop_quad_bgr_u8_band(const uint8_t* source, uint64_t source_byte_count,
+                                   uint32_t source_width, uint32_t source_height,
+                                   uint32_t source_stride, const lw_detection_box* box,
+                                   uint8_t* crop, uint64_t crop_capacity,
+                                   uint32_t* crop_width, uint32_t* crop_height,
+                                   uint64_t* crop_byte_count, uint32_t row_begin,
+                                   uint32_t row_end) {
     crop_point points[4];
     uint32_t output_width;
     uint32_t output_height;
@@ -148,6 +164,8 @@ lw_status lw_crop_quad_bgr_u8(const uint8_t* source, uint64_t source_byte_count,
         return LW_STATUS_OUT_OF_BOUNDS;
     unrotated_width = (uint32_t)floor(point_distance(points[0], points[1]) + 0.5);
     unrotated_height = (uint32_t)floor(point_distance(points[0], points[3]) + 0.5);
+    if (row_begin >= row_end || row_end > unrotated_height)
+        return LW_STATUS_INVALID_ARGUMENT;
     rotate_vertical = (double)unrotated_height >= (double)unrotated_width * 1.5;
 
     /* Solve the projective mapping from normalized crop coordinates (u, v) to
@@ -172,8 +190,10 @@ lw_status lw_crop_quad_bgr_u8(const uint8_t* source, uint64_t source_byte_count,
     e = points[3].y - points[0].y + h * points[3].y;
     f = points[0].y;
     /* Sample backwards from destination to source. Backward mapping avoids
-     * holes, while bilinear sampling gives smoother character edges. */
-    for (y = 0u; y < unrotated_height; ++y) {
+     * holes, while bilinear sampling gives smoother character edges. Bands
+     * are row-disjoint output ranges with identical per-pixel math, so the
+     * parallel phase writes bit-identical crops. */
+    for (y = row_begin; y < row_end; ++y) {
         uint32_t x;
         double v = (double)y / unrotated_height;
         for (x = 0u; x < unrotated_width; ++x) {
@@ -204,6 +224,17 @@ lw_status lw_crop_quad_bgr_u8(const uint8_t* source, uint64_t source_byte_count,
     *crop_height = output_height;
     *crop_byte_count = required_bytes;
     return LW_STATUS_OK;
+}
+
+lw_status lw_crop_quad_bgr_u8(const uint8_t* source, uint64_t source_byte_count,
+                              uint32_t source_width, uint32_t source_height, uint32_t source_stride,
+                              const lw_detection_box* box, uint8_t* crop, uint64_t crop_capacity,
+                              uint32_t* crop_width, uint32_t* crop_height,
+                              uint64_t* crop_byte_count) {
+    uint32_t unrotated_height = lw_crop_quad_unrotated_height(box);
+    return lw_crop_quad_bgr_u8_band(source, source_byte_count, source_width, source_height,
+                                    source_stride, box, crop, crop_capacity, crop_width,
+                                    crop_height, crop_byte_count, 0u, unrotated_height);
 }
 
 void lw_rotate_bgr_u8_180(uint8_t* pixels, uint32_t width, uint32_t height) {

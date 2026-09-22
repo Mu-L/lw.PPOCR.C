@@ -24,6 +24,7 @@ struct lw_classifier {
     uint64_t input_element_count;
     uint64_t max_image_pixels;
     lw_classifier_info info;
+    lw_cls_preprocess_workspace preprocess_workspace;
 };
 
 static void clear_result(lw_classification_result* result) {
@@ -193,6 +194,7 @@ void lw_classifier_free(lw_classifier* classifier) {
     free(classifier->input);
     lw_session_free(classifier->session);
     lw_model_free(classifier->model);
+    lw_cls_preprocess_workspace_free(&classifier->preprocess_workspace);
     free(classifier);
 }
 
@@ -236,9 +238,16 @@ static lw_status classifier_classify_bgr_u8_impl(lw_classifier* classifier, cons
         return LW_STATUS_MEMORY_LIMIT;
     }
     started = lw_pipeline_profile_now(profile);
+#if defined(LW_EXPERIMENTAL_CLS_FIXED_POINT_RESIZE)
+    status = lw_cls_preprocess_bgr_u8_fixed(source, source_byte_count, source_width,
+                                            source_height, source_stride, classifier->input,
+                                            classifier->input_element_count, &resized_width,
+                                            &classifier->preprocess_workspace);
+#else
     status = lw_cls_preprocess_bgr_u8(source, source_byte_count, source_width, source_height,
                                       source_stride, classifier->input,
                                       classifier->input_element_count, &resized_width);
+#endif
     if (status != LW_STATUS_OK) {
         lw_set_error(error, status, "BGR source layout is invalid");
         return status;

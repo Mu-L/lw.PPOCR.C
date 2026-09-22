@@ -64,11 +64,135 @@ runs after two warmups) was:
 
 | path | median end-to-end ms | relative to canonical | arena bytes |
 | --- | ---: | ---: | ---: |
-| canonical | 125.332 | 1.000x | — |
-| compiled NHWC | 237.463 | 0.528x | 99,806,656 |
-| compiled NCHW candidate | 116.695 | 1.074x | 99,806,656 |
+| canonical | 123.774 | 1.000x | — |
+| compiled NHWC | 245.492 | 0.504x | 99,806,656 |
+| compiled NCHW candidate | 115.950 | 1.067x | 99,806,656 |
 
-The absolute values are machine-specific. The important result is that the NCHW candidate is
+The table uses the rotated-order benchmark (`order_rotated: true`); absolute values are machine-specific. The important result is that the NCHW candidate is
 currently ahead of canonical on this workload while NHWC remains a negative control. Further
 work should profile the NCHW operator mix and memory lifetime before any default-path promotion;
 the private strategy API and candidate test fixtures are not part of the public C ABI.
+
+The private target x64-rec-pointwise-layout-driver also measures every real Tiny
+Pointwise node without inserting layout conversions. It reports the existing NHWC
+kernel, packed NCHW FMA4, and the existing packed NCHW FMA8/8x8 candidate. On the
+same local machine, representative large nodes were approximately 5.99 ms NHWC,
+1.61 ms NCHW FMA4, and 1.45 ms NCHW FMA8 for a 48-to-96, 12x240 node. All FMA8
+cases are checked against the FMA4 output before timing is accepted. The whole
+layout benchmark rotates canonical/NHWC/NCHW execution order on each measured
+round and reports order_rotated: true.
+
+## v13: Release operator-mix profiling
+
+The benchmark driver now accepts a strategy argument
+(`x64-rec-backend-benchmark-driver rec.lwm [iterations] [nhwc|nchw]`), maps NCHW
+physical ops into the existing per-kind slots, and emits per-op and per-conv-shape
+breakdowns (`per_op_ns`, `conv_shapes`) plus the strategy tag. A second CTest
+entry `x64_rec_backend_benchmark_nchw` runs the NCHW leg. Runtime profiling stays
+outside the A/B timing loop (the 94bea36 design); the `lw_x64_rec_profile` struct
+remains unwritten.
+
+A local Release x64 sample (30 iterations, two warmups, rotated order) gives:
+
+| strategy | canonical ms | backend ms | speedup |
+| --- | ---: | ---: | ---: |
+| NHWC | 18.789 | 18.368 | 1.023x |
+| NCHW | 18.904 | 18.940 | 0.998x |
+
+The Release numbers do not reproduce the Debug 1.067x NCHW figure: both compiled
+strategies are at parity with canonical in Release, with NHWC slightly ahead.
+The NCHW per-kind profile (per-op loop, cache state differs from the A/B loop)
+is: pointwise 8.74 ms, unary 2.44, ctc 2.14, dense 1.85, binary 1.65, depthwise
+0.95, transpose 0.27, reduce 0.25, pool 0.19. The scalar NCHW fallbacks
+(reduce/pool/transpose/1x5 depthwise) total about 0.71 ms per frame. No FMA8
+pointwise shape family exists in the Tiny graph (largest projections are
+160-to-320), so the FMA8 selector never fires on this model. These figures are
+the pre-optimization baseline for the CTC-elision and arena-lifetime stages.
+
+## v14: lifetime-based arena reuse
+
+The compiler now lowers the graph twice. The first pass discovers value
+lifetimes (`producer`/`last_use` in physical-op space, GELU fusions, reshape
+aliases); an offline greedy-by-size planner then places every live value at
+the lowest non-overlapping 64-byte-aligned offset; the second pass embeds the
+final offsets. Values never produced by a physical op (GELU fusion
+temporaries, the CTC-excluded tail tensors, dead tensors) get no arena slot at
+all (phantom sinks). The graph input is kept exclusive for the whole run so
+the caller may rewrite it between runs. The planner mirrors the reference
+`PlanWorkspace` design.
+
+Tiny REC960 arena dropped from 99,806,656 bytes to 3,317,760 bytes for both
+strategies. A local Release x64 sample (30 repeats, rotated order, same
+session as the v13 table) gives:
+
+| strategy | canonical ms | backend ms | speedup | arena bytes |
+| --- | ---: | ---: | ---: | ---: |
+| NHWC | 18.964 | 16.259 | 1.166x | 3,317,760 |
+| NCHW | 18.964 | 17.208 | 1.102x | 3,317,760 |
+
+The v13 NHWC/NCHW figures were 1.023x / 0.998x at 99.8 MiB: removing the
+monotonic-arena cache pressure bought roughly 0.10-0.14x end-to-end. The
+layout benchmark now asserts `arena_bytes <= 10 MiB` as a regression guard;
+all correctness gates (`x64_rec_backend_nchw` 1e-3/1e-5, `contract`,
+`execution` 1e-6, both benchmark entries) pass with the reuse planner.
+
+## v15: CTC logits elision
+
+The terminal CTC projection no longer materializes the [rows x classes] logit
+tensor. `lw_avx2_fma_packed_matmul_argmax_scores_f32` (mirroring the reference
+`MatMulArgMaxPackedAvx`) keeps only the per-row running max and its column
+index across 16-wide packed panels (vector strict-greater replace, ties to the
+lower index, scalar tail on the final partial panel) and writes
+`best_indices` plus a per-row `scores` buffer. `lw_avx2_ctc_row_probabilities_f32`
+(mirroring `SoftmaxMaximumProbability`) recomputes one row of logits per
+emitted step — a single packed matvec — and folds the softmax denominator into
+the same pass with the same 8-lane batches and per-lane accumulation order as
+the previous stored-logits kernel, so emitted probabilities stay bit-comparable
+(the 1e-6 execution gate still passes). Blank and repeated rows keep their
+zero-initialized probability contract. The instance buffer shrinks from
+rows*classes floats (~1.1 MiB) to rows floats; the shared canonical kernel is
+untouched (the backend uses the two new kernels).
+
+Local Release x64 sample (30 repeats): the NCHW `backend_ctc_ms` dropped from
+2.14 ms to 1.19 ms, and the end-to-end ratios improved to 1.165x (NCHW,
+backend benchmark) / 1.267x (NHWC, layout benchmark) on the same machine.
+
+## v16: recognizer-level NCHW integration and measurement
+
+The production recognizer now prefers the NCHW strategy at width 960 (still
+gated by `LW_EXPERIMENTAL_AVX2_FAST_PATH`): `lw_x64_rec_backend_compile_ex`
+with `LW_X64_REC_COMPILE_NCHW` is tried first and falls back to the NHWC
+wrapper for graphs the NCHW strategy cannot lower. The preprocess branch picks
+the planar `lw_rec_preprocess_bgr_u8` or the `_nhwc` variant from
+`program->backend_layout`. Runtime-failure behavior is unchanged (error
+returned, no silent canonical fallback). `lw_recognizer_clone` still runs
+canonical at width 960. A test-only hook
+`lw_recognizer_test_disable_x64_backend` (declared in `rec_internal.h` under
+the fast-path gate) lets the new `x64-rec-recognizer-benchmark-driver` measure
+both legs of the full recognizer path (preprocess + run + CTC decode) in one
+binary; it reports rotated-order medians and compares decoded text. The CTest
+entry is `x64_rec_recognizer_benchmark`.
+
+Local Release x64 measurements after v15 (same machine):
+
+| leg | ratio | notes |
+| --- | ---: | --- |
+| recognizer benchmark (NCHW) | 1.157x | text_match=true, 20 repeats |
+| layout benchmark (NCHW) | 1.171x | 30 repeats, rotated order |
+| backend benchmark (NCHW) | 1.165x | 30 repeats |
+| layout benchmark (NHWC) | 1.267x | negative-control leg |
+
+`full_ocr_golden_corpus` passes with the NCHW backend on the production
+recognizer path (exact text match against the manifest, recognizer width 960),
+and all nine `x64_rec*` CTest entries pass. This satisfies the proposed
+promotion gate (>= 1.05x Release recognizer-level and layout speedup, golden
+corpus text-exact, all gates green, arena at 3.3 MiB well below the 99.8 MiB
+baseline).
+
+The promotion is applied: `LW_EXPERIMENTAL_AVX2_FAST_PATH` now defaults to ON
+(option description updated to the compiled NCHW REC backend). The option is
+only wired for x86/x64 non-Emscripten builds, so ARM64, LoongArch, and web
+builds keep the canonical path; the recognizer falls back to canonical for
+widths other than 960, for graphs the NCHW strategy cannot lower (NHWC
+wrapper), and on runtime failure. The full build (193 targets) and the
+eleven REC-related CTest entries pass with the new default.

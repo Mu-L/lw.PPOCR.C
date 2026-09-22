@@ -82,9 +82,14 @@ class StagedPackageTest(unittest.TestCase):
         self.assertEqual(component["purl"], component["bom-ref"])
         dependency_refs = {item["ref"] for item in sbom["dependencies"]}
         self.assertIn(component["bom-ref"], dependency_refs)
-        consumer = consumer_build / ("Release" if sys.platform == "win32" else "") / (
+        consumer_name = (
             "lw-abi-v1-consumer.exe" if sys.platform == "win32" else "lw-abi-v1-consumer"
         )
+        consumer = consumer_build / consumer_name
+        if not consumer.is_file() and sys.platform == "win32":
+            # Multi-config generators put executables under Release/; Ninja
+            # single-config builds place them at the consumer build root.
+            consumer = consumer_build / "Release" / consumer_name
         self.assertTrue(consumer.is_file(), f"missing package consumer: {consumer}")
         consumer_env = os.environ.copy()
         library_dir = root / ("bin" if sys.platform == "win32" else "lib")

@@ -76,6 +76,11 @@ typedef enum lw_x64_rec_pointwise_kernel {
     LW_X64_REC_PW_2X32 = 3
 } lw_x64_rec_pointwise_kernel;
 
+typedef enum lw_x64_rec_nchw_pointwise_kernel {
+    LW_X64_REC_NCHW_PW_FMA4 = 0,
+    LW_X64_REC_NCHW_PW_FMA8 = 1
+} lw_x64_rec_nchw_pointwise_kernel;
+
 typedef enum lw_x64_rec_broadcast_kind {
     LW_X64_REC_BROADCAST_SAME = 0,
     LW_X64_REC_BROADCAST_RIGHT_SCALAR = 1,
@@ -107,7 +112,8 @@ typedef struct lw_x64_rec_conv_op {
     const float* bias;
     uint8_t scalar_fallback;
     uint8_t pointwise_kernel;
-    uint16_t conv_reserved;
+    uint8_t nchw_pointwise_kernel;
+    uint8_t conv_reserved;
     uint32_t input_channels;
     uint32_t output_channels;
     uint32_t input_height;
@@ -296,7 +302,7 @@ typedef struct lw_x64_rec_instance {
     const lw_x64_rec_program* program;
     uint8_t* arena;
     uint8_t* scratch;
-    float* ctc_logits;
+    float* ctc_scores;
     uint32_t* best_indices;
     float* best_probabilities;
     lw_x64_rec_profile profile;

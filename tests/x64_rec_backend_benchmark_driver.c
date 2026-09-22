@@ -64,6 +64,19 @@ static int parse_iterations(const char* text, uint32_t* value) {
     return 1;
 }
 
+static int parse_strategy(const char* text, lw_x64_rec_compile_strategy* value) {
+    if (text == NULL || value == NULL) return 0;
+    if (strcmp(text, "nhwc") == 0) {
+        *value = LW_X64_REC_COMPILE_NHWC;
+        return 1;
+    }
+    if (strcmp(text, "nchw") == 0) {
+        *value = LW_X64_REC_COMPILE_NCHW;
+        return 1;
+    }
+    return 0;
+}
+
 static double median(double* values, uint32_t count) {
     uint32_t i;
     uint32_t j;
@@ -140,9 +153,12 @@ static int run_canonical(lw_session* session, const uint8_t* source, uint64_t so
 
 static uint32_t profile_slot(uint16_t kind) {
     switch (kind) {
-    case LW_X64_REC_OP_POINTWISE: return 0u;
-    case LW_X64_REC_OP_DENSE: return 1u;
-    case LW_X64_REC_OP_DEPTHWISE: return 2u;
+    case LW_X64_REC_OP_POINTWISE:
+    case LW_X64_REC_OP_POINTWISE_NCHW: return 0u;
+    case LW_X64_REC_OP_DENSE:
+    case LW_X64_REC_OP_STEM_NCHW: return 1u;
+    case LW_X64_REC_OP_DEPTHWISE:
+    case LW_X64_REC_OP_DEPTHWISE_NCHW: return 2u;
     case LW_X64_REC_OP_AFFINE: return 3u;
     case LW_X64_REC_OP_ADD:
     case LW_X64_REC_OP_MUL:
@@ -168,8 +184,13 @@ static int run_backend_unprofiled(lw_x64_rec_program* program, lw_x64_rec_instan
     lw_status status;
     uint64_t start = clock_ns();
     lw_error_init(&error);
-    status = lw_rec_preprocess_bgr_u8_nhwc(source, source_bytes, width, height, width * 3u, 960u,
-                                           input, input_count, &resized_width);
+    if (program->backend_layout == LW_X64_REC_BACKEND_NCHW) {
+        status = lw_rec_preprocess_bgr_u8(source, source_bytes, width, height, width * 3u, 960u,
+                                          input, input_count, &resized_width);
+    } else {
+        status = lw_rec_preprocess_bgr_u8_nhwc(source, source_bytes, width, height, width * 3u, 960u,
+                                               input, input_count, &resized_width);
+    }
     if (status != LW_STATUS_OK) {
         fprintf(stderr, "backend preprocess failed: %s\n", error.message);
         return 0;
@@ -200,14 +221,20 @@ static int run_backend_profiled(lw_x64_rec_program* program, lw_x64_rec_instance
                       const uint8_t* source, uint64_t source_bytes, float* input,
                       uint64_t input_count, uint32_t width, uint32_t height,
                       double* preprocess_ms, double* backbone_ms, double* ctc_ms,
-                      double* category_totals_ms, double* profile_ctc_total_ms) {
+                      double* category_totals_ms, double* profile_ctc_total_ms,
+                      double* per_op_samples) {
     uint32_t resized_width = 0u;
     lw_error error;
     lw_status status;
     uint64_t start = clock_ns();
     lw_error_init(&error);
-    status = lw_rec_preprocess_bgr_u8_nhwc(source, source_bytes, width, height, width * 3u, 960u,
-                                           input, input_count, &resized_width);
+    if (program->backend_layout == LW_X64_REC_BACKEND_NCHW) {
+        status = lw_rec_preprocess_bgr_u8(source, source_bytes, width, height, width * 3u, 960u,
+                                          input, input_count, &resized_width);
+    } else {
+        status = lw_rec_preprocess_bgr_u8_nhwc(source, source_bytes, width, height, width * 3u, 960u,
+                                               input, input_count, &resized_width);
+    }
     if (status != LW_STATUS_OK) {
         fprintf(stderr, "backend preprocess failed: %s\n", error.message);
         return 0;
@@ -221,9 +248,12 @@ static int run_backend_profiled(lw_x64_rec_program* program, lw_x64_rec_instance
             fprintf(stderr, "backend op %u failed: %s\n", op_index, error.message);
             return 0;
         }
-        if (category_totals_ms != NULL) {
-            category_totals_ms[profile_slot(program->ops[op_index].kind)] +=
-                (double)(clock_ns() - op_start) / 1000000.0;
+        {
+            double op_ms = (double)(clock_ns() - op_start) / 1000000.0;
+            if (category_totals_ms != NULL) {
+                category_totals_ms[profile_slot(program->ops[op_index].kind)] += op_ms;
+            }
+            if (per_op_samples != NULL) per_op_samples[op_index] += op_ms;
         }
     }
     if (backbone_ms != NULL) *backbone_ms = (double)(clock_ns() - start) / 1000000.0;
@@ -244,6 +274,113 @@ static int run_backend_profiled(lw_x64_rec_program* program, lw_x64_rec_instance
     }
     return 1;
 }
+static const char* kind_name(uint16_t kind) {
+    switch (kind) {
+    case LW_X64_REC_OP_DENSE: return "dense";
+    case LW_X64_REC_OP_POINTWISE: return "pointwise";
+    case LW_X64_REC_OP_DEPTHWISE: return "depthwise";
+    case LW_X64_REC_OP_POINTWISE_NCHW: return "pointwise_nchw";
+    case LW_X64_REC_OP_STEM_NCHW: return "stem_nchw";
+    case LW_X64_REC_OP_DEPTHWISE_NCHW: return "depthwise_nchw";
+    case LW_X64_REC_OP_AFFINE: return "affine";
+    case LW_X64_REC_OP_ADD: return "add";
+    case LW_X64_REC_OP_MUL: return "mul";
+    case LW_X64_REC_OP_DIV: return "div";
+    case LW_X64_REC_OP_RELU: return "relu";
+    case LW_X64_REC_OP_ERF: return "erf";
+    case LW_X64_REC_OP_GELU: return "gelu";
+    case LW_X64_REC_OP_HARD_SIGMOID: return "hard_sigmoid";
+    case LW_X64_REC_OP_REDUCE_MEAN: return "reduce_mean";
+    case LW_X64_REC_OP_AVG_POOL: return "avg_pool";
+    case LW_X64_REC_OP_MAX_POOL: return "max_pool";
+    case LW_X64_REC_OP_TRANSPOSE: return "transpose";
+    case LW_X64_REC_OP_MATMUL: return "matmul";
+    case LW_X64_REC_OP_CONCAT: return "concat";
+    case LW_X64_REC_OP_RESIZE: return "resize";
+    default: return "unknown";
+    }
+}
+
+static const char* conv_kernel_tag(const lw_x64_rec_op* op) {
+    switch (op->kind) {
+    case LW_X64_REC_OP_POINTWISE_NCHW:
+        return op->data.conv.nchw_pointwise_kernel == LW_X64_REC_NCHW_PW_FMA8
+                   ? "fma8"
+                   : "fma4";
+    case LW_X64_REC_OP_STEM_NCHW:
+        return "packed3x3s2";
+    case LW_X64_REC_OP_DEPTHWISE_NCHW:
+        if (op->data.conv.kernel_h == 1u && op->data.conv.kernel_w == 5u) return "scalar1x5";
+        if (op->data.conv.stride_h == 2u && op->data.conv.stride_w == 1u) return "simd3x3s2x1";
+        return "simd3x3unit";
+    case LW_X64_REC_OP_POINTWISE:
+        switch (op->data.conv.pointwise_kernel) {
+        case LW_X64_REC_PW_2X32: return "2x32";
+        case LW_X64_REC_PW_4X16: return "4x16";
+        case LW_X64_REC_PW_3X32: return "3x32";
+        default: return "6x16";
+        }
+    case LW_X64_REC_OP_DENSE: return "dense_packed";
+    case LW_X64_REC_OP_DEPTHWISE: return "depthwise_nhwc";
+    default: return "none";
+    }
+}
+
+static int is_conv_kind(uint16_t kind) {
+    return kind == LW_X64_REC_OP_POINTWISE || kind == LW_X64_REC_OP_DENSE ||
+           kind == LW_X64_REC_OP_DEPTHWISE || kind == LW_X64_REC_OP_POINTWISE_NCHW ||
+           kind == LW_X64_REC_OP_STEM_NCHW || kind == LW_X64_REC_OP_DEPTHWISE_NCHW;
+}
+
+typedef struct shape_aggregate {
+    uint16_t kind;
+    const char* kernel;
+    uint32_t input_channels;
+    uint32_t output_channels;
+    uint32_t height;
+    uint32_t width;
+    double total_ms;
+    uint32_t count;
+} shape_aggregate;
+
+static uint32_t aggregate_conv_shapes(const lw_x64_rec_program* program,
+                                      const double* per_op_samples,
+                                      uint32_t profile_count,
+                                      shape_aggregate* aggregates) {
+    uint32_t index;
+    uint32_t count = 0u;
+    for (index = 0u; index < program->op_count; ++index) {
+        const lw_x64_rec_op* op = &program->ops[index];
+        const char* kernel;
+        uint32_t a;
+        if (!is_conv_kind(op->kind)) continue;
+        kernel = conv_kernel_tag(op);
+        for (a = 0u; a < count; ++a) {
+            if (aggregates[a].kind == op->kind &&
+                strcmp(aggregates[a].kernel, kernel) == 0 &&
+                aggregates[a].input_channels == op->data.conv.input_channels &&
+                aggregates[a].output_channels == op->data.conv.output_channels &&
+                aggregates[a].height == op->data.conv.input_height &&
+                aggregates[a].width == op->data.conv.input_width) {
+                break;
+            }
+        }
+        if (a == count) {
+            aggregates[count].kind = op->kind;
+            aggregates[count].kernel = kernel;
+            aggregates[count].input_channels = op->data.conv.input_channels;
+            aggregates[count].output_channels = op->data.conv.output_channels;
+            aggregates[count].height = op->data.conv.input_height;
+            aggregates[count].width = op->data.conv.input_width;
+            ++count;
+        }
+        aggregates[a].total_ms += per_op_samples[index];
+        ++aggregates[a].count;
+    }
+    (void)profile_count;
+    return count;
+}
+
 static void count_conv_paths(const lw_x64_rec_program* program,
                              uint32_t* pointwise_ops, uint32_t* dense_ops,
                              uint32_t* depthwise_ops, uint32_t* pointwise_fallbacks,
@@ -254,18 +391,27 @@ static void count_conv_paths(const lw_x64_rec_program* program,
     if (program != NULL) {
         for (index = 0u; index < program->op_count; ++index) {
             const lw_x64_rec_op* op = &program->ops[index];
-            if (op->kind == LW_X64_REC_OP_POINTWISE) {
+            if (op->kind == LW_X64_REC_OP_POINTWISE || op->kind == LW_X64_REC_OP_POINTWISE_NCHW) {
                 ++pointwise;
-                if (op->data.conv.scalar_fallback ||
-                    (op->data.conv.activation != LW_NHWC_ACT_NONE &&
-                     op->data.conv.activation != LW_NHWC_ACT_RELU &&
-                     op->data.conv.activation != LW_NHWC_ACT_HARDSWISH)) ++pointwise_fallback;
-            } else if (op->kind == LW_X64_REC_OP_DENSE) {
+                if (op->kind == LW_X64_REC_OP_POINTWISE &&
+                    (op->data.conv.scalar_fallback ||
+                     (op->data.conv.activation != LW_NHWC_ACT_NONE &&
+                      op->data.conv.activation != LW_NHWC_ACT_RELU &&
+                      op->data.conv.activation != LW_NHWC_ACT_HARDSWISH))) ++pointwise_fallback;
+            } else if (op->kind == LW_X64_REC_OP_DENSE || op->kind == LW_X64_REC_OP_STEM_NCHW) {
                 ++dense;
-                if (op->data.conv.scalar_fallback) ++dense_fallback;
-            } else if (op->kind == LW_X64_REC_OP_DEPTHWISE) {
+                if (op->kind == LW_X64_REC_OP_DENSE && op->data.conv.scalar_fallback) {
+                    ++dense_fallback;
+                }
+            } else if (op->kind == LW_X64_REC_OP_DEPTHWISE ||
+                       op->kind == LW_X64_REC_OP_DEPTHWISE_NCHW) {
                 ++depthwise;
-                if ((op->data.conv.input_channels & 7u) != 0u) ++depthwise_fallback;
+                if (op->kind == LW_X64_REC_OP_DEPTHWISE) {
+                    if ((op->data.conv.input_channels & 7u) != 0u) ++depthwise_fallback;
+                } else if (op->data.conv.kernel_h == 1u && op->data.conv.kernel_w == 5u) {
+                    /* NCHW 1x5 depthwise runs the scalar conv2d path */
+                    ++depthwise_fallback;
+                }
             }
         }
     }
@@ -281,6 +427,7 @@ int main(int argc, char** argv) {
     const uint32_t width = 960u;
     const uint32_t height = 48u;
     uint32_t iterations = DEFAULT_ITERATIONS;
+    lw_x64_rec_compile_strategy strategy = LW_X64_REC_COMPILE_NHWC;
     uint64_t source_bytes = (uint64_t)width * height * 3u;
     uint64_t input_count = (uint64_t)width * height * 3u;
     lw_model* model = NULL;
@@ -302,6 +449,9 @@ int main(int argc, char** argv) {
     double* backend_ctc_samples = NULL;
     double category_totals_ms[11] = {0.0};
     double profile_ctc_total_ms = 0.0;
+    double* per_op_samples = NULL;
+    shape_aggregate* aggregates = NULL;
+    uint32_t aggregate_count = 0u;
     uint32_t profile_count = 0u;
     uint32_t pointwise_ops = 0u;
     uint32_t dense_ops = 0u;
@@ -314,8 +464,9 @@ int main(int argc, char** argv) {
     uint32_t iteration;
     int result = 1;
 
-    if (argc > 3 || (argc == 3 && !parse_iterations(argv[2], &iterations))) {
-        fprintf(stderr, "usage: x64-rec-backend-benchmark-driver rec.lwm [iterations]\n");
+    if (argc > 4 || (argc >= 3 && !parse_iterations(argv[2], &iterations)) ||
+        (argc == 4 && !parse_strategy(argv[3], &strategy))) {
+        fprintf(stderr, "usage: x64-rec-backend-benchmark-driver rec.lwm [iterations] [nhwc|nchw]\n");
         return 2;
     }
     lw_error_init(&error);
@@ -334,7 +485,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "canonical session create failed: %s\n", error.message);
         goto cleanup;
     }
-    if (lw_x64_rec_backend_compile(model, width, &program, &error) != LW_X64_REC_COMPILE_OK ||
+    if (lw_x64_rec_backend_compile_ex(model, width, strategy, &program, &error) !=
+            LW_X64_REC_COMPILE_OK ||
         program == NULL || program->unsupported_nodes != 0u) {
         fprintf(stderr, "backend compile failed: %s\n", error.message);
         goto cleanup;
@@ -343,6 +495,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "backend instance create failed: %s\n", error.message);
         goto cleanup;
     }
+    per_op_samples = (double*)calloc((size_t)program->op_count, sizeof(double));
+    aggregates = (shape_aggregate*)calloc((size_t)program->op_count, sizeof(shape_aggregate));
     backend_input = lw_x64_rec_instance_input(instance, &input_count);
     source = (uint8_t*)malloc((size_t)source_bytes);
     canonical_input = (float*)malloc((size_t)input_count * sizeof(float));
@@ -358,7 +512,8 @@ int main(int argc, char** argv) {
         canonical_indices == NULL || canonical_probabilities == NULL ||
         canonical_samples == NULL || backend_samples == NULL ||
         canonical_preprocess_samples == NULL || backend_preprocess_samples == NULL ||
-        backend_backbone_samples == NULL || backend_ctc_samples == NULL) {
+        backend_backbone_samples == NULL || backend_ctc_samples == NULL ||
+        per_op_samples == NULL || aggregates == NULL) {
         fprintf(stderr, "benchmark allocation failed\n");
         goto cleanup;
     }
@@ -419,7 +574,8 @@ int main(int argc, char** argv) {
         double ignored;
         if (!run_backend_profiled(program, instance, source, source_bytes, backend_input,
                                   input_count, width, height, &ignored, &ignored, &ignored,
-                                  category_totals_ms, &profile_ctc_total_ms) ||
+                                  category_totals_ms, &profile_ctc_total_ms,
+                                  per_op_samples) ||
             !compare_ctc(canonical_indices, canonical_probabilities, instance->best_indices,
                          instance->best_probabilities, program->time_steps, NULL)) {
             goto cleanup;
@@ -435,7 +591,9 @@ int main(int argc, char** argv) {
         double backend_preprocess = median(backend_preprocess_samples, sample_count);
         double backend_backbone = median(backend_backbone_samples, sample_count);
         double backend_ctc = median(backend_ctc_samples, sample_count);
-        printf("{\"schema_version\":1,\"width\":%u,\"iterations\":%u,\"warmup\":%u,"
+        uint32_t index;
+        uint32_t a;
+        printf("{\"schema_version\":1,\"strategy\":\"%s\",\"width\":%u,\"iterations\":%u,\"warmup\":%u,"
                "\"canonical_ms\":%.6f,\"backend_ms\":%.6f,\"speedup\":%.6f,"
                "\"canonical_preprocess_ms\":%.6f,\"backend_preprocess_ms\":%.6f,"
                "\"backend_backbone_ms\":%.6f,\"backend_ctc_ms\":%.6f,\"backend_graph_ms\":%.6f,"
@@ -445,9 +603,8 @@ int main(int argc, char** argv) {
                "\"transpose\":%.6f,\"matmul\":%.6f,\"ctc\":%.6f},"
                "\"physical_ops\":%u,\"semantic_nodes\":%u,\"arena_bytes\":%llu,"
                "\"scratch_bytes\":%llu,\"unsupported_nodes\":%u,"
-               "\"pointwise_ops\":%u,\"dense_ops\":%u,\"depthwise_ops\":%u,"
-               "\"pointwise_fallbacks\":%u,\"dense_fallbacks\":%u,\"depthwise_fallbacks\":%u,"
-               "\"scalar_conv_fallbacks\":%u,\"text_match\":true}\n",
+               "\"per_op_ns\":[",
+                strategy == LW_X64_REC_COMPILE_NCHW ? "nchw" : "nhwc",
                 width, sample_count, WARMUP_ROUNDS, canonical_median, backend_median, speedup,
                 canonical_preprocess, backend_preprocess, backend_backbone, backend_ctc,
                 backend_backbone + backend_ctc, profile_count,
@@ -459,7 +616,28 @@ int main(int argc, char** argv) {
                 profile_ctc_total_ms / profile_count,
                 program->op_count, program->semantic_consumed + (program->ctc_fused ? 3u : 0u),
                 (unsigned long long)program->arena_bytes,
-                (unsigned long long)program->scratch_bytes, program->unsupported_nodes,
+                (unsigned long long)program->scratch_bytes, program->unsupported_nodes);
+        for (index = 0u; index < program->op_count; ++index) {
+            const lw_x64_rec_op* op = &program->ops[index];
+            printf("%s{\"index\":%u,\"kind\":\"%s\",\"kernel\":\"%s\",\"ns\":%.1f}",
+                   index == 0u ? "" : ",",
+                   index, kind_name(op->kind), conv_kernel_tag(op),
+                   per_op_samples[index] / (double)profile_count * 1000000.0);
+        }
+        aggregate_count = aggregate_conv_shapes(program, per_op_samples, profile_count, aggregates);
+        printf("],\"conv_shapes\":[");
+        for (a = 0u; a < aggregate_count; ++a) {
+            const shape_aggregate* entry = &aggregates[a];
+            printf("%s{\"kind\":\"%s\",\"kernel\":\"%s\",\"shape\":[%u,%u,%u,%u],"
+                   "\"count\":%u,\"total_ns\":%.1f}",
+                   a == 0u ? "" : ",",
+                   kind_name(entry->kind), entry->kernel, entry->input_channels,
+                   entry->output_channels, entry->height, entry->width, entry->count,
+                   entry->total_ms / (double)profile_count * 1000000.0);
+        }
+        printf("],\"pointwise_ops\":%u,\"dense_ops\":%u,\"depthwise_ops\":%u,"
+               "\"pointwise_fallbacks\":%u,\"dense_fallbacks\":%u,\"depthwise_fallbacks\":%u,"
+               "\"scalar_conv_fallbacks\":%u,\"text_match\":true}\n",
                 pointwise_ops, dense_ops, depthwise_ops, pointwise_fallbacks,
                 dense_fallbacks, depthwise_fallbacks,
                 pointwise_fallbacks + dense_fallbacks + depthwise_fallbacks);
@@ -467,6 +645,8 @@ int main(int argc, char** argv) {
     result = 0;
 
 cleanup:
+    free(aggregates);
+    free(per_op_samples);
     free(backend_ctc_samples);
     free(backend_backbone_samples);
     free(backend_preprocess_samples);

@@ -5,9 +5,19 @@
   "orientation_contract": {
     "schema_version": 1,
     "box_order": "top_left_top_right_bottom_right_bottom_left",
-    "supported_source_orientations": ["upright", "rotated_90_counterclockwise"],
-    "supported_reading_orders": ["horizontal_ltr", "vertical_rtl", "vertical_ltr"],
-    "classifier_rotation_degrees": [0, 180],
+    "supported_source_orientations": [
+      "upright",
+      "rotated_90_counterclockwise"
+    ],
+    "supported_reading_orders": [
+      "horizontal_ltr",
+      "vertical_rtl",
+      "vertical_ltr"
+    ],
+    "classifier_rotation_degrees": [
+      0,
+      180
+    ],
     "tall_crop_canonicalization_degrees": 90
   },
   "source_sha256": "30c417c9f758a3b62718729f5a944f7d2e10cdd2bde0e8ce6785523ddb68ffe9",
@@ -22,12 +32,12 @@
       "纯臻营养护发素",
       "产品信息/参数",
       "(45元/每公斤，100公斤起订)",
-      "每瓶22元，1000瓶起订)",
+      "每瓶22元，1000瓶起订）",
       "【品牌】：代加工方式/OEM ODM",
       "【品名】：纯臻营养护发素",
       "【产品编号】：YM-X-3011",
       "ODM OEM",
-      "【净含量】：220ml",
+      "【净含量】:220ml",
       "【适用人群】：适合所有肤质",
       "【主要成分】：鲸蜡硬脂醇、燕麦β-葡聚",
       "糖、椰油酰胺丙基甜菜碱、泛醌",
@@ -40,12 +50,12 @@
       "纯臻营养护发素",
       "产品信息/参数",
       "(45元/每公斤，100公斤起订)",
-      "每瓶22元，1000瓶起订)",
+      "每瓶22元，1000瓶起订）",
       "【品牌】：代加工方式/OEM ODM",
       "【品名】：纯臻营养护发素",
       "【产品编号】：YM-X-3011",
-      "IO",
-      "【净含量】：220ml",
+      "OWI0",
+      "【净含量】:220ml",
       "【适用人群】：适合所有肤质",
       "【主要成分】：鲸蜡硬脂醇、燕麦β-葡聚",
       "糖、椰油酰胺丙基甜菜碱、泛醌",
@@ -58,15 +68,15 @@
       "纯臻营养护发素",
       "产品信息/参数",
       "(45元/每公斤，100公斤起订)",
-      "每瓶22元，1000瓶起订）",
+      "每瓶22元，1000瓶起订)",
       "【品牌】：代加工方式/OEM ODM",
       "【品名】：纯臻营养护发素",
       "【产品编号】：YM-X-3011",
       "WEONCO",
       "【净含量】：220ml",
       "【适用人群】：适合所有肤质",
-      "【主要成分】：鲸蜡硬脂醇、燕麦β-葡照",
-      "糙、椰油酰胺丙基甜菜减、泛醌",
+      "【主要成分】：鲸蜡硬脂醇、燕麦β-葡聚",
+      "糖、椰油酰胺丙基甜菜减、泛醌",
       "(成品包材)",
       "【主要功能】：可紧致头发磷层，从而达到",
       "即时持久改善头发光泽的效果，给干燥的头",
@@ -94,12 +104,12 @@
       "纯臻营养护发素",
       "产品信息/参数",
       "(45元/每公斤，100公斤起订)",
-      "每瓶22元，1000瓶起订）",
+      "每瓶22元，1000瓶起订)",
       "【品牌】：代加工方式/OEM ODM",
       "【品名】：纯臻营养护发素",
       "【产品编号】：YM-X-3011",
-      "ODM OEN",
-      "【净含量】：220ml",
+      "ODM OEM",
+      "【净含量】:220ml",
       "【适用人群】：适合所有肤质",
       "【主要成分】：鲸蜡硬脂醇、燕麦β-葡聚",
       "糖、椰油酰胺丙基甜菜碱、泛醌",
@@ -109,19 +119,19 @@
       "发足够的滋养"
     ],
     "rotated_90": [
-      "(成品包材）",
+      "(成品包材",
       "ODM OEM",
-      "【主要功能】：可紧致头发磷层，从而达到",
       "即时持久改善头发光泽的效果，给干燥的头",
+      "【主要功能】：可紧致头发磷层，从而达到",
       "(45元/每公斤，100公斤起订）",
       "【主要成分】：鲸蜡硬脂醇、燕麦β-葡聚",
       "纯臻营养护发素",
       "【品牌】：代加工方式/OEM ODM",
       "每瓶22元，1000瓶起订）",
       "糖、椰油酰胺丙基甜菜碱、泛醌",
+      "【产品编号】：YM-X-3011",
       "【适用人群】：适合所有肤质",
       "【品名】：纯臻营养护发素",
-      "【产品编号】：YM-X-3011",
       "产品信息/参数",
       "【净含量】:220ml",
       "发足够的滋养"
@@ -130,20 +140,156 @@
   },
   "classification_profiles": {
     "base": {
-      "labels": [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-      "rotations": [0, 0, 0, 0, 0, 0, 0, 180, 0, 0, 0, 0, 0, 0, 0, 0]
+      "labels": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "rotations": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        180,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
     },
     "disabled": {
-      "labels": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-      "rotations": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      "labels": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "rotations": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
     },
     "nearest_375": {
-      "labels": [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-      "rotations": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      "labels": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "rotations": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
     },
     "rotated_90": {
-      "labels": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-      "rotations": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      "labels": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "rotations": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
     },
     "empty": {
       "labels": [],
@@ -152,22 +298,166 @@
   },
   "box_profiles": {
     "identity": [
-      [22.585, 33.523, 305.540, 33.523, 305.540, 72.727, 22.585, 72.727],
-      [23.152, 77.839, 175.286, 77.839, 175.286, 104.973, 23.152, 104.973],
-      [21.248, 108.748, 335.002, 108.748, 335.002, 136.564, 21.248, 136.564],
-      [24.021, 141.209, 288.479, 141.209, 288.479, 165.041, 24.021, 165.041],
-      [22.443, 174.006, 302.557, 174.006, 302.557, 197.869, 22.443, 197.869],
-      [22.523, 205.336, 236.852, 205.336, 236.852, 229.039, 22.523, 229.039],
-      [20.946, 236.571, 244.679, 236.571, 244.679, 260.304, 20.946, 260.304],
-      [411.664, 231.977, 430.523, 231.977, 430.523, 302.398, 411.664, 302.398],
-      [22.191, 269.066, 180.934, 269.066, 180.934, 288.747, 22.191, 288.747],
-      [22.498, 299.060, 254.065, 299.060, 254.065, 322.815, 22.498, 322.815],
-      [22.409, 330.222, 344.778, 330.222, 344.778, 354.153, 22.409, 354.153],
-      [22.460, 361.523, 285.352, 361.523, 285.352, 385.352, 22.460, 385.352],
-      [366.280, 363.482, 477.999, 365.810, 477.478, 390.815, 365.759, 388.487],
-      [22.397, 392.709, 363.541, 392.709, 363.541, 416.666, 22.397, 416.666],
-      [23.954, 423.954, 374.484, 423.954, 374.484, 447.921, 23.954, 447.921],
-      [24.393, 455.643, 138.107, 455.643, 138.107, 478.732, 24.393, 478.732]
+      [
+        23.0,
+        34.0,
+        305.0,
+        34.0,
+        305.0,
+        73.0,
+        23.0,
+        73.0
+      ],
+      [
+        22.0,
+        78.0,
+        175.0,
+        78.0,
+        175.0,
+        105.0,
+        22.0,
+        105.0
+      ],
+      [
+        22.0,
+        109.0,
+        334.0,
+        109.0,
+        334.0,
+        136.0,
+        22.0,
+        136.0
+      ],
+      [
+        25.0,
+        142.0,
+        288.0,
+        142.0,
+        288.0,
+        164.0,
+        25.0,
+        164.0
+      ],
+      [
+        23.0,
+        175.0,
+        303.0,
+        175.0,
+        303.0,
+        197.0,
+        23.0,
+        197.0
+      ],
+      [
+        23.0,
+        206.0,
+        236.0,
+        206.0,
+        236.0,
+        228.0,
+        23.0,
+        228.0
+      ],
+      [
+        22.0,
+        238.0,
+        244.0,
+        238.0,
+        244.0,
+        259.0,
+        22.0,
+        259.0
+      ],
+      [
+        412.0,
+        231.0,
+        430.0,
+        231.0,
+        430.0,
+        302.0,
+        412.0,
+        302.0
+      ],
+      [
+        23.0,
+        270.0,
+        180.0,
+        270.0,
+        180.0,
+        288.0,
+        23.0,
+        288.0
+      ],
+      [
+        23.0,
+        300.0,
+        255.0,
+        300.0,
+        255.0,
+        322.0,
+        23.0,
+        322.0
+      ],
+      [
+        23.0,
+        331.0,
+        344.0,
+        331.0,
+        344.0,
+        353.0,
+        23.0,
+        353.0
+      ],
+      [
+        23.0,
+        362.0,
+        284.0,
+        362.0,
+        284.0,
+        384.0,
+        23.0,
+        384.0
+      ],
+      [
+        367.0,
+        366.0,
+        477.0,
+        366.0,
+        477.0,
+        389.0,
+        367.0,
+        389.0
+      ],
+      [
+        23.0,
+        394.0,
+        362.0,
+        394.0,
+        362.0,
+        416.0,
+        23.0,
+        416.0
+      ],
+      [
+        25.0,
+        425.0,
+        373.0,
+        425.0,
+        373.0,
+        447.0,
+        25.0,
+        447.0
+      ],
+      [
+        25.0,
+        456.0,
+        138.0,
+        456.0,
+        138.0,
+        480.0,
+        25.0,
+        480.0
+      ]
     ]
   },
   "cases": [
@@ -175,31 +465,41 @@
       "name": "identity-classified",
       "source_orientation": "upright",
       "reading_order": "horizontal_ltr",
-      "transform": {"type": "identity"},
+      "transform": {
+        "type": "identity"
+      },
       "use_classifier": true,
       "detected_count": 16,
-      "detector_resize": [320, 320],
+      "detector_resize": [
+        320,
+        320
+      ],
       "text_profile": "base",
       "classification_profile": "base",
       "box_profile": "identity",
       "box_tolerance": 2.0,
-      "min_det_score": 0.70,
+      "min_det_score": 0.7,
       "min_rec_score": 0.85,
-      "min_cls_score": 0.90
+      "min_cls_score": 0.9
     },
     {
       "name": "identity-classifier-disabled",
       "source_orientation": "upright",
       "reading_order": "horizontal_ltr",
-      "transform": {"type": "identity"},
+      "transform": {
+        "type": "identity"
+      },
       "use_classifier": false,
       "detected_count": 16,
-      "detector_resize": [320, 320],
+      "detector_resize": [
+        320,
+        320
+      ],
       "text_profile": "classifier_disabled",
       "classification_profile": "disabled",
       "box_profile": "identity",
       "box_tolerance": 2.0,
-      "min_det_score": 0.70,
+      "min_det_score": 0.7,
       "min_rec_score": 0.15,
       "min_cls_score": 0.0
     },
@@ -207,29 +507,43 @@
       "name": "nearest-resize-375",
       "source_orientation": "upright",
       "reading_order": "horizontal_ltr",
-      "transform": {"type": "nearest_resize", "width": 375, "height": 375},
+      "transform": {
+        "type": "nearest_resize",
+        "width": 375,
+        "height": 375
+      },
       "use_classifier": true,
       "detected_count": 16,
-      "detector_resize": [320, 320],
+      "detector_resize": [
+        320,
+        320
+      ],
       "text_profile": "nearest_375",
       "classification_profile": "nearest_375",
-      "min_det_score": 0.70,
+      "min_det_score": 0.7,
       "min_rec_score": 0.35,
-      "min_cls_score": 0.80
+      "min_cls_score": 0.6
     },
     {
       "name": "nearest-resize-750",
       "source_orientation": "upright",
       "reading_order": "horizontal_ltr",
-      "transform": {"type": "nearest_resize", "width": 750, "height": 750},
+      "transform": {
+        "type": "nearest_resize",
+        "width": 750,
+        "height": 750
+      },
       "use_classifier": true,
       "detected_count": 16,
-      "detector_resize": [320, 320],
+      "detector_resize": [
+        320,
+        320
+      ],
       "text_profile": "nearest_750",
       "classification_profile": "base",
-      "min_det_score": 0.70,
+      "min_det_score": 0.7,
       "min_rec_score": 0.85,
-      "min_cls_score": 0.90
+      "min_cls_score": 0.9
     },
     {
       "name": "tall-canvas",
@@ -239,29 +553,44 @@
         "type": "canvas",
         "width": 500,
         "height": 600,
-        "offset": [0, 50],
-        "color": [255, 255, 255]
+        "offset": [
+          0,
+          50
+        ],
+        "color": [
+          255,
+          255,
+          255
+        ]
       },
       "use_classifier": true,
       "detected_count": 16,
-      "detector_resize": [256, 320],
+      "detector_resize": [
+        256,
+        320
+      ],
       "text_profile": "tall_canvas",
       "classification_profile": "base",
-      "min_det_score": 0.60,
+      "min_det_score": 0.6,
       "min_rec_score": 0.85,
-      "min_cls_score": 0.90
+      "min_cls_score": 0.9
     },
     {
       "name": "rotated-90-counterclockwise",
       "source_orientation": "rotated_90_counterclockwise",
       "reading_order": "horizontal_ltr",
-      "transform": {"type": "rotate_90_counterclockwise"},
+      "transform": {
+        "type": "rotate_90_counterclockwise"
+      },
       "use_classifier": true,
       "detected_count": 16,
-      "detector_resize": [320, 320],
+      "detector_resize": [
+        320,
+        320
+      ],
       "text_profile": "rotated_90",
       "classification_profile": "rotated_90",
-      "min_det_score": 0.70,
+      "min_det_score": 0.7,
       "min_rec_score": 0.85,
       "min_cls_score": 0.99
     },
@@ -273,11 +602,18 @@
         "type": "blank",
         "width": 640,
         "height": 192,
-        "color": [255, 255, 255]
+        "color": [
+          255,
+          255,
+          255
+        ]
       },
       "use_classifier": true,
       "detected_count": 0,
-      "detector_resize": [320, 96],
+      "detector_resize": [
+        320,
+        96
+      ],
       "text_profile": "empty",
       "classification_profile": "empty",
       "min_det_score": 0.0,

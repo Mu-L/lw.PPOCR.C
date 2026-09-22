@@ -6,6 +6,9 @@
 #include "det_internal.h"
 #include "error_internal.h"
 #include "executor_internal.h"
+#include "lwm_read.h"
+#include "model_internal.h"
+#include "operator_internal.h"
 #include "profile_internal.h"
 #include "session_internal.h"
 
@@ -35,6 +38,11 @@ struct lw_detector {
     uint32_t reading_order;
     lw_session_options session_options;
     lw_detector_info info;
+    lw_db_postprocess_workspace postprocess_workspace;
+    lw_det_preprocess_workspace preprocess_workspace;
+    uint8_t* padded_source;
+    uint32_t padded_width;
+    uint32_t padded_height;
 };
 
 static void clear_result(lw_detection_result* result) {
@@ -53,9 +61,11 @@ void lw_detector_options_init(lw_detector_options* options) {
     options->struct_size = (uint32_t)sizeof(*options);
     options->limit_side_length = LW_DET_DEFAULT_LIMIT_SIDE_LENGTH;
     options->max_candidates = LW_DET_DEFAULT_MAX_CANDIDATES;
-    options->bitmap_threshold = 0.3f;
-    options->box_threshold = 0.6f;
-    options->unclip_ratio = 1.6f;
+    /* Reference (SimdPaddleOCR) defaults, paired with the Clipper-style
+     * round-join unclip and the scanline PolygonScore in the postprocess. */
+    options->bitmap_threshold = 0.2f;
+    options->box_threshold = 0.45f;
+    options->unclip_ratio = 1.4f;
     options->max_model_file_size = model_options.max_file_size;
     options->max_workspace_size = session_options.max_workspace_size;
     options->max_tensor_size = session_options.max_tensor_size;
@@ -125,6 +135,28 @@ static lw_status validate_options(const lw_detector_options* options, lw_detecto
     info->unclip_ratio = values.unclip_ratio;
     info->max_image_pixels = values.max_image_pixels;
     return LW_STATUS_OK;
+}
+
+/* Tiny-family sniff: the reference treats a detector whose first Conv emits
+ * at most 16 channels as tiny and lowers its box threshold to 0.4. */
+static int model_is_tiny(const lw_model* model) {
+    uint32_t node_count;
+    uint32_t i;
+    if (model == NULL || model->node_offset == 0u || model->tensor_offset == 0u) return 0;
+    node_count = model->info.node_count;
+    for (i = 0u; i < node_count; ++i) {
+        const uint8_t* node = model->bytes + (size_t)model->node_offset +
+                              (size_t)i * LWM_V0_NODE_SIZE;
+        uint32_t output_index;
+        const uint8_t* tensor;
+        if (lwm_read_u16(node) != LW_OP_CONV) continue;
+        output_index = lwm_read_u32(node + 40u);
+        if (output_index >= model->info.tensor_count) return 0;
+        tensor = model->bytes + (size_t)model->tensor_offset +
+                 (size_t)output_index * LWM_V0_TENSOR_SIZE;
+        return lwm_read_i32(tensor + 8u + 4u) <= 16;
+    }
+    return 0;
 }
 
 static lw_status ensure_session(lw_detector* detector, uint32_t width, uint32_t height,
@@ -226,6 +258,13 @@ lw_status lw_detector_create(const char* model_path_utf8, const lw_detector_opti
     status = lw_model_load(model_path_utf8, &model_options, &detector->model, error);
     if (status != LW_STATUS_OK)
         goto fail;
+    if (detector->info.box_threshold == 0.0f ||
+        (detector->info.box_threshold == 0.45f && model_is_tiny(detector->model))) {
+        /* Auto box threshold (reference behavior): tiny detectors use 0.4,
+         * everything else 0.45. A caller explicitly setting 0.45 on a tiny
+         * model is indistinguishable from the default and also gets 0.4. */
+        detector->info.box_threshold = model_is_tiny(detector->model) ? 0.4f : 0.45f;
+    }
     status = ensure_session(detector, 32u, 32u, error);
     if (status != LW_STATUS_OK)
         goto fail;
@@ -258,6 +297,9 @@ void lw_detector_free(lw_detector* detector) {
     free(detector->input);
     lw_session_free(detector->session);
     lw_model_free(detector->model);
+    lw_db_postprocess_workspace_free(&detector->postprocess_workspace);
+    lw_det_preprocess_workspace_free(&detector->preprocess_workspace);
+    free(detector->padded_source);
     free(detector);
 }
 
@@ -338,9 +380,56 @@ static lw_status detector_detect_bgr_u8_impl(
         (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
         return status;
     }
+#if defined(LW_EXPERIMENTAL_DET_FIXED_POINT_RESIZE)
+    {
+        const uint8_t* preprocess_source = source;
+        uint32_t preprocess_width = source_width;
+        uint32_t preprocess_height = source_height;
+        uint32_t preprocess_stride = source_stride;
+        uint64_t preprocess_byte_count = source_byte_count;
+        /* Tiny-image pad: sources with w+h < 64 are zero-padded to a 32x32
+         * buffer before resize (reference behavior). The ratios stay based on
+         * the original dimensions, so the postprocess mapping is unaffected. */
+        if (source_width + source_height < 64u) {
+            uint32_t padded_width = source_width > 32u ? source_width : 32u;
+            uint32_t padded_height = source_height > 32u ? source_height : 32u;
+            uint64_t padded_bytes = (uint64_t)padded_width * padded_height * 3u;
+            uint32_t y;
+            if (detector->padded_width != padded_width ||
+                detector->padded_height != padded_height) {
+                uint8_t* padded = (uint8_t*)realloc(detector->padded_source, (size_t)padded_bytes);
+                if (padded == NULL) {
+                    lw_set_error(error, LW_STATUS_OUT_OF_MEMORY,
+                                 "tiny-image pad allocation failed");
+                    (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
+                    return LW_STATUS_OUT_OF_MEMORY;
+                }
+                detector->padded_source = padded;
+                detector->padded_width = padded_width;
+                detector->padded_height = padded_height;
+            }
+            memset(detector->padded_source, 0, (size_t)padded_bytes);
+            for (y = 0u; y < source_height; ++y) {
+                memcpy(detector->padded_source + (size_t)y * padded_width * 3u,
+                       source + (size_t)y * source_stride, (size_t)source_width * 3u);
+            }
+            preprocess_source = detector->padded_source;
+            preprocess_width = padded_width;
+            preprocess_height = padded_height;
+            preprocess_stride = padded_width * 3u;
+            preprocess_byte_count = padded_bytes;
+        }
+        status = lw_det_preprocess_bgr_u8_fixed(
+            preprocess_source, preprocess_byte_count, preprocess_width, preprocess_height,
+            preprocess_stride, resized_width, resized_height, detector->input,
+            detector->input_element_count, &detector->preprocess_workspace,
+            detector->session->thread_pool, detector->intra_op_thread_count);
+    }
+#else
     status = lw_det_preprocess_bgr_u8(source, source_byte_count, source_width, source_height,
                                       source_stride, resized_width, resized_height, detector->input,
                                       detector->input_element_count);
+#endif
     if (status != LW_STATUS_OK) {
         lw_set_error(error, status, "BGR source layout is invalid");
         (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
@@ -364,11 +453,12 @@ static lw_status detector_detect_bgr_u8_impl(
         return status;
     }
     started = lw_pipeline_profile_now(profile);
-    status = lw_db_postprocess_f32(detector->probabilities, resized_width, resized_height,
-                                   detector->info.bitmap_threshold, detector->info.box_threshold,
-                                   detector->info.unclip_ratio, detector->info.use_dilation,
-                                   detector->info.max_candidates, source_width, source_height,
-                                   width_ratio, height_ratio, boxes, box_capacity, &box_count);
+    status = lw_db_postprocess_f32_ws(detector->probabilities, resized_width, resized_height,
+                                      detector->info.bitmap_threshold, detector->info.box_threshold,
+                                      detector->info.unclip_ratio, detector->info.use_dilation,
+                                      detector->info.max_candidates, source_width, source_height,
+                                      width_ratio, height_ratio, boxes, box_capacity, &box_count,
+                                      &detector->postprocess_workspace, profile);
     lw_pipeline_profile_add_elapsed(profile == NULL ? NULL : &profile->postprocess_nanoseconds,
                                     started, profile);
     output.box_count = box_count;
