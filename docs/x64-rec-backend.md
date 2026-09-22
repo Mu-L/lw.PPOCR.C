@@ -1,30 +1,45 @@
 # x64 REC Backend
 
-这是实验性的 x64 REC 后端，不属于公开 C ABI，也不会改变现有 recognizer 的默认路径。它与历史 `x64_rec_fast_plan` 并列存在，但后端自己的编译单元不包含旧 fast-plan 头文件、布局规划器或旧执行入口。
+这是实验性的 x64 REC 后端，不属于公开 C ABI。它在 `LW_EXPERIMENTAL_AVX2_FAST_PATH=ON` 且 REC 目标宽度为 960、CPU 支持 AVX2+FMA 时由 recognizer 选择；其他平台、宽度或不满足编译契约时继续走 canonical executor。
 
-## 当前阶段
+## 当前状态
 
-当前已完成“大刀阔斧重构”的第一阶段：独立图程序和编译边界。
+Tiny REC 已完成目标宽度 960 的 standalone 可执行闭环：
 
-- `lw_x64_rec_program` 保存模型签名、目标宽度、值表、算子表和线性 arena；
-- 编译器从模型/LWM 节点表生成值生命周期元数据，不再创建旧 `lw_x64_rec_fast_plan`；
-- 所有四维激活值统一记录为 NHWC；Reshape/Squeeze/Unsqueeze/Transpose 等结构节点记录为 alias/copy 候选；
-- 编译器识别 Tiny REC 的末端 `MatMul -> Add -> MatMul -> Add -> Softmax` 结构，并通过独立 `ctc_projection_internal.c` 预打包 CTC 权重，同时记录 activation、bias、rows、inner 和 classes；
-- arena 使用 64 字节对齐、溢出检查和单调分配，先保证 physical lifetime 正确，暂不做跨值复用；
-- `x64_rec_backend_contract` 在 Tiny REC960 上验证编译结果、159 个节点、274 个值、无 generic 节点、无布局转换并成功识别 CTC 尾；合同测试还会用零激活执行一次 packed MatMul + emitted softmax/argmax 烟测。
+- `lw_x64_rec_program` 是只读图程序，保存模型签名、目标宽度、值表、物理算子表、arena/scratch 大小和 CTC 尾部描述；
+- `lw_x64_rec_instance` 独占可复用的 arena、dense scratch、CTC logits、argmax 索引和 emitted probability 缓冲区；program 不持有运行时可变工作区；
+- 四维激活值在可直接执行的物理算子间按 NHWC 保存；rank-3 序列/reshape 边界保留 canonical 的 channel-major 语义，并在必要处生成显式 repack；
+- Conv 按形状选择 pointwise、depthwise 或 dense lowering；当前执行器保留正确性优先的 scalar fallback，后续再逐算子恢复 AVX2 fast path；
+- 支持 Tiny REC 主干中的 Conv、BatchNorm、Add/Mul/Div、Relu、Erf、HardSigmoid、ReduceMean、Average/MaxPool、Transpose 和 MatMul；
+- 最末 CTC 投影由独立 `ctc_projection_internal.c` 预打包权重，执行 packed MatMul + argmax + emitted softmax，并初始化 blank/repeated 行的 probability 缓冲；
+- arena 使用 64 字节对齐和溢出检查，instance 可重复运行；当前先保证 physical lifetime 正确，尚未做跨值空间复用。
 
-## 尚未宣称完成的部分
+## 正确性门禁
 
-当前 `lw_x64_rec_instance_run_backbone()` 仍返回 `LW_STATUS_UNSUPPORTED`。Dense/Depthwise/NHWC 算子执行、CTC packed projection 和 recognizer 接入将在下一阶段逐个落地；因此本阶段不会改变生产 OCR 的结果或性能，也不会把未完成后端接入默认路径。
+`x64_rec_backend_execution` 会加载 Tiny REC960，使用确定性 BGR 输入，同时驱动 canonical backbone 与 standalone backend，逐物理算子比较 rank-4/rank-3 输出，并比较 canonical CTC greedy 与 backend 的全部索引和 probability（误差门限 `1e-6`）。`x64_rec_backend_contract` 覆盖 program/instance 创建、输入清零、执行和结构化状态输出。
 
-## 下一阶段边界
+## 边界与限制
 
-1. 把 Conv/BN/Pointwise/Depthwise/Pool/ReduceMean 的参数预打包到 program constants；
-2. 为每个 op 实现值表寻址的 NHWC executor，先覆盖 Tiny REC960；
-3. 加入独立 CTC projection（packed MatMul + emitted softmax/argmax），与 canonical executor 做逐行结果比对；
-4. 通过 Tiny960 correctness driver 后，再接 recognizer，并扩展 192/320/480/640 宽度；
-5. 最后再做 arena lifetime reuse 和 profile/benchmark，不在编译边界未稳定前声称性能收益。
+该 backend 仍是实验性实现：
+
+- 目前只在 x64 AVX2+FMA 和 Tiny REC960 上接入 recognizer；192/320/480/640 宽度矩阵、Small/Medium 模型和非 x64 后端尚未宣称覆盖；
+- 输入 API 当前要求调用方提供已经排布为 NHWC 的 `float` 输入，输出通过 program 的值表和 CTC 缓冲区读取；
+- arena 仍按所有运行时值单调分配，内存复用和 physical lifetime 压缩留在后续阶段；
+- GELU fusion、Concat/Resize 等非 Tiny REC960 必需路径暂不宣称覆盖。
 
 ## 构建与测试
 
-启用 `LW_EXPERIMENTAL_AVX2_FAST_PATH=ON` 后，构建 `x64-rec-backend-contract-driver`，运行 `x64_rec_backend_contract`。不满足 AVX2/FMA 或模型结构不完整时，调用方应继续使用 canonical recognizer。
+在 x64、AVX2+FMA 环境启用：
+
+```text
+-DLW_EXPERIMENTAL_AVX2_FAST_PATH=ON
+```
+
+构建并运行：
+
+```text
+cmake --build build --config Release --target x64-rec-backend-contract-driver x64-rec-backend-execution-driver
+ctest --test-dir build -C Release -R "x64_rec_backend_(contract|execution)" --output-on-failure
+```
+
+不满足 AVX2/FMA 或模型结构不符合当前 Tiny REC 编译契约时，调用方应继续使用 canonical recognizer。

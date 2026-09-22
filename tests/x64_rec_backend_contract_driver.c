@@ -1,15 +1,20 @@
 #include "x64_rec_backend_internal.h"
 #include "ctc_projection_internal.h"
+#include "model_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 int main(int argc, char** argv) {
     lw_model* model = NULL;
     lw_x64_rec_program* program = NULL;
+    lw_x64_rec_instance* instance = NULL;
     lw_error error;
-    float* activation = NULL;
     lw_x64_rec_compile_result result;
+    uint64_t input_elements = 0u;
+    float* input;
+
     if (argc != 2) {
         fprintf(stderr, "usage: x64-rec-backend-contract-driver rec.lwm\n");
         return 2;
@@ -26,38 +31,36 @@ int main(int argc, char** argv) {
         lw_model_free(model);
         return 1;
     }
-    printf("{\"compile_result\":%u,\"ops\":%u,\"values\":%u,\"arena_bytes\":%llu,\"generic_ops\":%u,\"layout_conversions\":%u,\"direct_nhwc\":%s,\"ctc_fused\":%s}\n",
+    printf("{\"compile_result\":%u,\"ops\":%u,\"values\":%u,\"arena_bytes\":%llu,\"scratch_bytes\":%llu,\"generic_ops\":%u,\"layout_conversions\":%u,\"direct_nhwc\":%s,\"ctc_fused\":%s}\n",
            (unsigned)result, (unsigned)program->op_count, (unsigned)program->value_count,
-           (unsigned long long)program->arena_bytes, (unsigned)program->generic_ops,
+           (unsigned long long)program->arena_bytes,
+           (unsigned long long)program->scratch_bytes, (unsigned)program->generic_ops,
            (unsigned)program->layout_conversions, program->direct_nhwc ? "true" : "false",
            program->ctc_fused ? "true" : "false");
-    activation = (float*)calloc((size_t)program->ctc.rows * program->ctc.inner, sizeof(float));
-    if (activation == NULL || lw_x64_rec_ctc_projection_run(program->ctc_projection, activation, &error) != LW_STATUS_OK) {
-        free(activation);
+    if (lw_x64_rec_instance_create(program, &instance, &error) != LW_STATUS_OK ||
+        instance == NULL) {
+        fprintf(stderr, "instance create failed: %s\n", error.message);
         lw_x64_rec_program_free(program);
         lw_model_free(model);
         return 1;
     }
-    free(activation);
-    for (uint32_t value_index = 0u; value_index < program->value_count; ++value_index) {
-        const lw_x64_rec_value* value = &program->values[value_index];
-        if (value->constant_data == NULL && value->last_use < 0 && value_index != program->output_value) {
-            lw_x64_rec_program_free(program);
-            lw_model_free(model);
-            return 1;
-        }
-        if (value->alias != 0u && value->alias_of >= program->value_count) {
-            lw_x64_rec_program_free(program);
-            lw_model_free(model);
-            return 1;
-        }
-    }
-    if (program->generic_ops != 0u ||
-        program->direct_nhwc == 0u || program->ctc_fused == 0u || program->ctc_projection == NULL) {
+    input = lw_x64_rec_instance_input(instance, &input_elements);
+    if (input == NULL || input_elements == 0u) {
+        fprintf(stderr, "instance input unavailable\n");
+        lw_x64_rec_instance_free(instance);
         lw_x64_rec_program_free(program);
         lw_model_free(model);
         return 1;
     }
+    memset(input, 0, (size_t)input_elements * sizeof(float));
+    if (lw_x64_rec_instance_run(instance, &error) != LW_STATUS_OK) {
+        fprintf(stderr, "backend execution failed: %s\n", error.message);
+        lw_x64_rec_instance_free(instance);
+        lw_x64_rec_program_free(program);
+        lw_model_free(model);
+        return 1;
+    }
+    lw_x64_rec_instance_free(instance);
     lw_x64_rec_program_free(program);
     lw_model_free(model);
     return 0;

@@ -9,6 +9,9 @@
 #include "profile_internal.h"
 #include "rec_internal.h"
 #include "session_internal.h"
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+#include "x64_rec_backend_internal.h"
+#endif
 
 #include <limits.h>
 #include <stddef.h>
@@ -59,6 +62,10 @@ struct lw_recognizer {
     uint8_t resident_widths_enabled;
     lw_rec_resident_slot resident_slots[LW_REC_RESIDENT_WIDTH_COUNT];
     lw_recognizer_info info;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    lw_x64_rec_program* x64_program;
+    lw_x64_rec_instance* x64_instance;
+#endif
 };
 
 /* Keep allocation checks width-neutral so bounded uint32_t dimensions do not
@@ -607,6 +614,19 @@ lw_status lw_recognizer_create(const char* model_path_utf8, const char* dictiona
     recognizer->info.max_text_capacity =
         (uint64_t)recognizer->info.time_steps * max_label_bytes + 1u;
     recognizer->info.workspace_size = session_info.workspace_size;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    if (target_width == 960u) {
+        lw_error backend_error;
+        lw_error_init(&backend_error);
+        if (lw_x64_rec_backend_compile(recognizer->model, 960u, &recognizer->x64_program,
+                                       &backend_error) == LW_X64_REC_COMPILE_OK &&
+            lw_x64_rec_instance_create(recognizer->x64_program, &recognizer->x64_instance,
+                                       &backend_error) != LW_STATUS_OK) {
+            lw_x64_rec_program_free(recognizer->x64_program);
+            recognizer->x64_program = NULL;
+        }
+    }
+#endif
     *out_recognizer = recognizer;
     lw_set_error(error, LW_STATUS_OK, "");
     return LW_STATUS_OK;
@@ -669,6 +689,10 @@ void lw_recognizer_free(lw_recognizer* recognizer) {
     free(recognizer->best_indices);
     free(recognizer->probabilities);
     free(recognizer->input);
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    lw_x64_rec_instance_free(recognizer->x64_instance);
+    lw_x64_rec_program_free(recognizer->x64_program);
+#endif
     lw_session_free(recognizer->session);
     {
         uint32_t slot_index;
@@ -711,6 +735,13 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
     uint32_t result_size;
     uint64_t started;
     lw_status status;
+    uint32_t* execution_best_indices = NULL;
+    float* execution_best_probabilities = NULL;
+    int backend_active = 0;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    float* backend_input = NULL;
+    uint64_t backend_input_count = 0u;
+#endif
     if (recognizer == NULL || source == NULL || result == NULL ||
         result->struct_size < sizeof(uint32_t) || (text_utf8 == NULL && text_capacity != 0u)) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT,
@@ -752,10 +783,28 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
         }
     }
     started = lw_pipeline_profile_now(profile);
-    status =
-        lw_rec_preprocess_bgr_u8(source, source_byte_count, source_width, source_height,
-                                 source_stride, recognizer->current_target_width, recognizer->input,
-                                 recognizer->input_element_count, &resized_width);
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    backend_active = recognizer->x64_instance != NULL && recognizer->current_target_width == 960u;
+    if (backend_active) {
+        backend_input = lw_x64_rec_instance_input(recognizer->x64_instance, &backend_input_count);
+        status = lw_rec_preprocess_bgr_u8_nhwc(source, source_byte_count, source_width, source_height,
+                                               source_stride, 960u, backend_input,
+                                               backend_input_count, &resized_width);
+    } else
+#endif
+    {
+        status = lw_rec_preprocess_bgr_u8(source, source_byte_count, source_width, source_height,
+                                          source_stride, recognizer->current_target_width, recognizer->input,
+                                          recognizer->input_element_count, &resized_width);
+    }
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    if (status != LW_STATUS_OK && backend_active) {
+        backend_active = 0;
+        status = lw_rec_preprocess_bgr_u8(source, source_byte_count, source_width, source_height,
+                                          source_stride, recognizer->current_target_width, recognizer->input,
+                                          recognizer->input_element_count, &resized_width);
+    }
+#endif
     if (status != LW_STATUS_OK) {
         lw_set_error(error, status, "BGR source layout is invalid");
         return status;
@@ -768,24 +817,40 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
                sizeof(node_nanoseconds_before));
         memcpy(node_invocations_before, profile->execution.node_invocations,
                sizeof(node_invocations_before));
+    }    started = lw_pipeline_profile_now(profile);
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    if (backend_active && status == LW_STATUS_OK) {
+        status = lw_x64_rec_instance_run(recognizer->x64_instance, error);
+        if (status == LW_STATUS_OK) {
+            execution_best_indices = recognizer->x64_instance->best_indices;
+            execution_best_probabilities = recognizer->x64_instance->best_probabilities;
+        } else {
+            backend_active = 0;
+        }
     }
-    started = lw_pipeline_profile_now(profile);
-    if (recognizer->best_indices != NULL) {
-        status = lw_execute_session_f32_ctc_greedy(
-            recognizer->session, recognizer->input, recognizer->input_element_count,
-            recognizer->best_indices, recognizer->best_probabilities,
-            recognizer->current_time_steps, recognizer->info.class_count,
-            profile == NULL ? NULL : &profile->execution, error);
-    } else {
-        status = profile == NULL
-                     ? lw_execute_session_f32(
-                           recognizer->session, recognizer->input,
-                           recognizer->input_element_count, recognizer->probabilities,
-                           recognizer->probability_element_count, error)
-                     : lw_execute_session_f32_profiled(
-                           recognizer->session, recognizer->input,
-                           recognizer->input_element_count, recognizer->probabilities,
-                           recognizer->probability_element_count, &profile->execution, error);
+#endif
+    if (!backend_active) {
+        if (recognizer->best_indices != NULL) {
+            status = lw_execute_session_f32_ctc_greedy(
+                recognizer->session, recognizer->input, recognizer->input_element_count,
+                recognizer->best_indices, recognizer->best_probabilities,
+                recognizer->current_time_steps, recognizer->info.class_count,
+                profile == NULL ? NULL : &profile->execution, error);
+            if (status == LW_STATUS_OK) {
+                execution_best_indices = recognizer->best_indices;
+                execution_best_probabilities = recognizer->best_probabilities;
+            }
+        } else {
+            status = profile == NULL
+                         ? lw_execute_session_f32(
+                               recognizer->session, recognizer->input,
+                               recognizer->input_element_count, recognizer->probabilities,
+                               recognizer->probability_element_count, error)
+                         : lw_execute_session_f32_profiled(
+                               recognizer->session, recognizer->input,
+                               recognizer->input_element_count, recognizer->probabilities,
+                               recognizer->probability_element_count, &profile->execution, error);
+        }
     }
     if (status == LW_STATUS_OK && profile != NULL) {
         lw_pipeline_profile_capture_node_width_delta(
@@ -797,17 +862,17 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
         return status;
     }
     started = lw_pipeline_profile_now(profile);
-    if (recognizer->best_indices != NULL) {
+    if (execution_best_indices != NULL) {
         if (text_utf8 != NULL && text_capacity >= recognizer->info.max_text_capacity) {
             status = lw_rec_ctc_decode_greedy_known_capacity_f32(
-                recognizer->dictionary, recognizer->best_indices,
-                recognizer->best_probabilities, recognizer->current_time_steps,
+                recognizer->dictionary, execution_best_indices,
+                execution_best_probabilities, recognizer->current_time_steps,
                 recognizer->info.class_count, text_utf8, text_capacity, &required_capacity,
                 &score, &emitted_count, error);
         } else {
             status = lw_rec_ctc_decode_greedy_f32(
-                recognizer->dictionary, recognizer->best_indices,
-                recognizer->best_probabilities, recognizer->current_time_steps,
+                recognizer->dictionary, execution_best_indices,
+                execution_best_probabilities, recognizer->current_time_steps,
                 recognizer->info.class_count, text_utf8, text_capacity, &required_capacity,
                 &score, &emitted_count, error);
         }

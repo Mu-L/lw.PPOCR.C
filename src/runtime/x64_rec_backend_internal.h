@@ -1,11 +1,12 @@
 #ifndef LW_X64_REC_BACKEND_INTERNAL_H
 #define LW_X64_REC_BACKEND_INTERNAL_H
 
-#include "atomic_internal.h"
 #include "cpu_features.h"
 #include "model_internal.h"
 #include "session_internal.h"
+#include "executor_internal.h"
 #include "../kernels/nhwc_internal.h"
+#include "../kernels/scalar_kernels.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -33,19 +34,33 @@ typedef enum lw_x64_rec_op_kind {
     LW_X64_REC_OP_MUL = 6,
     LW_X64_REC_OP_DIV = 7,
     LW_X64_REC_OP_RELU = 8,
-    LW_X64_REC_OP_GELU = 9,
-    LW_X64_REC_OP_HARD_SIGMOID = 10,
-    LW_X64_REC_OP_REDUCE_MEAN = 11,
-    LW_X64_REC_OP_AVG_POOL = 12,
-    LW_X64_REC_OP_MAX_POOL = 13,
-    LW_X64_REC_OP_CONCAT = 14,
-    LW_X64_REC_OP_RESIZE = 15,
-    LW_X64_REC_OP_TRANSPOSE_COPY = 16,
-    LW_X64_REC_OP_CTC_PROJECTION = 17,
-    LW_X64_REC_OP_CTC_BIAS = 18,
-    LW_X64_REC_OP_CTC_SOFTMAX = 19,
+    LW_X64_REC_OP_ERF = 9,
+    LW_X64_REC_OP_GELU = 10,
+    LW_X64_REC_OP_HARD_SIGMOID = 11,
+    LW_X64_REC_OP_REDUCE_MEAN = 12,
+    LW_X64_REC_OP_AVG_POOL = 13,
+    LW_X64_REC_OP_MAX_POOL = 14,
+    LW_X64_REC_OP_TRANSPOSE = 15,
+    LW_X64_REC_OP_MATMUL = 16,
+    LW_X64_REC_OP_CONCAT = 17,
+    LW_X64_REC_OP_RESIZE = 18,
     LW_X64_REC_OP_GENERIC_UNSUPPORTED = 0xffff
 } lw_x64_rec_op_kind;
+
+typedef enum lw_x64_rec_conv_kind {
+    LW_X64_REC_CONV_POINTWISE = 1,
+    LW_X64_REC_CONV_DEPTHWISE = 2,
+    LW_X64_REC_CONV_DENSE = 3
+} lw_x64_rec_conv_kind;
+
+typedef enum lw_x64_rec_broadcast_kind {
+    LW_X64_REC_BROADCAST_SAME = 0,
+    LW_X64_REC_BROADCAST_RIGHT_SCALAR = 1,
+    LW_X64_REC_BROADCAST_LEFT_SCALAR = 2,
+    LW_X64_REC_BROADCAST_RIGHT_CHANNEL = 3,
+    LW_X64_REC_BROADCAST_LEFT_CHANNEL = 4,
+    LW_X64_REC_BROADCAST_GENERAL = 5
+} lw_x64_rec_broadcast_kind;
 
 typedef struct lw_x64_rec_value {
     uint64_t offset;
@@ -61,17 +76,137 @@ typedef struct lw_x64_rec_value {
     uint32_t alias_of;
 } lw_x64_rec_value;
 
+typedef struct lw_x64_rec_conv_op {
+    uint64_t input_offset;
+    uint64_t output_offset;
+    const float* packed_weights;
+    const float* original_weights;
+    const float* bias;
+    uint8_t scalar_fallback;
+    uint32_t input_channels;
+    uint32_t output_channels;
+    uint32_t input_height;
+    uint32_t input_width;
+    uint32_t output_height;
+    uint32_t output_width;
+    uint32_t kernel_h;
+    uint32_t kernel_w;
+    uint32_t stride_h;
+    uint32_t stride_w;
+    uint32_t pad_top;
+    uint32_t pad_left;
+    uint32_t pad_bottom;
+    uint32_t pad_right;
+    uint32_t groups;
+    uint32_t dense_kc;
+    uint64_t scratch_bytes;
+    uint16_t kernel_kind;
+    uint16_t activation;
+} lw_x64_rec_conv_op;
+
+typedef struct lw_x64_rec_binary_op {
+    uint64_t left_offset;
+    uint64_t right_offset;
+    uint64_t output_offset;
+    const float* left_constant;
+    const float* right_constant;
+    uint64_t element_count;
+    uint32_t pixels;
+    uint32_t channels;
+    uint16_t operation;
+    uint8_t broadcast_kind;
+    uint8_t reserved;
+    int32_t dimensions[4];
+} lw_x64_rec_binary_op;
+
+typedef struct lw_x64_rec_unary_op {
+    uint64_t input_offset;
+    uint64_t output_offset;
+    uint64_t element_count;
+    float alpha;
+    float beta;
+    int32_t dimensions[4];
+    uint32_t rank;
+} lw_x64_rec_unary_op;
+
+typedef struct lw_x64_rec_affine_op {
+    uint64_t input_offset;
+    uint64_t output_offset;
+    const float* mul;
+    const float* add;
+    const float* scale;
+    const float* bias;
+    const float* mean;
+    const float* variance;
+    float epsilon;
+    uint8_t channel_major;
+    uint32_t pixels;
+    uint32_t channels;
+} lw_x64_rec_affine_op;
+
+typedef struct lw_x64_rec_reduce_op {
+    uint64_t input_offset;
+    uint64_t output_offset;
+    uint32_t batch;
+    uint32_t height;
+    uint32_t width;
+    uint32_t channels;
+} lw_x64_rec_reduce_op;
+
+typedef struct lw_x64_rec_pool_op {
+    uint64_t input_offset;
+    uint64_t output_offset;
+    int32_t input_dimensions[4];
+    int32_t output_dimensions[4];
+    int32_t kernel[2];
+    int32_t strides[2];
+    int32_t pads[4];
+    uint8_t count_include_pad;
+    uint8_t is_max;
+} lw_x64_rec_pool_op;
+
+typedef struct lw_x64_rec_transpose_op {
+    uint64_t input_offset;
+    uint64_t output_offset;
+    uint32_t rank;
+    int32_t input_dimensions[4];
+    int32_t output_dimensions[4];
+    int32_t permutation[4];
+} lw_x64_rec_transpose_op;
+
+typedef struct lw_x64_rec_matmul_op {
+    uint64_t input_offset;
+    uint64_t output_offset;
+    const float* weights;
+    float* packed_weights;
+    uint32_t batch;
+    uint32_t rows;
+    uint32_t inner;
+    uint32_t columns;
+} lw_x64_rec_matmul_op;
+
 typedef struct lw_x64_rec_op {
     uint16_t kind;
-    uint16_t semantic_op;
-    uint32_t node_index;
-    uint32_t input_count;
-    uint32_t inputs[8];
-    uint32_t output;
-    uint32_t weight;
-    uint32_t bias;
-    uint32_t flags;
+    uint16_t reserved;
+    uint32_t semantic_begin;
+    uint16_t semantic_count;
+    uint16_t flags;
+    union {
+        lw_x64_rec_conv_op conv;
+        lw_x64_rec_binary_op binary;
+        lw_x64_rec_unary_op unary;
+        lw_x64_rec_affine_op affine;
+        lw_x64_rec_reduce_op reduce;
+        lw_x64_rec_pool_op pool;
+        lw_x64_rec_transpose_op transpose;
+        lw_x64_rec_matmul_op matmul;
+    } data;
 } lw_x64_rec_op;
+
+typedef struct lw_x64_rec_constant {
+    void* data;
+    uint64_t bytes;
+} lw_x64_rec_constant;
 
 typedef struct lw_x64_rec_ctc_tail {
     uint8_t enabled;
@@ -82,9 +217,10 @@ typedef struct lw_x64_rec_ctc_tail {
     uint32_t inner;
     uint32_t weight_tensor;
     uint32_t bias_tensor;
+    float* packed_weights;
+    const float* bias;
 } lw_x64_rec_ctc_tail;
 
-struct lw_x64_rec_ctc_projection;
 typedef struct lw_x64_rec_program {
     const lw_model* model;
     lw_cpu_capabilities cpu;
@@ -94,42 +230,64 @@ typedef struct lw_x64_rec_program {
     uint32_t class_count;
     uint32_t input_value;
     uint32_t output_value;
+    lw_x64_rec_op* ops;
     uint32_t op_count;
+    lw_x64_rec_value* values;
     uint32_t value_count;
+    uint32_t semantic_consumed;
+    uint32_t semantic_elided;
+    uint32_t semantic_fused;
+    uint32_t unsupported_nodes;
     uint32_t generic_ops;
     uint32_t layout_conversions;
     uint8_t direct_nhwc;
     uint8_t ctc_fused;
     uint16_t reserved;
-    lw_x64_rec_op* ops;
-    lw_x64_rec_value* values;
-    uint8_t* arena;
     uint64_t arena_bytes;
-    uint8_t* scratch;
     uint64_t scratch_bytes;
+    uint32_t packed_constant_count;
+    lw_x64_rec_constant* constants;
     lw_x64_rec_ctc_tail ctc;
-    struct lw_x64_rec_ctc_projection* ctc_projection;
 } lw_x64_rec_program;
 
+typedef struct lw_x64_rec_profile {
+    uint64_t total_ns;
+    uint64_t pointwise_ns;
+    uint64_t dense_ns;
+    uint64_t depthwise_ns;
+    uint64_t binary_ns;
+    uint64_t unary_ns;
+    uint64_t reduce_ns;
+    uint64_t pool_ns;
+    uint64_t transpose_ns;
+    uint64_t matmul_ns;
+    uint64_t ctc_ns;
+} lw_x64_rec_profile;
+
 typedef struct lw_x64_rec_instance {
-    lw_x64_rec_program* program;
-    lw_session* shape_session;
+    const lw_x64_rec_program* program;
+    uint8_t* arena;
     uint8_t* scratch;
+    float* ctc_logits;
+    uint32_t* best_indices;
+    float* best_probabilities;
+    lw_x64_rec_profile profile;
 } lw_x64_rec_instance;
 
 uint64_t lw_x64_rec_arena_align(uint64_t value, uint64_t alignment);
 lw_status lw_x64_rec_arena_alloc(uint64_t* cursor, uint64_t bytes, uint64_t alignment,
                                  uint64_t* out_offset, lw_error* error);
-
 lw_x64_rec_compile_result lw_x64_rec_backend_compile(
     const lw_model* model, uint32_t target_width, lw_x64_rec_program** out_program,
     lw_error* error);
 void lw_x64_rec_program_free(lw_x64_rec_program* program);
-
-lw_status lw_x64_rec_instance_create(lw_x64_rec_program* program, lw_x64_rec_instance** out,
-                                     lw_error* error);
+lw_status lw_x64_rec_instance_create(const lw_x64_rec_program* program,
+                                     lw_x64_rec_instance** out, lw_error* error);
 void lw_x64_rec_instance_free(lw_x64_rec_instance* instance);
 float* lw_x64_rec_instance_input(lw_x64_rec_instance* instance, uint64_t* element_count);
+lw_status lw_x64_rec_instance_run(lw_x64_rec_instance* instance, lw_error* error);
 lw_status lw_x64_rec_instance_run_backbone(lw_x64_rec_instance* instance, lw_error* error);
+/* Test-only internal hook: execute one compiled physical op. */
+lw_status lw_x64_rec_instance_run_op(lw_x64_rec_instance* instance, uint32_t op_index, lw_error* error);
 
 #endif
