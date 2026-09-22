@@ -142,6 +142,27 @@ void lw_avx2_fma_nhwc_pointwise_f32(const float* input,
                                     uint32_t pixels,
                                     uint32_t input_channels,
                                     uint32_t output_channels);
+void lw_avx2_fma_nhwc_pointwise_4x16_f32(const float* input,
+                                           const float* packed_weights,
+                                           const lw_nhwc_epilogue* epilogue,
+                                           float* output,
+                                           uint32_t pixels,
+                                           uint32_t input_channels,
+                                           uint32_t output_channels);
+void lw_avx2_fma_nhwc_pointwise_3x32_f32(const float* input,
+                                           const float* packed_weights,
+                                           const lw_nhwc_epilogue* epilogue,
+                                           float* output,
+                                           uint32_t pixels,
+                                           uint32_t input_channels,
+                                           uint32_t output_channels);
+void lw_avx2_fma_nhwc_pointwise_2x32_f32(const float* input,
+                                           const float* packed_weights,
+                                           const lw_nhwc_epilogue* epilogue,
+                                           float* output,
+                                           uint32_t pixels,
+                                           uint32_t input_channels,
+                                           uint32_t output_channels);
 
 void lw_avx2_nhwc_affine_f32(const float* input, const float* mul, const float* add,
                              float* output, uint32_t pixels, uint32_t channels);

@@ -44,6 +44,13 @@ ctest --test-dir build -C Release -R "x64_rec_backend_(contract|execution|benchm
 
 不满足 AVX2/FMA 或模型结构不符合当前 Tiny REC 编译契约时，调用方应继续使用 canonical recognizer。
 
+`x64-rec-pointwise-tuning-driver` 会从编译后的 Tiny REC960 program 枚举真实 pointwise physical op，比较 `6x16`、`4x16`、`3x32` 和 `2x32`，并对每个候选做输出误差校验（`max_error <= 1e-5`）。当前本地 20 次测量显示大多数多像素 shape 仍由 `6x16` 胜出；单像素 projection shape 选择 `4x16` 或 `2x32`，compiler 只对这些 shape 启用候选，其余保持基线 kernel。`3x32` 已实现并纳入 tuning，但当前 Tiny960 没有稳定胜出，因此暂不默认 dispatch。
+
+```text
+cmake --build build --config Release --target x64-rec-pointwise-tuning-driver
+build/Release/x64-rec-pointwise-tuning-driver.exe build/models/rec.lwm 20
+```
+
 ## Profile 与 A/B
 
 `x64-rec-backend-benchmark-driver` 只在测试构建且 `LW_EXPERIMENTAL_AVX2_FAST_PATH=ON` 时生成。它使用固定的 960×48 BGR 输入，先预热 3 次，再以 AB/BA 交替方式测量 canonical 与 standalone backend。正式 `canonical_ms` / `backend_ms` 只使用不带逐算子计时的完整执行路径；另外最多执行 5 次独立 profiling，结果写入 `backend_profile_ms`，因此 profiling 开销不会污染 A/B speedup。输出还包含 `backend_graph_ms`、`backend_profile_runs`、physical op 分类计数、各卷积路径的 fallback 计数、`physical_ops`、`semantic_nodes`、arena/scratch 大小和 `text_match` 门禁。
@@ -53,4 +60,4 @@ cmake --build build --config Release --target x64-rec-backend-benchmark-driver
 build/Release/x64-rec-backend-benchmark-driver.exe build/models/rec.lwm 30
 ```
 
-当前 Windows x64 本地基线（30 次测量，结果会随 CPU 和负载变化）约为：canonical REC 19.5 ms、standalone backend 43.6 ms，`text_match=true`；backend backbone 中 pointwise 约 20.5 ms、dense 约 10.6 ms，是下一轮优化的优先热点。该数字是开发剖面，不是公开性能承诺。正式 A/B 仍显示 backend 尚未超过 canonical，因此在完成 pointwise/dense 优化前不扩大模型或宽度覆盖。
+当前 Windows x64 本地基线（30 次测量，结果会随 CPU 和负载变化）约为：canonical REC 19.6 ms、standalone backend 35.8 ms，`speedup=0.55x`、`text_match=true`；backend backbone 中 pointwise 约 20.7 ms、dense 约 1.2 ms，首层 Dense 尾块已从 scalar fallback 转为 AVX2 写回。正式输出的 `pointwise_fallbacks`、`dense_fallbacks`、`depthwise_fallbacks` 和 `scalar_conv_fallbacks` 均为 0。该数字是开发剖面，不是公开性能承诺。Dense 当前使用 KC=512；prepared offsets 的本地 A/B 为负优化，未接入 production path。正式 A/B 仍显示 backend 尚未超过 canonical，因此在完成剩余 pointwise/非卷积热点优化前不扩大模型或宽度覆盖。

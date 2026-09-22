@@ -53,6 +53,13 @@ typedef enum lw_x64_rec_conv_kind {
     LW_X64_REC_CONV_DENSE = 3
 } lw_x64_rec_conv_kind;
 
+typedef enum lw_x64_rec_pointwise_kernel {
+    LW_X64_REC_PW_6X16 = 0,
+    LW_X64_REC_PW_4X16 = 1,
+    LW_X64_REC_PW_3X32 = 2,
+    LW_X64_REC_PW_2X32 = 3
+} lw_x64_rec_pointwise_kernel;
+
 typedef enum lw_x64_rec_broadcast_kind {
     LW_X64_REC_BROADCAST_SAME = 0,
     LW_X64_REC_BROADCAST_RIGHT_SCALAR = 1,
@@ -83,6 +90,8 @@ typedef struct lw_x64_rec_conv_op {
     const float* original_weights;
     const float* bias;
     uint8_t scalar_fallback;
+    uint8_t pointwise_kernel;
+    uint16_t conv_reserved;
     uint32_t input_channels;
     uint32_t output_channels;
     uint32_t input_height;

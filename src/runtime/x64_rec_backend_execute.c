@@ -94,9 +94,31 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         output = offset_ptr(instance, op->data.conv.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
         ep.bias = op->data.conv.bias;
-        lw_avx2_fma_nhwc_pointwise_f32(input, op->data.conv.packed_weights, &ep, output,
-                                       op->data.conv.input_height * op->data.conv.input_width,
-                                       op->data.conv.input_channels, op->data.conv.output_channels);
+        {
+            uint32_t pixels = op->data.conv.input_height * op->data.conv.input_width;
+            switch (op->data.conv.pointwise_kernel) {
+            case LW_X64_REC_PW_4X16:
+                lw_avx2_fma_nhwc_pointwise_4x16_f32(
+                    input, op->data.conv.packed_weights, &ep, output, pixels,
+                    op->data.conv.input_channels, op->data.conv.output_channels);
+                break;
+            case LW_X64_REC_PW_3X32:
+                lw_avx2_fma_nhwc_pointwise_3x32_f32(
+                    input, op->data.conv.packed_weights, &ep, output, pixels,
+                    op->data.conv.input_channels, op->data.conv.output_channels);
+                break;
+            case LW_X64_REC_PW_2X32:
+                lw_avx2_fma_nhwc_pointwise_2x32_f32(
+                    input, op->data.conv.packed_weights, &ep, output, pixels,
+                    op->data.conv.input_channels, op->data.conv.output_channels);
+                break;
+            default:
+                lw_avx2_fma_nhwc_pointwise_f32(
+                    input, op->data.conv.packed_weights, &ep, output, pixels,
+                    op->data.conv.input_channels, op->data.conv.output_channels);
+                break;
+            }
+        }
         return LW_STATUS_OK;
     }
     case LW_X64_REC_OP_DENSE: {
@@ -126,8 +148,9 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         input = offset_ptr(instance, op->data.conv.input_offset);
         output = offset_ptr(instance, op->data.conv.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
-        status = lw_avx2_fma_nhwc_dense_f32(input, op->data.conv.packed_weights, &ep, output,
-                                             &desc, instance->scratch, op->data.conv.scratch_bytes);
+        status = lw_avx2_fma_nhwc_dense_f32(
+            input, op->data.conv.packed_weights, &ep, output, &desc,
+            instance->scratch, op->data.conv.scratch_bytes);
         if (status == LW_STATUS_OK) return LW_STATUS_OK;
         scalar_nhwc_conv(&op->data.conv, input, output);
         return LW_STATUS_OK;

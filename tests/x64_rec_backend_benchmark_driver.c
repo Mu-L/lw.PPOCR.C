@@ -256,14 +256,13 @@ static void count_conv_paths(const lw_x64_rec_program* program,
             const lw_x64_rec_op* op = &program->ops[index];
             if (op->kind == LW_X64_REC_OP_POINTWISE) {
                 ++pointwise;
-                if (op->data.conv.output_channels % LW_NHWC_OC_BLOCK != 0u ||
+                if (op->data.conv.scalar_fallback ||
                     (op->data.conv.activation != LW_NHWC_ACT_NONE &&
                      op->data.conv.activation != LW_NHWC_ACT_RELU &&
                      op->data.conv.activation != LW_NHWC_ACT_HARDSWISH)) ++pointwise_fallback;
             } else if (op->kind == LW_X64_REC_OP_DENSE) {
                 ++dense;
-                if (op->data.conv.scalar_fallback ||
-                    op->data.conv.output_channels % LW_NHWC_OC_BLOCK != 0u) ++dense_fallback;
+                if (op->data.conv.scalar_fallback) ++dense_fallback;
             } else if (op->kind == LW_X64_REC_OP_DEPTHWISE) {
                 ++depthwise;
                 if ((op->data.conv.input_channels & 7u) != 0u) ++depthwise_fallback;

@@ -132,6 +132,12 @@ static lw_x64_rec_op* push_op(lw_x64_rec_program* program, uint32_t* count, uint
     return op;
 }
 
+static uint8_t choose_pointwise_kernel(uint32_t pixels, uint32_t output_channels) {
+    if (pixels <= 1u && output_channels % 32u == 0u) return LW_X64_REC_PW_2X32;
+    if (pixels <= 1u && output_channels % 16u == 0u) return LW_X64_REC_PW_4X16;
+    return LW_X64_REC_PW_6X16;
+}
+
 static lw_status compile_conv(const lw_model* model, const lw_session* session,
                               lw_x64_rec_program* program, const uint8_t* node,
                               lw_x64_rec_op* op, lw_error* error) {
@@ -166,6 +172,9 @@ static lw_status compile_conv(const lw_model* model, const lw_session* session,
                                           op->data.conv.output_channels, 1u, 1u, &count)) {
         op->kind = LW_X64_REC_OP_POINTWISE;
         op->data.conv.kernel_kind = LW_X64_REC_CONV_POINTWISE;
+        op->data.conv.pointwise_kernel = choose_pointwise_kernel(
+            op->data.conv.input_height * op->data.conv.input_width,
+            op->data.conv.output_channels);
     } else if (groups == op->data.conv.input_channels && groups == op->data.conv.output_channels &&
                weight->dimensions[1] == 1 &&
                lw_nhwc_depthwise_packed_weight_count(op->data.conv.input_channels, kh, kw, &count)) {
@@ -192,6 +201,7 @@ static lw_status compile_conv(const lw_model* model, const lw_session* session,
     if (lwm_read_u16(node + 2u) >= 3u) op->data.conv.bias = constant_f32(model, lwm_read_u32(node + 16u));
     op->data.conv.scratch_bytes = 0u;
     if (op->kind == LW_X64_REC_OP_DENSE) {
+        op->data.conv.dense_kc = LW_NHWC_DENSE_KC;
         lw_nhwc_dense_desc desc;
         memset(&desc, 0, sizeof(desc));
         desc.batch = 1u; desc.input_channels = op->data.conv.input_channels;
@@ -200,7 +210,11 @@ static lw_status compile_conv(const lw_model* model, const lw_session* session,
         desc.output_width = op->data.conv.output_width; desc.kernel_h = kh; desc.kernel_w = kw;
         desc.stride_h = sh; desc.stride_w = sw; desc.pad_top = op->data.conv.pad_top; desc.pad_left = op->data.conv.pad_left;
         desc.pad_bottom = op->data.conv.pad_bottom; desc.pad_right = op->data.conv.pad_right;
-        if (!lw_nhwc_dense_scratch_bytes(&desc, &op->data.conv.scratch_bytes)) { op->data.conv.scalar_fallback = 1u; op->data.conv.scratch_bytes = 0u; }
+        desc.dense_kc = op->data.conv.dense_kc;
+        if (!lw_nhwc_dense_scratch_bytes(&desc, &op->data.conv.scratch_bytes)) {
+            op->data.conv.scalar_fallback = 1u;
+            op->data.conv.scratch_bytes = 0u;
+        }
         if (op->data.conv.scratch_bytes > program->scratch_bytes) program->scratch_bytes = op->data.conv.scratch_bytes;
     }
     return LW_STATUS_OK;
