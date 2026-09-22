@@ -6,6 +6,8 @@
 #include "session_internal.h"
 #include "executor_internal.h"
 #include "../kernels/nhwc_internal.h"
+#include "../kernels/packed_conv_internal.h"
+#include "../kernels/packed_conv3x3_internal.h"
 #include "../kernels/scalar_kernels.h"
 
 #include <stddef.h>
@@ -22,13 +24,27 @@ typedef enum lw_x64_rec_storage_layout {
     LW_X64_REC_LAYOUT_NHWC = 0,
     LW_X64_REC_LAYOUT_TC = 1,
     LW_X64_REC_LAYOUT_VECTOR = 2,
-    LW_X64_REC_LAYOUT_SCALAR = 3
+    LW_X64_REC_LAYOUT_SCALAR = 3,
+    LW_X64_REC_LAYOUT_NCHW = 4
 } lw_x64_rec_storage_layout;
+
+typedef enum lw_x64_rec_backend_layout {
+    LW_X64_REC_BACKEND_NHWC = 0,
+    LW_X64_REC_BACKEND_NCHW = 1
+} lw_x64_rec_backend_layout;
+
+typedef enum lw_x64_rec_compile_strategy {
+    LW_X64_REC_COMPILE_NHWC = 0,
+    LW_X64_REC_COMPILE_NCHW = 1
+} lw_x64_rec_compile_strategy;
 
 typedef enum lw_x64_rec_op_kind {
     LW_X64_REC_OP_DENSE = 1,
     LW_X64_REC_OP_POINTWISE = 2,
     LW_X64_REC_OP_DEPTHWISE = 3,
+    LW_X64_REC_OP_POINTWISE_NCHW = 19,
+    LW_X64_REC_OP_STEM_NCHW = 20,
+    LW_X64_REC_OP_DEPTHWISE_NCHW = 21,
     LW_X64_REC_OP_AFFINE = 4,
     LW_X64_REC_OP_ADD = 5,
     LW_X64_REC_OP_MUL = 6,
@@ -100,6 +116,8 @@ typedef struct lw_x64_rec_conv_op {
     uint32_t output_width;
     uint32_t kernel_h;
     uint32_t kernel_w;
+    uint32_t weight_h;
+    uint32_t weight_w;
     uint32_t stride_h;
     uint32_t stride_w;
     uint32_t pad_top;
@@ -254,6 +272,7 @@ typedef struct lw_x64_rec_program {
     uint16_t reserved;
     uint64_t arena_bytes;
     uint64_t scratch_bytes;
+    uint8_t backend_layout;
     uint32_t packed_constant_count;
     lw_x64_rec_constant* constants;
     lw_x64_rec_ctc_tail ctc;
@@ -286,6 +305,10 @@ typedef struct lw_x64_rec_instance {
 uint64_t lw_x64_rec_arena_align(uint64_t value, uint64_t alignment);
 lw_status lw_x64_rec_arena_alloc(uint64_t* cursor, uint64_t bytes, uint64_t alignment,
                                  uint64_t* out_offset, lw_error* error);
+lw_x64_rec_compile_result lw_x64_rec_backend_compile_ex(
+    const lw_model* model, uint32_t target_width,
+    lw_x64_rec_compile_strategy strategy,
+    lw_x64_rec_program** out_program, lw_error* error);
 lw_x64_rec_compile_result lw_x64_rec_backend_compile(
     const lw_model* model, uint32_t target_width, lw_x64_rec_program** out_program,
     lw_error* error);

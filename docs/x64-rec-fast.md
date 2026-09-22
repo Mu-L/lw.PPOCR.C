@@ -46,3 +46,29 @@ Current local reference measurements (static width model, Windows x64 AVX2) are 
 - Medium REC960: the previous `0.71x` / 21.6 MiB figures are retained only as a pre-v6 reference; rerun the Medium artifact before drawing a v6 performance conclusion.
 
 These results confirm that planner coverage, physical lifetimes, Dense preparation, and Depthwise dispatch are improving, but the implementation is not ready for default-path integration: the current end-to-end ratio remains below 1.0x. The next stages are to connect the existing BGR-to-NHWC preprocessor to the prepared hook, then elide the terminal CTC logits/Softmax materialization and measure recognizer-level hotspots before any promotion decision.
+
+## v12: compiled NCHW candidate
+
+The experimental x64 REC backend now has a private lw_x64_rec_backend_compile_ex strategy
+selector. The existing API remains the NHWC-compatible wrapper; the new NCHW strategy keeps
+rank-4 tensors in their canonical NCHW storage and lowers Tiny REC pointwise/stem/depthwise
+convolutions directly to the existing packed AVX2/FMA and NCHW kernels. BatchNorm affine and
+channel broadcasts use channel-major helpers, while ReduceMean and pooling retain scalar-correct
+NCHW fallbacks for the first candidate. GELU fusion is retained with the same private-temporary
+safety rule.
+
+This candidate is correctness-gated but not enabled by the production recognizer. The CTest
+targets x64_rec_backend_nchw and x64_rec_layout_benchmark compare it against the canonical
+executor and the existing NHWC candidate. A local Tiny REC960 Debug measurement (five measured
+runs after two warmups) was:
+
+| path | median end-to-end ms | relative to canonical | arena bytes |
+| --- | ---: | ---: | ---: |
+| canonical | 125.332 | 1.000x | — |
+| compiled NHWC | 237.463 | 0.528x | 99,806,656 |
+| compiled NCHW candidate | 116.695 | 1.074x | 99,806,656 |
+
+The absolute values are machine-specific. The important result is that the NCHW candidate is
+currently ahead of canonical on this workload while NHWC remains a negative control. Further
+work should profile the NCHW operator mix and memory lifetime before any default-path promotion;
+the private strategy API and candidate test fixtures are not part of the public C ABI.

@@ -88,6 +88,57 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
     float* output;
     if (op == NULL) return LW_STATUS_INVALID_ARGUMENT;
     switch (op->kind) {
+    case LW_X64_REC_OP_POINTWISE_NCHW:
+    case LW_X64_REC_OP_STEM_NCHW:
+    case LW_X64_REC_OP_DEPTHWISE_NCHW: {
+        int32_t input_dimensions[4] = {
+            1, (int32_t)op->data.conv.input_channels,
+            (int32_t)op->data.conv.input_height,
+            (int32_t)op->data.conv.input_width
+        };
+        int32_t output_dimensions[4] = {
+            1, (int32_t)op->data.conv.output_channels,
+            (int32_t)op->data.conv.output_height,
+            (int32_t)op->data.conv.output_width
+        };
+        input = offset_ptr(instance, op->data.conv.input_offset);
+        output = offset_ptr(instance, op->data.conv.output_offset);
+        if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        if (op->kind == LW_X64_REC_OP_POINTWISE_NCHW) {
+            lw_avx2_fma_packed_conv1x1_f32(
+                input, op->data.conv.packed_weights, op->data.conv.bias,
+                output, input_dimensions, output_dimensions);
+        } else if (op->kind == LW_X64_REC_OP_STEM_NCHW) {
+            lw_avx2_fma_packed_conv3x3_stride2_pad1_f32(
+                input, op->data.conv.packed_weights, op->data.conv.bias,
+                output, input_dimensions, output_dimensions);
+        } else if (op->data.conv.kernel_h == 1u && op->data.conv.kernel_w == 5u) {
+            int32_t weight_dimensions[4] = {
+                (int32_t)op->data.conv.output_channels, 1, (int32_t)op->data.conv.weight_h, (int32_t)op->data.conv.weight_w
+            };
+            int32_t kernel[2] = { 1, 5 };
+            int32_t strides[2] = { (int32_t)op->data.conv.stride_h, (int32_t)op->data.conv.stride_w };
+            int32_t dilations[2] = { 1, 1 };
+            int32_t pads[4] = { (int32_t)op->data.conv.pad_top, (int32_t)op->data.conv.pad_left,
+                                      (int32_t)op->data.conv.pad_bottom, (int32_t)op->data.conv.pad_right };
+            {
+                lw_status fallback_status = lw_scalar_conv2d_f32(input, op->data.conv.original_weights, op->data.conv.bias,
+                                                                  (op->data.conv.bias != NULL ? op->data.conv.output_channels : 0u), output, input_dimensions,
+                                                                  weight_dimensions, output_dimensions, kernel, strides,
+                                                                  dilations, pads, op->data.conv.groups);
+                if (fallback_status != LW_STATUS_OK) { lw_set_error(error, fallback_status, "NCHW depthwise fallback failed"); return fallback_status; }
+            }
+        } else if (op->data.conv.stride_h == 2u && op->data.conv.stride_w == 1u) {
+            lw_avx2_depthwise_conv3x3_stride2x1_pad1_f32(
+                input, op->data.conv.original_weights, op->data.conv.bias,
+                output, input_dimensions, output_dimensions);
+        } else {
+            lw_avx2_depthwise_conv3x3_unit_pad1_f32(
+                input, op->data.conv.original_weights, op->data.conv.bias,
+                output, input_dimensions);
+        }
+        return LW_STATUS_OK;
+    }
     case LW_X64_REC_OP_POINTWISE: {
         lw_nhwc_epilogue ep = { NULL, NULL, op->data.conv.activation, 0u, 0.0f, 0.0f };
         input = offset_ptr(instance, op->data.conv.input_offset);
@@ -185,7 +236,10 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
     case LW_X64_REC_OP_AFFINE:
         input = offset_ptr(instance, op->data.affine.input_offset); output = offset_ptr(instance, op->data.affine.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
-        if (op->data.affine.channel_major) {
+        if (op->data.affine.channel_major && instance->program->backend_layout == LW_X64_REC_BACKEND_NCHW) {
+            lw_avx2_nchw_affine_f32(input, op->data.affine.mul, op->data.affine.add,
+                                    output, op->data.affine.channels, op->data.affine.pixels);
+        } else if (op->data.affine.channel_major) {
             scalar_nhwc_batch_norm(&op->data.affine, input, output);
         } else {
             lw_avx2_nhwc_affine_f32(input, op->data.affine.mul, op->data.affine.add,
@@ -195,6 +249,25 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
     case LW_X64_REC_OP_ADD: case LW_X64_REC_OP_MUL: case LW_X64_REC_OP_DIV:
         input = op->data.binary.left_constant != NULL ? (float*)(uintptr_t)op->data.binary.left_constant : offset_ptr(instance, op->data.binary.left_offset);
         output = offset_ptr(instance, op->data.binary.output_offset);
+        if (instance->program->backend_layout == LW_X64_REC_BACKEND_NCHW &&
+            (op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_LEFT_CHANNEL ||
+             op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_RIGHT_CHANNEL)) {
+            float* full = op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_LEFT_CHANNEL
+                ? offset_ptr(instance, op->data.binary.right_offset) : input;
+            float* channel = op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_LEFT_CHANNEL
+                ? (op->data.binary.left_constant != NULL
+                    ? (float*)(uintptr_t)op->data.binary.left_constant
+                    : offset_ptr(instance, op->data.binary.left_offset))
+                : (op->data.binary.right_constant != NULL
+                    ? (float*)(uintptr_t)op->data.binary.right_constant
+                    : offset_ptr(instance, op->data.binary.right_offset));
+            if (full == NULL || channel == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+            lw_avx2_binary_channel_nchw_f32(
+                binary_operation(op->data.binary.operation), full, channel, output,
+                op->data.binary.pixels, op->data.binary.channels,
+                op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_LEFT_CHANNEL);
+            return LW_STATUS_OK;
+        }
         if (op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_LEFT_CHANNEL) {
             float* full = offset_ptr(instance, op->data.binary.right_offset);
             float* channel = op->data.binary.left_constant != NULL ? (float*)(uintptr_t)op->data.binary.left_constant : offset_ptr(instance, op->data.binary.left_offset);
@@ -247,10 +320,36 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
     case LW_X64_REC_OP_REDUCE_MEAN:
         input = offset_ptr(instance, op->data.reduce.input_offset); output = offset_ptr(instance, op->data.reduce.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
-        lw_avx2_nhwc_reduce_mean_hw_f32(input, output, op->data.reduce.batch, op->data.reduce.height, op->data.reduce.width, op->data.reduce.channels); return LW_STATUS_OK;
+        if (instance->program->backend_layout == LW_X64_REC_BACKEND_NCHW) {
+            for (uint32_t channel = 0u; channel < op->data.reduce.channels; ++channel) {
+                const float* source = input + (size_t)channel * op->data.reduce.height *
+                                             op->data.reduce.width;
+                float sum = 0.0f;
+                for (uint32_t spatial = 0u; spatial < op->data.reduce.height *
+                                                   op->data.reduce.width; ++spatial) {
+                    sum += source[spatial];
+                }
+                output[channel] = sum / (float)(op->data.reduce.height * op->data.reduce.width);
+            }
+        } else {
+            lw_avx2_nhwc_reduce_mean_hw_f32(input, output, op->data.reduce.batch,
+                                             op->data.reduce.height, op->data.reduce.width,
+                                             op->data.reduce.channels);
+        }
+        return LW_STATUS_OK;
     case LW_X64_REC_OP_AVG_POOL: case LW_X64_REC_OP_MAX_POOL:
         input = offset_ptr(instance, op->data.pool.input_offset); output = offset_ptr(instance, op->data.pool.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        if (instance->program->backend_layout == LW_X64_REC_BACKEND_NCHW) {
+            return op->kind == LW_X64_REC_OP_MAX_POOL
+                ? lw_scalar_max_pool2d_f32(input, output, op->data.pool.input_dimensions,
+                                           op->data.pool.output_dimensions, op->data.pool.kernel,
+                                           op->data.pool.strides, op->data.pool.pads, 0u)
+                : lw_scalar_average_pool2d_f32(input, output, op->data.pool.input_dimensions,
+                                               op->data.pool.output_dimensions, op->data.pool.kernel,
+                                               op->data.pool.strides, op->data.pool.pads, 0u,
+                                               op->data.pool.count_include_pad);
+        }
         lw_avx2_nhwc_pool_f32(input, output, (uint32_t)op->data.pool.input_dimensions[0], (uint32_t)op->data.pool.input_dimensions[1], (uint32_t)op->data.pool.input_dimensions[2], (uint32_t)op->data.pool.output_dimensions[1], (uint32_t)op->data.pool.output_dimensions[2], (uint32_t)op->data.pool.input_dimensions[3], (uint32_t)op->data.pool.kernel[0], (uint32_t)op->data.pool.kernel[1], (uint32_t)op->data.pool.strides[0], (uint32_t)op->data.pool.strides[1], (uint32_t)op->data.pool.pads[0], (uint32_t)op->data.pool.pads[1], op->data.pool.count_include_pad, op->data.pool.is_max); return LW_STATUS_OK;
     case LW_X64_REC_OP_TRANSPOSE:
         input = offset_ptr(instance, op->data.transpose.input_offset); output = offset_ptr(instance, op->data.transpose.output_offset);

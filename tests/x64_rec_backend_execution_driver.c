@@ -109,12 +109,13 @@ int main(int argc, char** argv) {
     }
     for (uint32_t oi = 0u; oi < program->op_count; ++oi) {
         uint32_t semantic = program->ops[oi].semantic_begin;
-        uint32_t output_index = node_output(model, semantic);
+        uint32_t semantic_end = semantic + program->ops[oi].semantic_count - 1u;
+        uint32_t output_index = node_output(model, semantic_end);
         const float* expected;
         const float* actual;
         uint64_t count = program->values[output_index].bytes / sizeof(float);
         float max_difference = 0.0f;
-        while (canonical_node_cursor <= semantic) {
+        while (canonical_node_cursor <= semantic_end) {
             if (lw_executor_dispatch_node_f32(canonical_backbone, canonical_node_cursor, 0u,
                                                canonical_input, NULL) != LW_STATUS_OK) {
                 fprintf(stderr, "canonical backbone node %u failed\n", canonical_node_cursor);

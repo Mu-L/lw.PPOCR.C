@@ -143,6 +143,50 @@ void lw_avx2_binary_channel_f32(lw_scalar_binary_op operation, const float* full
     }
 }
 
+
+void lw_avx2_binary_channel_nchw_f32(lw_scalar_binary_op operation, const float* full,
+                                     const float* channel, float* output, uint64_t spatial,
+                                     uint32_t channels, int broadcast_is_left) {
+    if (full == NULL || channel == NULL || output == NULL || channels == 0u) return;
+    for (uint32_t c = 0u; c < channels; ++c) {
+        const float* source = full + (size_t)c * spatial;
+        float* destination = output + (size_t)c * spatial;
+        uint64_t i = 0u;
+#if LW_COMPILES_AVX2_BINARY
+        const __m256 scalar = _mm256_set1_ps(channel[c]);
+        for (; i + 8u <= spatial; i += 8u) {
+            const __m256 value = _mm256_loadu_ps(source + i);
+            __m256 result;
+            if (operation == LW_SCALAR_BINARY_ADD) {
+                result = _mm256_add_ps(broadcast_is_left ? scalar : value,
+                                       broadcast_is_left ? value : scalar);
+            } else if (operation == LW_SCALAR_BINARY_SUB) {
+                result = _mm256_sub_ps(broadcast_is_left ? scalar : value,
+                                       broadcast_is_left ? value : scalar);
+            } else if (operation == LW_SCALAR_BINARY_MUL) {
+                result = _mm256_mul_ps(broadcast_is_left ? scalar : value,
+                                       broadcast_is_left ? value : scalar);
+            } else if (operation == LW_SCALAR_BINARY_DIV) {
+                result = _mm256_div_ps(broadcast_is_left ? scalar : value,
+                                       broadcast_is_left ? value : scalar);
+            } else {
+                break;
+            }
+            _mm256_storeu_ps(destination + i, result);
+        }
+#endif
+        for (; i < spatial; ++i) {
+            const float left = broadcast_is_left ? channel[c] : source[i];
+            const float right = broadcast_is_left ? source[i] : channel[c];
+            if (operation == LW_SCALAR_BINARY_ADD) destination[i] = left + right;
+            else if (operation == LW_SCALAR_BINARY_SUB) destination[i] = left - right;
+            else if (operation == LW_SCALAR_BINARY_MUL) destination[i] = left * right;
+            else if (operation == LW_SCALAR_BINARY_DIV) destination[i] = left / right;
+            else destination[i] = powf(left, right);
+        }
+    }
+}
+
 #if LW_COMPILES_AVX2_BINARY && (defined(__GNUC__) || defined(__clang__))
 __attribute__((target("avx2,fma")))
 #endif

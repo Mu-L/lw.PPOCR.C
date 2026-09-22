@@ -166,6 +166,8 @@ void lw_avx2_fma_nhwc_pointwise_2x32_f32(const float* input,
 
 void lw_avx2_nhwc_affine_f32(const float* input, const float* mul, const float* add,
                              float* output, uint32_t pixels, uint32_t channels);
+void lw_avx2_nchw_affine_f32(const float* input, const float* mul, const float* add,
+                             float* output, uint32_t channels, uint32_t spatial);
 void lw_avx2_nhwc_reduce_mean_hw_f32(const float* input, float* output,
                                      uint32_t batch, uint32_t height,
                                      uint32_t width, uint32_t channels);

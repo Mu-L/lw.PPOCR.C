@@ -40,6 +40,27 @@ void lw_avx2_nhwc_affine_f32(const float* input, const float* mul, const float* 
     }
 }
 
+
+LW_NHWC_SUPPORT_TARGET
+void lw_avx2_nchw_affine_f32(const float* input, const float* mul, const float* add,
+                             float* output, uint32_t channels, uint32_t spatial) {
+    if (input == NULL || mul == NULL || add == NULL || output == NULL) return;
+    for (uint32_t c = 0u; c < channels; ++c) {
+        const float* source = input + (size_t)c * spatial;
+        float* destination = output + (size_t)c * spatial;
+        uint32_t i = 0u;
+#if LW_NHWC_SUPPORT_X86
+        const __m256 scale = _mm256_set1_ps(mul[c]);
+        const __m256 bias = _mm256_set1_ps(add[c]);
+        for (; i + 8u <= spatial; i += 8u) {
+            const __m256 x = _mm256_loadu_ps(source + i);
+            _mm256_storeu_ps(destination + i, _mm256_fmadd_ps(x, scale, bias));
+        }
+#endif
+        for (; i < spatial; ++i) destination[i] = source[i] * mul[c] + add[c];
+    }
+}
+
 LW_NHWC_SUPPORT_TARGET
 void lw_avx2_nhwc_reduce_mean_hw_f32(const float* input, float* output,
                                      uint32_t batch, uint32_t height,
