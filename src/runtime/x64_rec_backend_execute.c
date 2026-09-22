@@ -89,22 +89,73 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
     if (op == NULL) return LW_STATUS_INVALID_ARGUMENT;
     switch (op->kind) {
     case LW_X64_REC_OP_POINTWISE: {
+        lw_nhwc_epilogue ep = { NULL, NULL, op->data.conv.activation, 0u, 0.0f, 0.0f };
         input = offset_ptr(instance, op->data.conv.input_offset);
         output = offset_ptr(instance, op->data.conv.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
-        scalar_nhwc_conv(&op->data.conv, input, output);
+        ep.bias = op->data.conv.bias;
+        lw_avx2_fma_nhwc_pointwise_f32(input, op->data.conv.packed_weights, &ep, output,
+                                       op->data.conv.input_height * op->data.conv.input_width,
+                                       op->data.conv.input_channels, op->data.conv.output_channels);
         return LW_STATUS_OK;
     }
     case LW_X64_REC_OP_DENSE: {
-        input = offset_ptr(instance, op->data.conv.input_offset); output = offset_ptr(instance, op->data.conv.output_offset);
+        lw_nhwc_dense_desc desc;
+        lw_nhwc_epilogue ep;
+        lw_status status;
+        memset(&desc, 0, sizeof(desc));
+        desc.batch = 1u;
+        desc.input_channels = op->data.conv.input_channels;
+        desc.input_height = op->data.conv.input_height;
+        desc.input_width = op->data.conv.input_width;
+        desc.output_channels = op->data.conv.output_channels;
+        desc.output_height = op->data.conv.output_height;
+        desc.output_width = op->data.conv.output_width;
+        desc.kernel_h = op->data.conv.kernel_h;
+        desc.kernel_w = op->data.conv.kernel_w;
+        desc.stride_h = op->data.conv.stride_h;
+        desc.stride_w = op->data.conv.stride_w;
+        desc.pad_top = op->data.conv.pad_top;
+        desc.pad_left = op->data.conv.pad_left;
+        desc.pad_bottom = op->data.conv.pad_bottom;
+        desc.pad_right = op->data.conv.pad_right;
+        desc.dense_kc = op->data.conv.dense_kc;
+        memset(&ep, 0, sizeof(ep));
+        ep.bias = op->data.conv.bias;
+        ep.activation = op->data.conv.activation;
+        input = offset_ptr(instance, op->data.conv.input_offset);
+        output = offset_ptr(instance, op->data.conv.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        status = lw_avx2_fma_nhwc_dense_f32(input, op->data.conv.packed_weights, &ep, output,
+                                             &desc, instance->scratch, op->data.conv.scratch_bytes);
+        if (status == LW_STATUS_OK) return LW_STATUS_OK;
         scalar_nhwc_conv(&op->data.conv, input, output);
         return LW_STATUS_OK;
     }
     case LW_X64_REC_OP_DEPTHWISE: {
-        input = offset_ptr(instance, op->data.conv.input_offset); output = offset_ptr(instance, op->data.conv.output_offset);
+        lw_nhwc_depthwise_desc desc;
+        lw_status status;
+        memset(&desc, 0, sizeof(desc));
+        desc.batch = 1u;
+        desc.channels = op->data.conv.input_channels;
+        desc.input_height = op->data.conv.input_height;
+        desc.input_width = op->data.conv.input_width;
+        desc.output_height = op->data.conv.output_height;
+        desc.output_width = op->data.conv.output_width;
+        desc.kernel_h = op->data.conv.kernel_h;
+        desc.kernel_w = op->data.conv.kernel_w;
+        desc.stride_h = op->data.conv.stride_h;
+        desc.stride_w = op->data.conv.stride_w;
+        desc.pad_top = op->data.conv.pad_top;
+        desc.pad_left = op->data.conv.pad_left;
+        desc.pad_bottom = op->data.conv.pad_bottom;
+        desc.pad_right = op->data.conv.pad_right;
+        input = offset_ptr(instance, op->data.conv.input_offset);
+        output = offset_ptr(instance, op->data.conv.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
-
+        status = lw_avx2_fma_nhwc_depthwise_f32(input, op->data.conv.packed_weights,
+                                                 op->data.conv.bias, output, &desc);
+        if (status == LW_STATUS_OK) return LW_STATUS_OK;
         scalar_nhwc_conv(&op->data.conv, input, output);
         return LW_STATUS_OK;
     }

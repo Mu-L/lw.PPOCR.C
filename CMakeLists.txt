@@ -2221,6 +2221,29 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
         add_test(NAME x64_rec_backend_execution
             COMMAND x64-rec-backend-execution-driver ${LW_PPOCR_C_REC_LWM})
         set_tests_properties(x64_rec_backend_execution PROPERTIES TIMEOUT 120)
+        add_executable(x64-rec-backend-benchmark-driver
+            tests/x64_rec_backend_benchmark_driver.c)
+        target_link_libraries(x64-rec-backend-benchmark-driver PRIVATE lw_ppocr_c)
+        target_include_directories(x64-rec-backend-benchmark-driver PRIVATE
+            src/runtime
+            src/kernels
+            src/simd
+            src/ppocr)
+        target_compile_features(x64-rec-backend-benchmark-driver PRIVATE c_std_11)
+        target_compile_definitions(x64-rec-backend-benchmark-driver PRIVATE
+            LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+        add_dependencies(x64-rec-backend-benchmark-driver convert_rec_model)
+        if(MSVC)
+            target_compile_definitions(x64-rec-backend-benchmark-driver PRIVATE
+                _CRT_SECURE_NO_WARNINGS)
+            target_compile_options(x64-rec-backend-benchmark-driver PRIVATE /W4 /WX /utf-8)
+        else()
+            target_compile_options(x64-rec-backend-benchmark-driver PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+        endif()
+        add_test(NAME x64_rec_backend_benchmark
+            COMMAND x64-rec-backend-benchmark-driver ${LW_PPOCR_C_REC_LWM} 5)
+        set_tests_properties(x64_rec_backend_benchmark PROPERTIES TIMEOUT 120)
         add_executable(rec-fast-prototype-driver tests/rec_fast_prototype_driver.c)
         target_link_libraries(rec-fast-prototype-driver PRIVATE lw_ppocr_c)
         target_include_directories(rec-fast-prototype-driver PRIVATE
