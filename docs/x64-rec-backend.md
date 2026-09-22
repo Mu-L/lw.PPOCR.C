@@ -46,11 +46,11 @@ ctest --test-dir build -C Release -R "x64_rec_backend_(contract|execution|benchm
 
 ## Profile 与 A/B
 
-`x64-rec-backend-benchmark-driver` 只在测试构建且 `LW_EXPERIMENTAL_AVX2_FAST_PATH=ON` 时生成。它使用固定的 960×48 BGR 输入，先预热 3 次，再以 AB/BA 交替方式测量 canonical 与 standalone backend，并按 physical op 分类累计 backbone 时间。输出包含 `backend_profile_ms`、`physical_ops`、`semantic_nodes`、arena/scratch 大小和 `text_match` 门禁。
+`x64-rec-backend-benchmark-driver` 只在测试构建且 `LW_EXPERIMENTAL_AVX2_FAST_PATH=ON` 时生成。它使用固定的 960×48 BGR 输入，先预热 3 次，再以 AB/BA 交替方式测量 canonical 与 standalone backend。正式 `canonical_ms` / `backend_ms` 只使用不带逐算子计时的完整执行路径；另外最多执行 5 次独立 profiling，结果写入 `backend_profile_ms`，因此 profiling 开销不会污染 A/B speedup。输出还包含 `backend_graph_ms`、`backend_profile_runs`、physical op 分类计数、各卷积路径的 fallback 计数、`physical_ops`、`semantic_nodes`、arena/scratch 大小和 `text_match` 门禁。
 
 ```text
 cmake --build build --config Release --target x64-rec-backend-benchmark-driver
 build/Release/x64-rec-backend-benchmark-driver.exe build/models/rec.lwm 30
 ```
 
-当前 Windows x64 本地基线（30 次测量，结果会随 CPU 和负载变化）约为：canonical REC 19.1 ms、standalone backend 41.9 ms，`text_match=true`；backend backbone 中 pointwise 约 20.0 ms、dense 约 10.2 ms，是下一轮优化的优先热点。该数字是开发剖面，不是公开性能承诺。
+当前 Windows x64 本地基线（30 次测量，结果会随 CPU 和负载变化）约为：canonical REC 19.5 ms、standalone backend 43.6 ms，`text_match=true`；backend backbone 中 pointwise 约 20.5 ms、dense 约 10.6 ms，是下一轮优化的优先热点。该数字是开发剖面，不是公开性能承诺。正式 A/B 仍显示 backend 尚未超过 canonical，因此在完成 pointwise/dense 优化前不扩大模型或宽度覆盖。

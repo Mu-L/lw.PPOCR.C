@@ -162,7 +162,13 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
     case LW_X64_REC_OP_AFFINE:
         input = offset_ptr(instance, op->data.affine.input_offset); output = offset_ptr(instance, op->data.affine.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
-        scalar_nhwc_batch_norm(&op->data.affine, input, output); return LW_STATUS_OK;
+        if (op->data.affine.channel_major) {
+            scalar_nhwc_batch_norm(&op->data.affine, input, output);
+        } else {
+            lw_avx2_nhwc_affine_f32(input, op->data.affine.mul, op->data.affine.add,
+                                    output, op->data.affine.pixels, op->data.affine.channels);
+        }
+        return LW_STATUS_OK;
     case LW_X64_REC_OP_ADD: case LW_X64_REC_OP_MUL: case LW_X64_REC_OP_DIV:
         input = op->data.binary.left_constant != NULL ? (float*)(uintptr_t)op->data.binary.left_constant : offset_ptr(instance, op->data.binary.left_offset);
         output = offset_ptr(instance, op->data.binary.output_offset);

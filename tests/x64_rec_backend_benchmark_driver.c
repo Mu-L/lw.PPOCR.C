@@ -159,11 +159,48 @@ static uint32_t profile_slot(uint16_t kind) {
     default: return 10u;
     }
 }
-static int run_backend(lw_x64_rec_program* program, lw_x64_rec_instance* instance,
+static int run_backend_unprofiled(lw_x64_rec_program* program, lw_x64_rec_instance* instance,
+                      const uint8_t* source, uint64_t source_bytes, float* input,
+                      uint64_t input_count, uint32_t width, uint32_t height,
+                      double* preprocess_ms, double* backbone_ms, double* ctc_ms) {
+    uint32_t resized_width = 0u;
+    lw_error error;
+    lw_status status;
+    uint64_t start = clock_ns();
+    lw_error_init(&error);
+    status = lw_rec_preprocess_bgr_u8_nhwc(source, source_bytes, width, height, width * 3u, 960u,
+                                           input, input_count, &resized_width);
+    if (status != LW_STATUS_OK) {
+        fprintf(stderr, "backend preprocess failed: %s\n", error.message);
+        return 0;
+    }
+    if (preprocess_ms != NULL) *preprocess_ms = (double)(clock_ns() - start) / 1000000.0;
+    start = clock_ns();
+    status = lw_x64_rec_instance_run_backbone(instance, &error);
+    if (status != LW_STATUS_OK) {
+        fprintf(stderr, "backend execution failed: %s\n", error.message);
+        return 0;
+    }
+    if (backbone_ms != NULL) *backbone_ms = (double)(clock_ns() - start) / 1000000.0;
+    start = clock_ns();
+    {
+        float* activation = (float*)(void*)(instance->arena +
+            (size_t)program->values[program->ctc.activation_value].offset);
+        status = lw_x64_rec_ctc_execute(program, instance, activation, &error);
+    }
+    if (status != LW_STATUS_OK) {
+        fprintf(stderr, "backend CTC failed: %s\n", error.message);
+        return 0;
+    }
+    if (ctc_ms != NULL) *ctc_ms = (double)(clock_ns() - start) / 1000000.0;
+    return 1;
+}
+
+static int run_backend_profiled(lw_x64_rec_program* program, lw_x64_rec_instance* instance,
                       const uint8_t* source, uint64_t source_bytes, float* input,
                       uint64_t input_count, uint32_t width, uint32_t height,
                       double* preprocess_ms, double* backbone_ms, double* ctc_ms,
-                      double* category_totals_ms) {
+                      double* category_totals_ms, double* profile_ctc_total_ms) {
     uint32_t resized_width = 0u;
     lw_error error;
     lw_status status;
@@ -200,9 +237,47 @@ static int run_backend(lw_x64_rec_program* program, lw_x64_rec_instance* instanc
         fprintf(stderr, "backend CTC failed: %s\n", error.message);
         return 0;
     }
-    if (ctc_ms != NULL) *ctc_ms = (double)(clock_ns() - start) / 1000000.0;
+    {
+        uint64_t elapsed = clock_ns() - start;
+        if (ctc_ms != NULL) *ctc_ms = (double)elapsed / 1000000.0;
+        if (profile_ctc_total_ms != NULL) *profile_ctc_total_ms += (double)elapsed / 1000000.0;
+    }
     return 1;
 }
+static void count_conv_paths(const lw_x64_rec_program* program,
+                             uint32_t* pointwise_ops, uint32_t* dense_ops,
+                             uint32_t* depthwise_ops, uint32_t* pointwise_fallbacks,
+                             uint32_t* dense_fallbacks, uint32_t* depthwise_fallbacks) {
+    uint32_t index;
+    uint32_t pointwise = 0u, dense = 0u, depthwise = 0u;
+    uint32_t pointwise_fallback = 0u, dense_fallback = 0u, depthwise_fallback = 0u;
+    if (program != NULL) {
+        for (index = 0u; index < program->op_count; ++index) {
+            const lw_x64_rec_op* op = &program->ops[index];
+            if (op->kind == LW_X64_REC_OP_POINTWISE) {
+                ++pointwise;
+                if (op->data.conv.output_channels % LW_NHWC_OC_BLOCK != 0u ||
+                    (op->data.conv.activation != LW_NHWC_ACT_NONE &&
+                     op->data.conv.activation != LW_NHWC_ACT_RELU &&
+                     op->data.conv.activation != LW_NHWC_ACT_HARDSWISH)) ++pointwise_fallback;
+            } else if (op->kind == LW_X64_REC_OP_DENSE) {
+                ++dense;
+                if (op->data.conv.scalar_fallback ||
+                    op->data.conv.output_channels % LW_NHWC_OC_BLOCK != 0u) ++dense_fallback;
+            } else if (op->kind == LW_X64_REC_OP_DEPTHWISE) {
+                ++depthwise;
+                if ((op->data.conv.input_channels & 7u) != 0u) ++depthwise_fallback;
+            }
+        }
+    }
+    if (pointwise_ops != NULL) *pointwise_ops = pointwise;
+    if (dense_ops != NULL) *dense_ops = dense;
+    if (depthwise_ops != NULL) *depthwise_ops = depthwise;
+    if (pointwise_fallbacks != NULL) *pointwise_fallbacks = pointwise_fallback;
+    if (dense_fallbacks != NULL) *dense_fallbacks = dense_fallback;
+    if (depthwise_fallbacks != NULL) *depthwise_fallbacks = depthwise_fallback;
+}
+
 int main(int argc, char** argv) {
     const uint32_t width = 960u;
     const uint32_t height = 48u;
@@ -227,6 +302,14 @@ int main(int argc, char** argv) {
     double* backend_backbone_samples = NULL;
     double* backend_ctc_samples = NULL;
     double category_totals_ms[11] = {0.0};
+    double profile_ctc_total_ms = 0.0;
+    uint32_t profile_count = 0u;
+    uint32_t pointwise_ops = 0u;
+    uint32_t dense_ops = 0u;
+    uint32_t depthwise_ops = 0u;
+    uint32_t pointwise_fallbacks = 0u;
+    uint32_t dense_fallbacks = 0u;
+    uint32_t depthwise_fallbacks = 0u;
     uint32_t sample_count = 0u;
     uint32_t warmup;
     uint32_t iteration;
@@ -287,8 +370,8 @@ int main(int argc, char** argv) {
         if (!run_canonical(canonical, source, source_bytes, canonical_input, input_count, width,
                            height, canonical_indices, canonical_probabilities, program->time_steps,
                            program->class_count, &ignored, &ignored) ||
-            !run_backend(program, instance, source, source_bytes, backend_input, input_count,
-                         width, height, &ignored, &ignored, &ignored, NULL) ||
+            !run_backend_unprofiled(program, instance, source, source_bytes, backend_input, input_count,
+                         width, height, &ignored, &ignored, &ignored) ||
             !compare_ctc(canonical_indices, canonical_probabilities, instance->best_indices,
                          instance->best_probabilities, program->time_steps, NULL)) {
             goto cleanup;
@@ -306,13 +389,13 @@ int main(int argc, char** argv) {
                                width, height, canonical_indices, canonical_probabilities,
                                program->time_steps, program->class_count, &canonical_preprocess,
                                &canonical_graph) ||
-                !run_backend(program, instance, source, source_bytes, backend_input, input_count,
-                             width, height, &backend_preprocess, &backend_backbone, &backend_ctc, category_totals_ms)) {
+                !run_backend_unprofiled(program, instance, source, source_bytes, backend_input, input_count,
+                             width, height, &backend_preprocess, &backend_backbone, &backend_ctc)) {
                 goto cleanup;
             }
         } else {
-            if (!run_backend(program, instance, source, source_bytes, backend_input, input_count,
-                             width, height, &backend_preprocess, &backend_backbone, &backend_ctc, category_totals_ms) ||
+            if (!run_backend_unprofiled(program, instance, source, source_bytes, backend_input, input_count,
+                             width, height, &backend_preprocess, &backend_backbone, &backend_ctc) ||
                 !run_canonical(canonical, source, source_bytes, canonical_input, input_count,
                                width, height, canonical_indices, canonical_probabilities,
                                program->time_steps, program->class_count, &canonical_preprocess,
@@ -332,6 +415,19 @@ int main(int argc, char** argv) {
         backend_ctc_samples[sample_count] = backend_ctc;
         ++sample_count;
     }
+    profile_count = iterations < 5u ? iterations : 5u;
+    for (iteration = 0u; iteration < profile_count; ++iteration) {
+        double ignored;
+        if (!run_backend_profiled(program, instance, source, source_bytes, backend_input,
+                                  input_count, width, height, &ignored, &ignored, &ignored,
+                                  category_totals_ms, &profile_ctc_total_ms) ||
+            !compare_ctc(canonical_indices, canonical_probabilities, instance->best_indices,
+                         instance->best_probabilities, program->time_steps, NULL)) {
+            goto cleanup;
+        }
+    }
+    count_conv_paths(program, &pointwise_ops, &dense_ops, &depthwise_ops,
+                     &pointwise_fallbacks, &dense_fallbacks, &depthwise_fallbacks);
     {
         double canonical_median = median(canonical_samples, sample_count);
         double backend_median = median(backend_samples, sample_count);
@@ -343,22 +439,31 @@ int main(int argc, char** argv) {
         printf("{\"schema_version\":1,\"width\":%u,\"iterations\":%u,\"warmup\":%u,"
                "\"canonical_ms\":%.6f,\"backend_ms\":%.6f,\"speedup\":%.6f,"
                "\"canonical_preprocess_ms\":%.6f,\"backend_preprocess_ms\":%.6f,"
-               "\"backend_backbone_ms\":%.6f,\"backend_ctc_ms\":%.6f,"
+               "\"backend_backbone_ms\":%.6f,\"backend_ctc_ms\":%.6f,\"backend_graph_ms\":%.6f,"
+               "\"backend_profile_runs\":%u,"
                "\"backend_profile_ms\":{\"pointwise\":%.6f,\"dense\":%.6f,\"depthwise\":%.6f,\"affine\":%.6f,"
                "\"binary\":%.6f,\"unary\":%.6f,\"reduce\":%.6f,\"pool\":%.6f,"
-               "\"transpose\":%.6f,\"matmul\":%.6f},"
+               "\"transpose\":%.6f,\"matmul\":%.6f,\"ctc\":%.6f},"
                "\"physical_ops\":%u,\"semantic_nodes\":%u,\"arena_bytes\":%llu,"
-               "\"scratch_bytes\":%llu,\"unsupported_nodes\":%u,\"text_match\":true}\n",
+               "\"scratch_bytes\":%llu,\"unsupported_nodes\":%u,"
+               "\"pointwise_ops\":%u,\"dense_ops\":%u,\"depthwise_ops\":%u,"
+               "\"pointwise_fallbacks\":%u,\"dense_fallbacks\":%u,\"depthwise_fallbacks\":%u,"
+               "\"scalar_conv_fallbacks\":%u,\"text_match\":true}\n",
                 width, sample_count, WARMUP_ROUNDS, canonical_median, backend_median, speedup,
                 canonical_preprocess, backend_preprocess, backend_backbone, backend_ctc,
-                category_totals_ms[0] / sample_count, category_totals_ms[1] / sample_count,
-                category_totals_ms[2] / sample_count, category_totals_ms[3] / sample_count,
-                category_totals_ms[4] / sample_count, category_totals_ms[5] / sample_count,
-                category_totals_ms[6] / sample_count, category_totals_ms[7] / sample_count,
-                category_totals_ms[8] / sample_count, category_totals_ms[9] / sample_count,
+                backend_backbone + backend_ctc, profile_count,
+                category_totals_ms[0] / profile_count, category_totals_ms[1] / profile_count,
+                category_totals_ms[2] / profile_count, category_totals_ms[3] / profile_count,
+                category_totals_ms[4] / profile_count, category_totals_ms[5] / profile_count,
+                category_totals_ms[6] / profile_count, category_totals_ms[7] / profile_count,
+                category_totals_ms[8] / profile_count, category_totals_ms[9] / profile_count,
+                profile_ctc_total_ms / profile_count,
                 program->op_count, program->semantic_consumed + (program->ctc_fused ? 3u : 0u),
                 (unsigned long long)program->arena_bytes,
-                (unsigned long long)program->scratch_bytes, program->unsupported_nodes);
+                (unsigned long long)program->scratch_bytes, program->unsupported_nodes,
+                pointwise_ops, dense_ops, depthwise_ops, pointwise_fallbacks,
+                dense_fallbacks, depthwise_fallbacks,
+                pointwise_fallbacks + dense_fallbacks + depthwise_fallbacks);
     }
     result = 0;
 
