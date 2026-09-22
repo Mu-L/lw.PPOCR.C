@@ -310,6 +310,8 @@ if(LW_EXPERIMENTAL_AVX2_FAST_PATH AND NOT EMSCRIPTEN AND
         src/runtime/x64_rec_fast_executor.c
         src/runtime/x64_rec_backend_compile.c
         src/runtime/x64_rec_backend_execute.c
+        src/runtime/x64_rec_backend_arena.c
+        src/runtime/ctc_projection_internal.c
         src/runtime/layout_convert_x64.c
         src/kernels/nhwc_pack.c
         src/kernels/nhwc_depthwise.c
