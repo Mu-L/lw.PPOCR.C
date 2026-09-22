@@ -308,6 +308,8 @@ if(LW_EXPERIMENTAL_AVX2_FAST_PATH AND NOT EMSCRIPTEN AND
         src/runtime/layout_planner.c
         src/runtime/x64_rec_fast_plan.c
         src/runtime/x64_rec_fast_executor.c
+        src/runtime/x64_rec_backend_compile.c
+        src/runtime/x64_rec_backend_execute.c
         src/runtime/layout_convert_x64.c
         src/kernels/nhwc_pack.c
         src/kernels/nhwc_depthwise.c
@@ -2172,6 +2174,28 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_nhwc_dense_benchmark.py"
                     --driver "$<TARGET_FILE:nhwc-dense-benchmark-driver>")
         set_tests_properties(nhwc_dense_benchmark PROPERTIES TIMEOUT 120)
+        add_executable(x64-rec-backend-contract-driver
+            tests/x64_rec_backend_contract_driver.c)
+        target_link_libraries(x64-rec-backend-contract-driver PRIVATE lw_ppocr_c)
+        target_include_directories(x64-rec-backend-contract-driver PRIVATE
+            src/runtime
+            src/kernels
+            src/simd)
+        target_compile_features(x64-rec-backend-contract-driver PRIVATE c_std_11)
+        target_compile_definitions(x64-rec-backend-contract-driver PRIVATE
+            LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+        add_dependencies(x64-rec-backend-contract-driver convert_rec_model)
+        if(MSVC)
+            target_compile_definitions(x64-rec-backend-contract-driver PRIVATE
+                _CRT_SECURE_NO_WARNINGS)
+            target_compile_options(x64-rec-backend-contract-driver PRIVATE /W4 /WX /utf-8)
+        else()
+            target_compile_options(x64-rec-backend-contract-driver PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+        endif()
+        add_test(NAME x64_rec_backend_contract
+            COMMAND x64-rec-backend-contract-driver ${LW_PPOCR_C_REC_LWM})
+        set_tests_properties(x64_rec_backend_contract PROPERTIES TIMEOUT 120)
         add_executable(rec-fast-prototype-driver tests/rec_fast_prototype_driver.c)
         target_link_libraries(rec-fast-prototype-driver PRIVATE lw_ppocr_c)
         target_include_directories(rec-fast-prototype-driver PRIVATE
