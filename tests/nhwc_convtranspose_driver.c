@@ -3,6 +3,7 @@
 
 #include "cpu_features.h"
 #include "nhwc_internal.h"
+#include "x64_det_backend_internal.h"
 #include "../src/kernels/scalar_kernels.h"
 
 #include <inttypes.h>
@@ -419,6 +420,46 @@ cleanup:
     return ok;
 }
 
+
+static int test_convert(uint32_t channels, uint32_t height, uint32_t width, uint32_t batch) {
+    uint64_t count = (uint64_t)batch * height * width * channels;
+    float* nchw = (float*)malloc((size_t)count * sizeof(float));
+    float* nhwc = (float*)malloc((size_t)count * sizeof(float));
+    float* roundtrip = (float*)malloc((size_t)count * sizeof(float));
+    float* reference = (float*)malloc((size_t)count * sizeof(float));
+    uint32_t n;
+    int ok = 0;
+    if (nchw == NULL || nhwc == NULL || roundtrip == NULL || reference == NULL) goto cleanup;
+    fill_values(nchw, count, 0xABu);
+    lw_x64_fast_nchw_to_nhwc(nchw, nhwc, batch, channels, height, width);
+    lw_x64_fast_nhwc_to_nchw(nhwc, roundtrip, batch, channels, height, width);
+    /* Scalar reference for the NHWC layout. */
+    for (n = 0u; n < batch; ++n) {
+        uint32_t y;
+        for (y = 0u; y < height; ++y) {
+            uint32_t x;
+            for (x = 0u; x < width; ++x) {
+                uint32_t c;
+                for (c = 0u; c < channels; ++c) {
+                    reference[(((size_t)n * height + y) * width + x) * channels + c] =
+                        nchw[((size_t)n * channels + c) * height * width +
+                             (size_t)y * width + x];
+                }
+            }
+        }
+    }
+    ok = memcmp(nhwc, reference, (size_t)count * sizeof(float)) == 0 &&
+         memcmp(roundtrip, nchw, (size_t)count * sizeof(float)) == 0;
+    printf("{\"case\":\"convert-c%u-%ux%u-b%u\",\"bit_exact\":%d}\n",
+           channels, height, width, batch, ok);
+cleanup:
+    free(reference);
+    free(roundtrip);
+    free(nhwc);
+    free(nchw);
+    return ok;
+}
+
 int main(void) {
     const lw_cpu_capabilities capabilities = lw_get_cpu_capabilities();
     if (!lw_simd_level_is_avx2(capabilities.simd) || !capabilities.has_avx2_fma) {
@@ -441,5 +482,10 @@ int main(void) {
     if (!test_depthwise_rows(32u, 16u, 32u, 3u, 3u, 1u, 1u, 1u, 1u)) return 1;
     if (!test_depthwise_rows(48u, 9u, 17u, 5u, 5u, 1u, 1u, 2u, 2u)) return 1;
     if (!test_depthwise_rows(64u, 8u, 16u, 3u, 3u, 2u, 2u, 1u, 1u)) return 1;
+    if (!test_convert(16u, 5u, 9u, 1u)) return 1;
+    if (!test_convert(24u, 8u, 13u, 2u)) return 1;
+    if (!test_convert(64u, 3u, 7u, 1u)) return 1;
+    if (!test_convert(3u, 32u, 64u, 1u)) return 1;
+    if (!test_convert(12u, 16u, 33u, 2u)) return 1;
     return 0;
 }

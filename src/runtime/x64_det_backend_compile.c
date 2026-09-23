@@ -874,6 +874,23 @@ static lw_x64_det_compile_result lower_ops(const lw_model* model, const lw_sessi
                                            lw_x64_det_program* program, uint32_t limit,
                                            lw_error* error);
 
+static uint32_t det_tensor_consumer_count(const lw_model* model, uint32_t tensor_index) {
+    uint32_t count = 0u;
+    uint32_t node;
+    for (node = 0u; node < model->info.node_count; ++node) {
+        const uint8_t* current = node_bytes(model, node);
+        uint16_t input_count = lwm_read_u16(current + 2u);
+        uint16_t input_index;
+        for (input_index = 0u; input_index < input_count; ++input_index) {
+            if (lwm_read_u32(current + 8u + (size_t)input_index * sizeof(uint32_t)) ==
+                tensor_index) {
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
 static int det_input_is_neutral(const lw_session* session, uint32_t tensor_index) {
     return tensor_index < session->model->info.tensor_count &&
            lw_layout_tensor_is_neutral(session, tensor_index);
@@ -1060,6 +1077,36 @@ static lw_x64_det_compile_result lower_ops(const lw_model* model, const lw_sessi
             program->values[lwm_read_u32(node + 40u)].producer = (int32_t)physical;
             update_input_uses(model, session, program, i, (int32_t)physical);
             ++physical;
+            /* Conv+Relu epilogue fusion: a single-consumer Relu directly
+             * after an NHWC pointwise/dense conv folds into the epilogue
+             * (the kernels already apply bias+ReLU lane-exactly). The elided
+             * Relu output aliases the conv output. */
+            if (semantic == LW_OP_CONV && i + 1u < model->info.node_count) {
+                const uint8_t* next = node_bytes(model, i + 1u);
+                uint32_t conv_output = lwm_read_u32(node + 40u);
+                if (lwm_read_u16(next) == LW_OP_RELU &&
+                    lwm_read_u32(next + 8u) == conv_output &&
+                    det_tensor_consumer_count(model, conv_output) == 1u) {
+                    lw_x64_det_op* conv_op = &program->ops[physical - 1u];
+                    if ((conv_op->kind == LW_X64_DET_OP_POINTWISE ||
+                         conv_op->kind == LW_X64_DET_OP_DENSE) &&
+                        conv_op->data.conv.activation == LW_NHWC_ACT_NONE) {
+                        uint32_t relu_output = lwm_read_u32(next + 40u);
+                        conv_op->data.conv.activation = LW_NHWC_ACT_RELU;
+                        conv_op->semantic_count = 2u;
+                        /* The conv output is consumed inline by the epilogue;
+                         * the fused op's slot is the Relu output tensor. */
+                        conv_op->data.conv.output_offset =
+                            program->values[relu_output].offset;
+                        program->values[conv_output].producer = -1;
+                        program->values[conv_output].last_use = -1;
+                        program->values[relu_output].producer = (int32_t)(physical - 1u);
+                        ++program->semantic_elided;
+                        ++i;
+                        continue;
+                    }
+                }
+            }
         }
     }
     /* Graph-output tensors are read by the caller in NCHW; if a producer left
@@ -1219,6 +1266,7 @@ lw_x64_det_compile_result lw_x64_det_backend_compile_ex(
         lw_x64_det_program_free(program);
         return lowered;
     }
+    program->semantic_consumed += program->semantic_elided;
     program->output_value = info.output_count
         ? lwm_read_u32(model->bytes + (size_t)model->output_offset) : 0u;
     for (i = 0u; i < program->op_count; ++i) {

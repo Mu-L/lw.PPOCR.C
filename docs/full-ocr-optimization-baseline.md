@@ -285,3 +285,20 @@ vs 1795.2 ms). End-to-end tiny 4w improved to 89.3 ms (throughput 11.2/s).
 The converter's tiny-only SHA guard now yields to an LW_ALLOW_ANY_DET
 environment override so the small/medium models can be converted for
 testing. Full suite 80/80.
+
+Follow-up optimization pass (2026-09-23): (a) the planner's dense rule
+widened again to any OC >= 8 — the 12-channel head conv of the small family
+(12%8 != 0) also leaves the serial NCHW arm; the kernels store partial tail
+blocks lane-exactly regardless of alignment. (b) Conv+Relu epilogue fusion
+in the DET lowering: a single-consumer Relu directly after an NHWC
+pointwise/dense conv folds into the epilogue (semantic span widens to 2 so
+the operator profile keeps counting both nodes; the conv output tensor is
+never materialized; the fused op writes the Relu output tensor's slot; the
+scalar fallback now applies the fused activation). (c) The layout converts
+got an AVX2 8x8-transpose path for 8-multiple channels (bit-exact, kernel-
+level round-trip tests incl. 3/12-channel scalar paths); small-det convert
+time dropped 22.7 -> 2.1 ms. (d) The REC fast-plan prototype's own OC gate
+synced to the planner (OC >= 8, depthwise unchanged). Results at 8w:
+tiny 640 1.87x (28.0 vs 52.3 ms), small 960 2.21x (164.0 vs 362.3 ms),
+medium 960 2.81x (666 vs 1871 ms); tiny end-to-end 4w 89.4 ms. Full suite
+80/80.

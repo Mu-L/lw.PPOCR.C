@@ -352,6 +352,7 @@ static void scalar_nhwc_conv_row_range(const lw_x64_det_conv_op* conv, const flo
                         }
                     }
                 }
+                if (conv->activation == LW_NHWC_ACT_RELU && sum < 0.0f) sum = 0.0f;
                 output[((size_t)oy * conv->output_width + ox) * conv->output_channels + oc] = sum;
             }
         }

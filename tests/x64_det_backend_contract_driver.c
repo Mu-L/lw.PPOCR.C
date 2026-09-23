@@ -209,6 +209,12 @@ static int check_per_tensor_parity(const lw_x64_det_program* nchw_program,
                 result = 0;
                 goto done;
             }
+            if (pass == 1u && op <= 1u) {
+                const float* arena_probe =
+                    (const float*)(const void*)(instance->arena + (size_t)0);
+                fprintf(stderr, "after op %u: arena0=%.9g %.9g %.9g %.9g\n", op,
+                        arena_probe[0], arena_probe[1], arena_probe[2], arena_probe[3]);
+            }
             if (pass != 0u && physical->kind == LW_X64_DET_OP_LAYOUT_CONVERT) {
                 const lw_x64_det_convert_op* convert = &physical->data.convert;
                 const float* source = (const float*)(const void*)(instance->arena +
@@ -296,8 +302,22 @@ static int check_per_tensor_parity(const lw_x64_det_program* nchw_program,
                      * four orders of magnitude below real divergence (which
                      * showed up at O(1)-O(100)). */
                     if (max_abs > 1.0e-3) {
+                        uint64_t mismatch_element;
+                        uint64_t printed = 0u;
                         fprintf(stderr, "%sarm divergence: tensor %u (node %u, op %u) max_abs %.9g\n",
                                 sharded ? "sharded " : "", tensor_index, node_index, op, max_abs);
+                        for (mismatch_element = 0u; mismatch_element < elements && printed < 4u;
+                             ++mismatch_element) {
+                            double diff = fabs((double)snapshots[tensor_index][mismatch_element] -
+                                               (double)source[mismatch_element]);
+                            if (diff > 1.0e-3) {
+                                fprintf(stderr, "  at %llu: nchw %.9g nhwc %.9g\n",
+                                        (unsigned long long)mismatch_element,
+                                        snapshots[tensor_index][mismatch_element],
+                                        source[mismatch_element]);
+                                ++printed;
+                            }
+                        }
                         result = 0;
                         goto done;
                     }

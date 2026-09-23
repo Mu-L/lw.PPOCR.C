@@ -495,7 +495,7 @@ static int fast_prepare_conv(lw_x64_rec_fast_plan* plan, uint32_t node_index,
         weight->dimensions[2] != kh ||
         weight->dimensions[3] != kw ||
         (is_depthwise ? ((uint32_t)output->dimensions[1] < 8u || ((uint32_t)output->dimensions[1] & 7u) != 0u) :
-         ((uint32_t)output->dimensions[1] < 8u || ((uint32_t)output->dimensions[1] & 7u) != 0u))) return 0;
+         ((uint32_t)output->dimensions[1] < 8u))) return 0;
     conv = &fast_node->data.conv;
     memset(conv, 0, sizeof(*conv));
     conv->residual_index = UINT32_MAX;

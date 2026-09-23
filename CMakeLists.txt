@@ -2220,7 +2220,8 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
         target_link_libraries(nhwc-convtranspose-driver PRIVATE lw_ppocr_c)
         target_include_directories(nhwc-convtranspose-driver PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels"
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/simd")
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/simd"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime")
         target_compile_features(nhwc-convtranspose-driver PRIVATE c_std_11)
         target_compile_definitions(nhwc-convtranspose-driver PRIVATE
             LW_EXPERIMENTAL_AVX2_FAST_PATH=1)

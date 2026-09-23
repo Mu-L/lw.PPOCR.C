@@ -191,10 +191,10 @@ static int layout_conv_capable(const lw_session* session, const uint8_t* node,
     }
     if (group == 1u) {
         /* The NHWC kernels pack in 16-lane blocks and store partial tail
-         * blocks lane-exactly, so any multiple of 8 qualifies (the 24-channel
-         * small-model family would otherwise fall back to the serial NCHW
-         * arm). */
-        return weight->dimensions[0] >= 8 && (weight->dimensions[0] & 7) == 0;
+         * blocks lane-exactly, so any channel count >= 8 qualifies (the
+         * 24-channel small-model family, and the 12-channel head conv, would
+         * otherwise fall back to the serial NCHW arm). */
+        return weight->dimensions[0] >= 8;
     }
     return group == (uint32_t)input->dimensions[1] && weight->dimensions[1] == 1 &&
            (group & 7u) == 0u;
