@@ -116,11 +116,19 @@
     browserDiagnostics.open = true;
   }
 
-  function waitForImage(image) {
-    if (typeof image.decode === "function") return image.decode();
+  function waitForImage(image, url) {
     return new Promise((resolve, reject) => {
-      image.onload = () => resolve();
-      image.onerror = () => reject(new Error("图片解码失败"));
+      image.onload = () => {
+        image.onload = null;
+        image.onerror = null;
+        resolve();
+      };
+      image.onerror = () => {
+        image.onload = null;
+        image.onerror = null;
+        reject(new Error("图片解码失败"));
+      };
+      image.src = url;
     });
   }
 
@@ -372,6 +380,8 @@
   function drawPreview(image, width, height) {
     canvas.width = width;
     canvas.height = height;
+    canvas.style.removeProperty("width");
+    canvas.style.removeProperty("height");
     const context = getCanvasContext(canvas);
     if (!context) throw new Error("当前浏览器无法创建 Canvas 2D 上下文");
     context.drawImage(image, 0, 0, width, height);
@@ -439,28 +449,31 @@
     const page = findPdfPageResult(source.currentPage);
     renderResults(page ? page.lines : [], source.currentPage, source.pageCount);
   }
-  async function decodeImagePreview(file) {
+  async function decodeImagePreview(file, sequence) {
     const started = performance.now();
-    let image;
+    let image = null;
     let close = null;
-    if (typeof window.createImageBitmap === "function") {
-      image = await window.createImageBitmap(file);
-      close = image.close ? () => image.close() : null;
-    } else {
-      const url = window.URL.createObjectURL(file);
-      try {
+    let url = null;
+    try {
+      if (typeof window.createImageBitmap === "function") {
+        try {
+          image = await window.createImageBitmap(file);
+          close = image.close ? () => image.close() : null;
+        } catch (_) {
+          // Some mobile browsers expose createImageBitmap but reject valid files.
+          // The Image/object-URL path is a separate decoder and can still work.
+        }
+      }
+      if (!image) {
+        url = window.URL.createObjectURL(file);
         image = new window.Image();
         image.decoding = "async";
-        const ready = waitForImage(image);
-        image.src = url;
-        await ready;
-      } finally {
-        window.URL.revokeObjectURL(url);
+        await waitForImage(image, url);
       }
-    }
-    try {
+      if (sequence !== previewSequence) return null;
       originalWidth = image.width || image.naturalWidth;
       originalHeight = image.height || image.naturalHeight;
+      if (!originalWidth || !originalHeight) throw new Error("图片尺寸无效");
       const scale = Math.min(1, IMAGE_MAX_SIDE / Math.max(originalWidth, originalHeight));
       const width = Math.max(1, Math.round(originalWidth * scale));
       const height = Math.max(1, Math.round(originalHeight * scale));
@@ -471,6 +484,7 @@
       return {width, height};
     } finally {
       if (close) close();
+      if (url) window.URL.revokeObjectURL(url);
     }
   }
   function updatePdfControls() {
@@ -550,7 +564,7 @@
     if (sourceKind(file) === "image") {
       try {
         statusNode.textContent = "正在准备图片…";
-        const prepared = await decodeImagePreview(file);
+        const prepared = await decodeImagePreview(file, sequence);
         if (sequence !== previewSequence) return null;
         source = {
           kind: "image",
@@ -756,8 +770,13 @@
     const file = input.files && input.files.length ? input.files[0] : null;
     setPickerState(sourceName, file ? "selected" : "cancelled");
     if (!file) return;
+    // Allow retrying the same file after a failed decode, including via the
+    // input label (which does not go through openNativeFilePicker).
+    try { input.value = ""; } catch (_) {}
+    const sequence = previewSequence + 1;
     selectFile(file).catch(error => {
-      statusNode.textContent = "图片加载失败：" +
+      if (sequence !== previewSequence) return;
+      statusNode.textContent = (sourceKind(file) === "pdf" ? "PDF 加载失败：" : "图片加载失败：") +
         (error && error.message ? error.message : String(error));
     });
   }
@@ -1008,8 +1027,8 @@
     await selectFile(null);
     canvas.width = 0;
     canvas.height = 0;
-    canvas.style.width = "0px";
-    canvas.style.height = "0px";
+    canvas.style.removeProperty("width");
+    canvas.style.removeProperty("height");
     overlay.removeAttribute("viewBox");
     if (engine) updateStats(engine.getStatus());
     refreshSourceControls();

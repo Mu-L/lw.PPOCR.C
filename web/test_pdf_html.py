@@ -197,6 +197,23 @@ def main() -> int:
             assert page.locator("#pdf-controls").is_visible()
             assert page.locator("#pdf-page-label").inner_text() == "1 / 2"
             assert page.locator("#canvas").evaluate("canvas => canvas.width > 0")
+            page.locator("#clear").click()
+            page.wait_for_function(
+                "() => window.__lwOcrTest.snapshot().sourceKind === null && "
+                "document.querySelector('#canvas').width === 0",
+                timeout=180_000,
+            )
+            page.locator("#file").set_input_files(str(fixture))
+            page.wait_for_function(
+                "() => window.__lwOcrTest.snapshot().sourceKind === 'pdf' && "
+                "!document.querySelector('#run').disabled",
+                timeout=180_000,
+            )
+            assert page.locator("#canvas").evaluate(
+                "canvas => canvas.width > 0 && canvas.height > 0 && "
+                "canvas.getBoundingClientRect().width > 0 && "
+                "canvas.getBoundingClientRect().height > 0"
+            )
             page.locator("#toggle-overlay").click()
             assert page.locator("#overlay").is_hidden()
             assert page.evaluate("window.__lwOcrTest.snapshot().overlayVisible") is False

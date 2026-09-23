@@ -158,6 +158,11 @@ def main() -> int:
             "document.querySelector('#status').textContent.includes('点击')",
             timeout=180_000,
         )
+        assert page.locator("#canvas").evaluate(
+            "canvas => canvas.width > 0 && canvas.height > 0 && "
+            "canvas.getBoundingClientRect().width > 0 && "
+            "canvas.getBoundingClientRect().height > 0"
+        )
         assert page.locator("#results .line").count() == 0
         assert all(export_buttons.nth(index).is_disabled() for index in range(3))
 
@@ -283,6 +288,7 @@ def main() -> int:
         cleared_snapshot = page.evaluate("window.__lwOcrTest.snapshot()")
         assert not cleared_snapshot["hasResults"], cleared_snapshot
         assert not cleared_snapshot["exportEnabled"], cleared_snapshot
+        assert page.locator("#canvas").evaluate("canvas => canvas.width === 0")
 
         # A newly selected image invalidates old export data immediately.
         page.locator("#file").set_input_files(str(sample))
@@ -294,6 +300,54 @@ def main() -> int:
         reset_snapshot = page.evaluate("window.__lwOcrTest.snapshot()")
         assert not reset_snapshot["hasResults"], reset_snapshot
         assert not reset_snapshot["exportEnabled"], reset_snapshot
+        assert page.locator("#canvas").evaluate(
+            "canvas => canvas.width > 0 && canvas.height > 0 && "
+            "canvas.getBoundingClientRect().width > 0 && "
+            "canvas.getBoundingClientRect().height > 0"
+        )
+
+        # Mobile browsers may expose createImageBitmap but fail to decode a
+        # valid local file. The Image/object-URL fallback must still preview it.
+        page.evaluate(
+            """() => {
+              window.__savedCreateImageBitmap = window.createImageBitmap;
+              window.createImageBitmap = () => Promise.reject(new Error('decoder unavailable'));
+            }"""
+        )
+        page.locator("#file").set_input_files(str(sample))
+        page.wait_for_function(
+            "() => window.__lwOcrTest.snapshot().sourceKind === 'image' && "
+            "!document.querySelector('#run').disabled",
+            timeout=180_000,
+        )
+        assert page.locator("#canvas").evaluate(
+            "canvas => canvas.width > 0 && canvas.getBoundingClientRect().width > 0"
+        )
+
+        # A transient decoder failure must not trap the same selected file.
+        page.evaluate(
+            """() => {
+              window.__savedCreateObjectURL = URL.createObjectURL;
+              URL.createObjectURL = () => { throw new Error('temporary URL failure'); };
+            }"""
+        )
+        page.locator("#file").set_input_files(str(sample))
+        page.wait_for_function(
+            "() => document.querySelector('#status').textContent.includes('图片加载失败')",
+            timeout=180_000,
+        )
+        assert page.locator("#file").input_value() == ""
+        page.evaluate("URL.createObjectURL = window.__savedCreateObjectURL")
+        page.locator("#file").set_input_files(str(sample))
+        page.wait_for_function(
+            "() => window.__lwOcrTest.snapshot().sourceKind === 'image' && "
+            "!document.querySelector('#run').disabled",
+            timeout=180_000,
+        )
+        assert page.locator("#canvas").evaluate(
+            "canvas => canvas.width > 0 && canvas.getBoundingClientRect().width > 0"
+        )
+        page.evaluate("window.createImageBitmap = window.__savedCreateImageBitmap")
 
         # A plain-text paste must pass through untouched. An image paste must
         # be handled by the real document paste listener, load only the first
