@@ -382,6 +382,7 @@ HTTP Demo 和正式发布包均不链接、加载或携带 OpenCV。
 - [Runtime 内存与性能开发设计（开发中）](docs/runtime-memory-performance-design.md)
 - [项目详细开发设计与执行计划](docs/project-development-design.md)
 - [Windows x64 OCR 性能分析工作流](docs/engine-comparison.md)
+- [x64 三模型样图与上一发布版的耗时、内存对照 CI](docs/release-sample-ocr-comparison.md)
 - [浏览器 JavaScript SDK](docs/web-sdk.md)
 - [单文件离线 HTML 使用与定制](docs/standalone-html.md)
 - [Node.js/WASM 发行包](docs/NODE_WASM_DISTRIBUTION.md)

@@ -123,6 +123,9 @@ the 16-line sample improved by 31.09% with one worker and 17.39% with four;
 the long-line-heavy article sample improved by 13.38% and 5.61% respectively.
 Both comparisons retained identical OCR text checksums.
 
+For a paired Windows x64 comparison of the current code against the `v1.0.0`
+release on the same sample, see the [three-model release benchmark workflow](docs/release-sample-ocr-comparison.md).
+
 ## Build, convert, and test
 
 Requirements:
