@@ -51,6 +51,7 @@ static void transpose8x8_ps(const __m256* v, __m256* t) {
 }
 #endif
 
+LW_CONVERT_TARGET
 void lw_x64_fast_nchw_to_nhwc(const float* source, float* destination,
                               uint32_t batch, uint32_t channels,
                               uint32_t height, uint32_t width) {
@@ -120,6 +121,7 @@ void lw_x64_fast_nchw_to_nhwc(const float* source, float* destination,
     }
 }
 
+LW_CONVERT_TARGET
 void lw_x64_fast_nhwc_to_nchw(const float* source, float* destination,
                               uint32_t batch, uint32_t channels,
                               uint32_t height, uint32_t width) {

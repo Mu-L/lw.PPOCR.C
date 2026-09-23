@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from collections import Counter
 from pathlib import Path
+from unittest.mock import patch
 
 from converter.lwm_v0 import CHECKSUM_OFFSET, HEADER_SIZE, convert_rec_model, fnv1a64
 
@@ -52,8 +53,10 @@ class ConvertRecTests(unittest.TestCase):
             input_path = Path(directory) / "rec.onnx"
             output_path = Path(directory) / "rec.lwm"
             input_path.write_bytes(REC_MODEL.read_bytes() + b"\0")
-            with self.assertRaisesRegex(ValueError, "only supports the bundled"):
-                convert_rec_model(input_path, output_path)
+            for environment in ({}, {"LW_ALLOW_ANY_DET": "1"}):
+                with patch.dict("os.environ", environment, clear=True):
+                    with self.assertRaisesRegex(ValueError, "only supports the bundled"):
+                        convert_rec_model(input_path, output_path)
             self.assertFalse(output_path.exists())
 
 

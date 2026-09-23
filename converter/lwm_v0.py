@@ -1,12 +1,11 @@
-"""
-Deterministic writer for the experimental LWM v0.1 file format."""
+"""Deterministic writer for the experimental LWM v0.1 file format."""
 
 from __future__ import annotations
 
 import copy
-import os
 import dataclasses
 import hashlib
+import os
 import struct
 from pathlib import Path
 from typing import Iterable
@@ -640,7 +639,7 @@ def _materialize_slice_inputs(model: onnx.ModelProto) -> onnx.ModelProto:
 
 def convert_rec_model(input_path: Path, output_path: Path) -> ConversionInfo:
     digest = hashlib.sha256(input_path.read_bytes()).hexdigest()
-    if digest != SUPPORTED_REC_SHA256 and "LW_ALLOW_ANY_DET" not in os.environ:
+    if digest != SUPPORTED_REC_SHA256:
         raise ValueError(
             "REC converter only supports the bundled PP-OCRv6 tiny REC model; "
             f"expected SHA-256 {SUPPORTED_REC_SHA256}, got {digest}"
@@ -654,7 +653,7 @@ def convert_rec_model(input_path: Path, output_path: Path) -> ConversionInfo:
         raise ValueError("REC converter requires exactly one graph input and one graph output")
 
     model = _materialize_slice_inputs(model)
-    inferred = onnx.shape_inference.infer_shapes(model, strict_mode=False, data_prop=False)
+    inferred = onnx.shape_inference.infer_shapes(model, strict_mode=True, data_prop=False)
     return _write_model(_fold_conv_batch_normalization(model), output_path, inferred)
 
 
@@ -837,7 +836,7 @@ def _prepare_det_model(
 
 def convert_det_model(input_path: Path, output_path: Path) -> ConversionInfo:
     digest = hashlib.sha256(input_path.read_bytes()).hexdigest()
-    if digest != SUPPORTED_DET_SHA256 and "LW_ALLOW_ANY_DET" not in __import__("os").environ:
+    if digest != SUPPORTED_DET_SHA256 and "LW_ALLOW_ANY_DET" not in os.environ:
         raise ValueError(
             "DET converter only supports the bundled PP-OCRv6 tiny DET model; "
             f"expected SHA-256 {SUPPORTED_DET_SHA256}, got {digest}"

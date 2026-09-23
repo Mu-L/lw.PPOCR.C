@@ -75,7 +75,6 @@ static uint32_t det_shard_workers(const lw_x64_det_run_state* state, uint64_t ma
  * worker in the same summation order as the serial run (bit-identical). */
 typedef enum lw_x64_det_shard_kind {
     LW_X64_DET_SHARD_POINTWISE_SPATIAL = 0,
-    LW_X64_DET_SHARD_POINTWISE_OC = 1,
     LW_X64_DET_SHARD_DENSE_ROWS = 2,
     LW_X64_DET_SHARD_DEPTHWISE_ROWS = 3,
     LW_X64_DET_SHARD_CT16_ROWS = 4,
@@ -90,7 +89,6 @@ typedef struct lw_x64_det_shard_ctx {
     float* output_base;
     lw_nhwc_epilogue epilogue;
     uint32_t items;
-    uint32_t oc_blocks;
     uint32_t dense_kc;
     uint8_t* scratch_base;
     uint64_t scratch_bytes;
@@ -133,22 +131,6 @@ static void det_shard_worker(void* opaque, uint32_t worker_index, uint32_t worke
                 &ctx->epilogue, ctx->output_base + (size_t)begin * conv->output_channels,
                 end - begin, conv->input_channels, conv->output_channels);
             break;
-        }
-        break;
-    case LW_X64_DET_SHARD_POINTWISE_OC:
-        begin = (uint32_t)(((uint64_t)ctx->oc_blocks * worker_index) / worker_count);
-        end = (uint32_t)(((uint64_t)ctx->oc_blocks * (worker_index + 1u)) / worker_count);
-        if (begin >= end) return;
-        {
-            uint32_t block;
-            lw_nhwc_epilogue epilogue = ctx->epilogue;
-            epilogue.bias = epilogue.bias == NULL ? NULL : epilogue.bias + begin * 16u;
-            for (block = begin; block < end; ++block) {
-                lw_avx2_fma_nhwc_pointwise_f32(
-                    ctx->input, conv->packed_weights + (size_t)block * conv->input_channels * 16u,
-                    &epilogue, ctx->output_base + (size_t)block * 16u, ctx->items,
-                    conv->input_channels, 16u);
-            }
         }
         break;
     case LW_X64_DET_SHARD_DENSE_ROWS: {
@@ -270,15 +252,10 @@ static lw_status run_sharded_conv(lw_x64_det_instance* instance, const lw_x64_de
     ctx.pointwise_kernel = op->data.conv.pointwise_kernel;
     switch (shard_kind) {
     case LW_X64_DET_SHARD_POINTWISE_SPATIAL:
-    case LW_X64_DET_SHARD_POINTWISE_OC:
     case LW_X64_DET_SHARD_DENSE_ROWS:
         macs = conv_macs(&op->data.conv);
         ctx.input = offset_ptr(instance, op->data.conv.input_offset);
         ctx.output_base = offset_ptr(instance, op->data.conv.output_offset);
-        if (shard_kind == LW_X64_DET_SHARD_POINTWISE_OC) {
-            ctx.oc_blocks = items;
-            ctx.items = op->data.conv.input_height * op->data.conv.input_width;
-        }
         ctx.scratch_bytes = op->data.conv.scratch_bytes;
         ctx.scratch_base = instance->shard_scratch;
         break;
@@ -484,17 +461,10 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
         ep.bias = op->data.conv.bias;
         if (workers > 1u) {
-            uint32_t oc_blocks = op->data.conv.output_channels / 16u;
-            /* OC-block sharding needs whole 16-lane blocks; partial tail
-             * blocks (OC%16 != 0) always shard spatially. */
-            int oc_block_capable = (op->data.conv.output_channels % 16u) == 0u;
-            int spatial_shard = pixels >= workers * LW_NHWC_PIXEL_TILE ||
-                                oc_blocks < workers || !oc_block_capable;
+            /* The pointwise kernels write tightly packed pixel rows. Shard by
+             * pixels so each worker keeps the full NHWC output-channel stride. */
             lw_status status = run_sharded_conv(
-                instance, op, state,
-                spatial_shard ? LW_X64_DET_SHARD_POINTWISE_SPATIAL
-                              : LW_X64_DET_SHARD_POINTWISE_OC,
-                spatial_shard ? pixels : oc_blocks, ep);
+                instance, op, state, LW_X64_DET_SHARD_POINTWISE_SPATIAL, pixels, ep);
             if (status != LW_STATUS_OK) return status;
             return LW_STATUS_OK;
         }

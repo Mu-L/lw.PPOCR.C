@@ -302,3 +302,15 @@ synced to the planner (OC >= 8, depthwise unchanged). Results at 8w:
 tiny 640 1.87x (28.0 vs 52.3 ms), small 960 2.21x (164.0 vs 362.3 ms),
 medium 960 2.81x (666 vs 1871 ms); tiny end-to-end 4w 89.4 ms. Full suite
 80/80.
+
+Medium DET follow-up: the low-spatial, wide-output pointwise path cannot
+partition output channels with the current tightly packed NHWC kernel: each
+pixel still needs the full output-channel stride. Pointwise sharding now uses
+spatial ranges only. The Medium 32x64 sharded contract exposed this mismatch;
+the profile assertion now respects the public 256-node telemetry capacity
+instead of assuming every Medium node has a per-node slot. The layout-convert
+functions have explicit AVX2/FMA target attributes for GCC/Clang builds.
+The shared REC converter remains Tiny-only and retains strict ONNX shape
+inference: relaxing its SHA guard does not lower Small/Medium dynamic Reshape
+nodes. Those variants use their dedicated conversion tools. DET's
+`LW_ALLOW_ANY_DET` override does not apply to REC.
