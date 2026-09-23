@@ -298,7 +298,9 @@ def main() -> int:
             (output / "report.md").write_text(
                 render_markdown(report), encoding="utf-8", newline="\n"
             )
-    print(render_markdown(report), flush=True)
+    # The Markdown is already persisted as UTF-8 and published by the workflow.
+    # Windows CI may give Python a cp1252 stdout, which cannot encode Delta/multiplication signs.
+    print("[release-compare] report.json and report.md written", flush=True)
     return 0
 
 
