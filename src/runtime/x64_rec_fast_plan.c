@@ -442,6 +442,17 @@ static int fast_prepare_dense_offsets(lw_x64_fast_conv* conv) {
     }
     return 1;
 }
+static const lw_x64_physical_op* fast_packed_source_op(const lw_x64_rec_fast_plan* plan,
+                                                       uint32_t node_index) {
+    uint32_t index;
+    if (plan == NULL || plan->packed_source == NULL) return NULL;
+    for (index = 0u; index < plan->packed_source->op_count; ++index) {
+        const lw_x64_physical_op* op = &plan->packed_source->ops[index];
+        if (op->semantic_begin == node_index) return op;
+    }
+    return NULL;
+}
+
 static int fast_prepare_conv(lw_x64_rec_fast_plan* plan, uint32_t node_index,
                              lw_x64_fast_node* fast_node) {
     lw_session* session;
@@ -459,6 +470,7 @@ static int fast_prepare_conv(lw_x64_rec_fast_plan* plan, uint32_t node_index,
     uint64_t packed_count;
     uint64_t scratch_bytes;
     int is_depthwise;
+    const lw_x64_physical_op* packed_op;
     if (plan == NULL || fast_node == NULL || node_index >= plan->node_count ||
         plan->layout.node_layout[node_index] != LW_FAST_LAYOUT_NHWC) return 0;
     session = plan->session;
@@ -521,19 +533,38 @@ static int fast_prepare_conv(lw_x64_rec_fast_plan* plan, uint32_t node_index,
          !lw_nhwc_dense_packed_weight_count(conv->input_channels, conv->output_channels,
             conv->kernel_h, conv->kernel_w, &packed_count)) ||
         packed_count > SIZE_MAX / sizeof(float)) return 0;
-    conv->packed_weights = (float*)malloc((size_t)packed_count * sizeof(float));
-    if (conv->packed_weights == NULL) return 0;
+    packed_op = fast_packed_source_op(plan, node_index);
+    if (plan->packed_source != NULL) {
+        const lw_x64_fast_conv* source;
+        if (packed_op == NULL || (packed_op->kind != LW_X64_FAST_NODE_POINTWISE &&
+            packed_op->kind != LW_X64_FAST_NODE_DENSE &&
+            packed_op->kind != LW_X64_FAST_NODE_DEPTHWISE)) return 0;
+        source = &packed_op->data.conv;
+        if (source->weight_index != weight_index || source->input_channels != conv->input_channels ||
+            source->output_channels != conv->output_channels || source->kernel_h != conv->kernel_h ||
+            source->kernel_w != conv->kernel_w || source->packed_weight_count != packed_count ||
+            source->packed_weights == NULL) return 0;
+        conv->packed_weights = source->packed_weights;
+        conv->packed_weights_borrowed = 1u;
+    } else {
+        conv->packed_weights = (float*)malloc((size_t)packed_count * sizeof(float));
+        if (conv->packed_weights == NULL) return 0;
+    }
     conv->packed_weight_count = packed_count;
     if (is_depthwise) {
-        lw_pack_nhwc_depthwise_f32(fast_constant_f32(session, weight_index),
-            conv->input_channels, conv->kernel_h, conv->kernel_w, conv->packed_weights);
+        if (!conv->packed_weights_borrowed) {
+            lw_pack_nhwc_depthwise_f32(fast_constant_f32(session, weight_index),
+                conv->input_channels, conv->kernel_h, conv->kernel_w, conv->packed_weights);
+        }
         fast_node->kind = LW_X64_FAST_NODE_DEPTHWISE;
         ++plan->depthwise_node_count;
         return 1;
     }
-    lw_pack_nhwc_dense_f32(fast_constant_f32(session, weight_index), conv->input_channels,
-                           conv->output_channels, conv->kernel_h, conv->kernel_w,
-                           conv->packed_weights);
+    if (!conv->packed_weights_borrowed) {
+        lw_pack_nhwc_dense_f32(fast_constant_f32(session, weight_index), conv->input_channels,
+                               conv->output_channels, conv->kernel_h, conv->kernel_w,
+                               conv->packed_weights);
+    }
     if (kh == 1 && kw == 1 && sh == 1 && sw == 1 && pt == 0 && pl == 0 && pb == 0 && pr == 0) {
         fast_node->kind = LW_X64_FAST_NODE_POINTWISE;
         ++plan->pointwise_node_count;
@@ -555,7 +586,8 @@ static int fast_prepare_conv(lw_x64_rec_fast_plan* plan, uint32_t node_index,
             free(conv->dense_patch_offsets_k);
             conv->dense_input_offsets_k = NULL;
             conv->dense_patch_offsets_k = NULL;
-            free(conv->packed_weights); conv->packed_weights = NULL; return 0;
+            if (!conv->packed_weights_borrowed) free(conv->packed_weights);
+            conv->packed_weights = NULL; return 0;
         }
         conv->scratch_bytes = scratch_bytes;
         if ((size_t)scratch_bytes > plan->scratch_bytes) plan->scratch_bytes = (size_t)scratch_bytes;
@@ -980,8 +1012,15 @@ static int fast_fuse_conv_bn(lw_x64_rec_fast_plan* plan, lw_x64_physical_op* op,
         plan->session->tensors[bias_index].byte_size < (uint64_t)channels * sizeof(float) ||
         plan->session->tensors[mean_index].byte_size < (uint64_t)channels * sizeof(float) ||
         plan->session->tensors[variance_index].byte_size < (uint64_t)channels * sizeof(float)) return 0;
-    if (!fast_scale_conv_weights(&op->data.conv, op->kind, scale, bias, mean,
-                                 variance, fast_read_f32(params + 4u))) return 0;
+    if (op->data.conv.packed_weights_borrowed) {
+        const lw_x64_physical_op* source_op = fast_packed_source_op(plan, op->semantic_begin);
+        if (source_op == NULL || source_op->data.conv.owned_bias == NULL ||
+            source_op->semantic_count < 2u) return 0;
+        op->data.conv.bias = source_op->data.conv.bias;
+    } else if (!fast_scale_conv_weights(&op->data.conv, op->kind, scale, bias, mean,
+                                        variance, fast_read_f32(params + 4u))) {
+        return 0;
+    }
     fast_set_physical_output(op, output_index);
     ++op->semantic_count;
     fast_elide_tensor(plan, conv_output);
@@ -1082,7 +1121,7 @@ static void fast_move_node_to_physical(const lw_x64_fast_node* node,
 
 static void fast_release_conv(lw_x64_fast_conv* conv) {
     if (conv == NULL) return;
-    free(conv->packed_weights);
+    if (!conv->packed_weights_borrowed) free(conv->packed_weights);
     free(conv->owned_bias);
     free(conv->dense_tap_offsets);
     free(conv->dense_patch_offsets);
@@ -1157,9 +1196,10 @@ static lw_status fast_compile_physical_ops(lw_x64_rec_fast_plan* plan, lw_error*
     }
     return LW_STATUS_OK;
 }
-lw_status lw_x64_rec_fast_plan_create(lw_session* session,
-                                      lw_x64_rec_fast_plan** out_plan,
-                                      lw_error* error) {
+lw_status lw_x64_rec_fast_plan_create_shared(lw_session* session,
+                                             const lw_x64_rec_fast_plan* packed_source,
+                                             lw_x64_rec_fast_plan** out_plan,
+                                             lw_error* error) {
     lw_x64_rec_fast_plan* plan;
     lw_layout_planner_options options;
     lw_status status;
@@ -1174,6 +1214,7 @@ lw_status lw_x64_rec_fast_plan_create(lw_session* session,
         return LW_STATUS_OUT_OF_MEMORY;
     }
     plan->session = session;
+    plan->packed_source = packed_source;
     plan->node_count = session->model->info.node_count;
     plan->nodes = (lw_x64_fast_node*)calloc(plan->node_count, sizeof(*plan->nodes));
     if (plan->nodes == NULL && plan->node_count != 0u) {
@@ -1225,6 +1266,25 @@ lw_status lw_x64_rec_fast_plan_create(lw_session* session,
         lw_x64_rec_fast_plan_free(plan);
         return status;
     }
+    if (packed_source != NULL) {
+        uint32_t index;
+        for (index = 0u; index < plan->op_count; ++index) {
+            const lw_x64_physical_op* op = &plan->ops[index];
+            const lw_x64_physical_op* source_op;
+            if (!fast_physical_op_owns_conv(op->kind) ||
+                !op->data.conv.packed_weights_borrowed) continue;
+            source_op = fast_packed_source_op(plan, op->semantic_begin);
+            if (source_op == NULL || source_op->kind != op->kind ||
+                source_op->semantic_count != op->semantic_count ||
+                source_op->data.conv.packed_weights != op->data.conv.packed_weights ||
+                source_op->data.conv.bias != op->data.conv.bias) {
+                lw_set_error(error, LW_STATUS_INVALID_SHAPE,
+                             "shared x64 REC weights do not match the physical op");
+                lw_x64_rec_fast_plan_free(plan);
+                return LW_STATUS_INVALID_SHAPE;
+            }
+        }
+    }
     status = fast_build_semantic_to_physical(plan, error);
     if (status != LW_STATUS_OK) {
         lw_x64_rec_fast_plan_free(plan);
@@ -1257,6 +1317,12 @@ lw_status lw_x64_rec_fast_plan_create(lw_session* session,
     lw_set_error(error, LW_STATUS_OK, "");
     *out_plan = plan;
     return LW_STATUS_OK;
+}
+
+lw_status lw_x64_rec_fast_plan_create(lw_session* session,
+                                      lw_x64_rec_fast_plan** out_plan,
+                                      lw_error* error) {
+    return lw_x64_rec_fast_plan_create_shared(session, NULL, out_plan, error);
 }
 
 void lw_x64_rec_fast_plan_free(lw_x64_rec_fast_plan* plan) {

@@ -237,10 +237,50 @@ four-worker median of 87.495 ms (83.212–93.954 ms). This is not a paired
 comparison against the previous release, so no release-level speedup is
 claimed from it.
 
-## Small/Medium canonical REC dispatch
+## Small canonical REC and Medium hybrid REC dispatch
 
 The compiled REC backend currently rejects the Small and Medium graphs at
-their early Concat node, so their lines still use the canonical executor.
+their early Concat node. Small remains on the canonical executor: local Small
+hybrid tests found three CTC argmax mismatches at width 320, so promoting it
+would silently change recognized text. The official Medium REC LWM graph
+(checksum `0x5c1ad5136616c165`) instead uses the private x64 hybrid plan at
+the five standard adaptive widths when AVX2+FMA is available. The plan keeps
+unsupported spans on the canonical executor, is owned by its REC session,
+and falls back to the canonical path if it cannot initialize or execute.
+Other model graphs, SIMD backends, WebAssembly, and the public C ABI are unchanged.
+The Medium recognizers share one immutable packed-weight/folded-bias template
+across widths and worker clones; mutable execution plans and NHWC workspaces
+remain private to each session. A borrowed physical op is accepted only when
+its kind, semantic span, packed weights, and bias match the template.
+
+The five-width Medium REC comparison gates the complete output against the
+canonical executor: `mismatch=0`, `argmax_mismatch=0`, and max absolute error
+below `1e-4` at 192/320/480/640/960. On one local Windows x64 Release machine,
+the per-width REC speedups were 1.451x, 1.197x, 1.282x, 1.341x, and 1.246x.
+The 500x500 sample produced the same 16-line output checksum with one and four
+workers, with all 16 lines using the hybrid plan. These local timings are not
+a paired hosted-runner end-to-end claim. Medium validation CI now gates both
+the five-width numerical comparison and actual full-OCR backend coverage;
+the existing full-OCR golden text SHA remains the output-quality gate.
+
+A local same-source, same-machine, alternating three-round full-OCR A/B on the
+500x500 sample (one warm-up and one measured OCR call per fresh process) gave
+these **informational** medians against a build with the x64 fast-path option
+disabled. Both builds returned checksum `12aff0763cbd432b` in every round:
+
+| workers | paired OCR speedup | peak working-set increase |
+| ---: | ---: | ---: |
+| 1 | 1.347x | +200.7 MiB |
+| 4 | 1.674x | +328.7 MiB |
+
+The original per-worker packing raised the local four-worker peak by about
+719 MiB; sharing weights cut that increase to about 329 MiB. The remaining
+increase comes from one packed template plus private NHWC workspaces and
+probability buffers. Hosted x64 CI must confirm the latency/memory tradeoff
+before release claims are updated; memory and latency are not CI gates.
+
+Small and Medium both still benefit from the shape-selective canonical
+dispatch where the hybrid path is not active.
 On the 500x500 sample, both models spend most of their one-worker time in REC
 Conv, especially high-channel 1x1 layers. Shape-selective AVX2/FMA dispatch
 now uses the existing four-output kernel for Small's 192/384-channel middle

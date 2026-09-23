@@ -11,6 +11,7 @@
 #include "session_internal.h"
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
 #include "x64_rec_backend_internal.h"
+#include "x64_rec_fast_internal.h"
 #endif
 
 #include <limits.h>
@@ -22,6 +23,7 @@
 #define LW_REC_DEFAULT_TARGET_WIDTH 960u
 #define LW_REC_DEFAULT_MAX_IMAGE_PIXELS UINT64_C(40000000)
 #define LW_REC_RESIDENT_WIDTH_COUNT 5u
+#define LW_MEDIUM_REC_LWM_CHECKSUM UINT64_C(0x5c1ad5136616c165)
 static const uint32_t lw_rec_adaptive_widths[LW_REC_RESIDENT_WIDTH_COUNT] = {
     192u, 320u, 480u, 640u, 960u
 };
@@ -32,10 +34,18 @@ typedef struct lw_x64_rec_backend_slot {
     lw_x64_rec_program* program;
     lw_x64_rec_instance* instance;
 } lw_x64_rec_backend_slot;
+typedef struct lw_medium_fast_shared {
+    uint32_t reference_count;
+    lw_x64_rec_fast_plan* packed_template;
+} lw_medium_fast_shared;
 #endif
 
 typedef struct lw_rec_resident_slot {
     lw_session* session;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    lw_x64_rec_fast_plan* fast_plan;
+    uint8_t fast_plan_disabled;
+#endif
     float* input;
     float* probabilities;
     uint32_t* best_indices;
@@ -49,6 +59,12 @@ typedef struct lw_rec_resident_slot {
 struct lw_recognizer {
     lw_model* model;
     lw_session* session;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    lw_x64_rec_fast_plan* fast_plan;
+    lw_medium_fast_shared* fast_shared;
+    uint8_t fast_plan_disabled;
+    uint8_t fast_backend_disabled;
+#endif
     lw_rec_dictionary* dictionary;
     float* input;
     float* probabilities;
@@ -57,6 +73,10 @@ struct lw_recognizer {
     uint64_t input_element_count;
     uint64_t probability_element_count;
     lw_session* cached_session;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    lw_x64_rec_fast_plan* cached_fast_plan;
+    uint8_t cached_fast_plan_disabled;
+#endif
     float* cached_input;
     float* cached_probabilities;
     uint32_t* cached_best_indices;
@@ -84,7 +104,22 @@ static int allocation_fits(uint64_t count, size_t element_size) {
     return element_size != 0u && count <= (uint64_t)(SIZE_MAX / element_size);
 }
 
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+static void medium_fast_shared_release(lw_medium_fast_shared* shared) {
+    if (shared == NULL) return;
+    if (--shared->reference_count == 0u) {
+        lw_x64_rec_fast_plan_free(shared->packed_template);
+        free(shared);
+    }
+}
+#endif
+
 static void release_cached_session(lw_recognizer* recognizer) {
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    lw_x64_rec_fast_plan_free(recognizer->cached_fast_plan);
+    recognizer->cached_fast_plan = NULL;
+    recognizer->cached_fast_plan_disabled = 0u;
+#endif
     free(recognizer->cached_best_probabilities);
     free(recognizer->cached_best_indices);
     free(recognizer->cached_probabilities);
@@ -105,6 +140,9 @@ static void release_resident_slot(lw_rec_resident_slot* slot) {
     if (slot == NULL) {
         return;
     }
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    lw_x64_rec_fast_plan_free(slot->fast_plan);
+#endif
     free(slot->best_probabilities);
     free(slot->best_indices);
     free(slot->probabilities);
@@ -116,6 +154,10 @@ static void release_resident_slot(lw_rec_resident_slot* slot) {
 static void swap_active_with_resident_slot(lw_recognizer* recognizer,
                                             lw_rec_resident_slot* slot) {
     lw_session* session = recognizer->session;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    lw_x64_rec_fast_plan* fast_plan = recognizer->fast_plan;
+    uint8_t fast_plan_disabled = recognizer->fast_plan_disabled;
+#endif
     float* input = recognizer->input;
     float* probabilities = recognizer->probabilities;
     uint32_t* best_indices = recognizer->best_indices;
@@ -126,6 +168,10 @@ static void swap_active_with_resident_slot(lw_recognizer* recognizer,
     uint32_t time_steps = recognizer->current_time_steps;
 
     recognizer->session = slot->session;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    recognizer->fast_plan = slot->fast_plan;
+    recognizer->fast_plan_disabled = slot->fast_plan_disabled;
+#endif
     recognizer->input = slot->input;
     recognizer->probabilities = slot->probabilities;
     recognizer->best_indices = slot->best_indices;
@@ -136,6 +182,10 @@ static void swap_active_with_resident_slot(lw_recognizer* recognizer,
     recognizer->current_time_steps = slot->time_steps;
 
     slot->session = session;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    slot->fast_plan = fast_plan;
+    slot->fast_plan_disabled = fast_plan_disabled;
+#endif
     slot->input = input;
     slot->probabilities = probabilities;
     slot->best_indices = best_indices;
@@ -147,6 +197,10 @@ static void swap_active_with_resident_slot(lw_recognizer* recognizer,
 }
 static void activate_cached_session(lw_recognizer* recognizer) {
     lw_session* session = recognizer->session;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    lw_x64_rec_fast_plan* fast_plan = recognizer->fast_plan;
+    uint8_t fast_plan_disabled = recognizer->fast_plan_disabled;
+#endif
     float* input = recognizer->input;
     float* probabilities = recognizer->probabilities;
     uint32_t* best_indices = recognizer->best_indices;
@@ -157,6 +211,10 @@ static void activate_cached_session(lw_recognizer* recognizer) {
     uint32_t time_steps = recognizer->current_time_steps;
 
     recognizer->session = recognizer->cached_session;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    recognizer->fast_plan = recognizer->cached_fast_plan;
+    recognizer->fast_plan_disabled = recognizer->cached_fast_plan_disabled;
+#endif
     recognizer->input = recognizer->cached_input;
     recognizer->probabilities = recognizer->cached_probabilities;
     recognizer->best_indices = recognizer->cached_best_indices;
@@ -167,6 +225,10 @@ static void activate_cached_session(lw_recognizer* recognizer) {
     recognizer->current_time_steps = recognizer->cached_time_steps;
 
     recognizer->cached_session = session;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    recognizer->cached_fast_plan = fast_plan;
+    recognizer->cached_fast_plan_disabled = fast_plan_disabled;
+#endif
     recognizer->cached_input = input;
     recognizer->cached_probabilities = probabilities;
     recognizer->cached_best_indices = best_indices;
@@ -420,6 +482,12 @@ static lw_status configure_session(lw_recognizer* recognizer, uint32_t target_wi
      * succeeded. A failed adaptive switch therefore leaves the old session
      * usable and avoids a partially configured recognizer. */
     recognizer->cached_session = recognizer->session;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    recognizer->cached_fast_plan = recognizer->fast_plan;
+    recognizer->cached_fast_plan_disabled = recognizer->fast_plan_disabled;
+    recognizer->fast_plan = NULL;
+    recognizer->fast_plan_disabled = 0u;
+#endif
     recognizer->cached_input = recognizer->input;
     recognizer->cached_probabilities = recognizer->probabilities;
     recognizer->cached_best_indices = recognizer->best_indices;
@@ -498,6 +566,12 @@ lw_status lw_recognizer_enable_resident_widths(lw_recognizer* recognizer, lw_err
         }
         memset(slot, 0, sizeof(*slot));
         temporary.session = NULL;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+        temporary.fast_plan = NULL;
+        temporary.cached_fast_plan = NULL;
+        temporary.fast_plan_disabled = 0u;
+        temporary.cached_fast_plan_disabled = 0u;
+#endif
         temporary.input = NULL;
         temporary.probabilities = NULL;
         temporary.best_indices = NULL;
@@ -532,6 +606,10 @@ lw_status lw_recognizer_enable_resident_widths(lw_recognizer* recognizer, lw_err
             return status;
         }
         slot->session = temporary.session;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+        slot->fast_plan = temporary.fast_plan;
+        slot->fast_plan_disabled = temporary.fast_plan_disabled;
+#endif
         slot->input = temporary.input;
         slot->probabilities = temporary.probabilities;
         slot->best_indices = temporary.best_indices;
@@ -638,6 +716,34 @@ lw_status lw_recognizer_create(const char* model_path_utf8, const char* dictiona
     recognizer->info.workspace_size = session_info.workspace_size;
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
     recognizer_try_backends(recognizer);
+#if !defined(LW_EXPERIMENTAL_CTC_TILED)
+    if (recognizer->model->info.content_checksum == LW_MEDIUM_REC_LWM_CHECKSUM) {
+        lw_cpu_capabilities cpu = lw_get_cpu_capabilities();
+        if (lw_simd_level_is_avx2(cpu.simd) && cpu.has_avx2_fma) {
+            lw_medium_fast_shared* shared = (lw_medium_fast_shared*)calloc(1u, sizeof(*shared));
+            lw_error fast_error;
+            if (shared != NULL) {
+                lw_error_init(&fast_error);
+                if (lw_x64_rec_fast_plan_create(recognizer->session,
+                                                &shared->packed_template,
+                                                &fast_error) == LW_STATUS_OK) {
+                    /* The template only owns immutable packed coefficients and
+                     * folded bias; actual executions use private session plans. */
+                    free(shared->packed_template->nhwc_workspace);
+                    shared->packed_template->nhwc_workspace = NULL;
+                    shared->packed_template->nhwc_workspace_bytes = 0u;
+                    free(shared->packed_template->scratch);
+                    shared->packed_template->scratch = NULL;
+                    shared->packed_template->scratch_bytes = 0u;
+                    shared->reference_count = 1u;
+                    recognizer->fast_shared = shared;
+                } else {
+                    free(shared);
+                }
+            }
+        }
+    }
+#endif
 #endif
     *out_recognizer = recognizer;
     lw_set_error(error, LW_STATUS_OK, "");
@@ -695,6 +801,60 @@ static void recognizer_release_backends(lw_recognizer* recognizer) {
         memset(slot, 0, sizeof(*slot));
     }
 }
+
+/* The hybrid plan supports this exact Medium LWM graph across the five
+ * adaptive widths. Small has known argmax mismatches and must stay on the
+ * canonical executor until its numerical contract is fixed. */
+static int recognizer_try_medium_fast_plan(lw_recognizer* recognizer) {
+#if defined(LW_EXPERIMENTAL_CTC_TILED)
+    (void)recognizer;
+    return 0;
+#else
+    lw_cpu_capabilities cpu;
+    lw_error backend_error;
+    uint32_t width_index;
+    int owns_probabilities = 0;
+    if (recognizer->model->info.content_checksum != LW_MEDIUM_REC_LWM_CHECKSUM ||
+        recognizer->fast_shared == NULL ||
+        recognizer->fast_backend_disabled != 0u ||
+        recognizer->fast_plan_disabled != 0u) {
+        return 0;
+    }
+    cpu = lw_get_cpu_capabilities();
+    if (!lw_simd_level_is_avx2(cpu.simd) || !cpu.has_avx2_fma) return 0;
+    for (width_index = 0u; width_index < LW_REC_RESIDENT_WIDTH_COUNT; ++width_index) {
+        if (recognizer->current_target_width == lw_rec_adaptive_widths[width_index]) break;
+    }
+    if (width_index == LW_REC_RESIDENT_WIDTH_COUNT) return 0;
+    if (recognizer->probabilities == NULL) {
+        if (!allocation_fits(recognizer->probability_element_count, sizeof(float))) {
+            recognizer->fast_plan_disabled = 1u;
+            return 0;
+        }
+        recognizer->probabilities = (float*)malloc(
+            (size_t)recognizer->probability_element_count * sizeof(float));
+        if (recognizer->probabilities == NULL) {
+            recognizer->fast_plan_disabled = 1u;
+            return 0;
+        }
+        owns_probabilities = 1;
+    }
+    if (recognizer->fast_plan == NULL) {
+        lw_error_init(&backend_error);
+        if (lw_x64_rec_fast_plan_create_shared(recognizer->session,
+                                               recognizer->fast_shared->packed_template,
+                                               &recognizer->fast_plan, &backend_error) != LW_STATUS_OK) {
+            if (owns_probabilities != 0) {
+                free(recognizer->probabilities);
+                recognizer->probabilities = NULL;
+            }
+            recognizer->fast_plan_disabled = 1u;
+            return 0;
+        }
+    }
+    return 1;
+#endif
+}
 #endif
 
 lw_status lw_recognizer_clone(const lw_recognizer* source, lw_recognizer** out_recognizer,
@@ -730,6 +890,12 @@ lw_status lw_recognizer_clone(const lw_recognizer* source, lw_recognizer** out_r
         lw_recognizer_free(clone);
         return status;
     }
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    clone->fast_backend_disabled = source->fast_backend_disabled;
+    clone->fast_plan_disabled = source->fast_plan_disabled;
+    clone->fast_shared = source->fast_shared;
+    if (clone->fast_shared != NULL) ++clone->fast_shared->reference_count;
+#endif
     status = lw_session_share_prepared_constants(clone->session, source->session, error);
     if (status != LW_STATUS_OK) {
         lw_recognizer_free(clone);
@@ -766,8 +932,24 @@ lw_status lw_recognizer_clone(const lw_recognizer* source, lw_recognizer** out_r
 /* Test-only internal hook: disable the compiled x64 REC backend so the same
  * binary can measure canonical recognizer timing. */
 void lw_recognizer_test_disable_x64_backend(lw_recognizer* recognizer) {
+    uint32_t index;
     if (recognizer == NULL) return;
     recognizer_release_backends(recognizer);
+    recognizer->fast_backend_disabled = 1u;
+    lw_x64_rec_fast_plan_free(recognizer->fast_plan);
+    recognizer->fast_plan = NULL;
+    recognizer->fast_plan_disabled = 1u;
+    lw_x64_rec_fast_plan_free(recognizer->cached_fast_plan);
+    recognizer->cached_fast_plan = NULL;
+    recognizer->cached_fast_plan_disabled = 1u;
+    for (index = 0u; index < LW_REC_RESIDENT_WIDTH_COUNT; ++index) {
+        lw_rec_resident_slot* slot = &recognizer->resident_slots[index];
+        lw_x64_rec_fast_plan_free(slot->fast_plan);
+        slot->fast_plan = NULL;
+        slot->fast_plan_disabled = 1u;
+    }
+    medium_fast_shared_release(recognizer->fast_shared);
+    recognizer->fast_shared = NULL;
 }
 #endif
 
@@ -780,6 +962,7 @@ void lw_recognizer_free(lw_recognizer* recognizer) {
     free(recognizer->probabilities);
     free(recognizer->input);
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    lw_x64_rec_fast_plan_free(recognizer->fast_plan);
     recognizer_release_backends(recognizer);
 #endif
     lw_session_free(recognizer->session);
@@ -790,6 +973,9 @@ void lw_recognizer_free(lw_recognizer* recognizer) {
         }
     }
     release_cached_session(recognizer);
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    medium_fast_shared_release(recognizer->fast_shared);
+#endif
     lw_rec_dictionary_free(recognizer->dictionary);
     lw_model_free(recognizer->model);
     free(recognizer);
@@ -828,6 +1014,7 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
     uint32_t* execution_best_indices = NULL;
     float* execution_best_probabilities = NULL;
     int backend_active = 0;
+    int hybrid_active = 0;
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
     lw_x64_rec_backend_slot* backend_slot = NULL;
     float* backend_input = NULL;
@@ -919,11 +1106,11 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
         lw_set_error(error, status, "BGR source layout is invalid");
         return status;
     }
-    if (profile != NULL) {
-        uint64_t* count = backend_active ? &profile->compiled_backend_lines
-                                         : &profile->canonical_fallback_lines;
-        if (*count != UINT64_MAX) ++*count;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    if (!backend_active) {
+        hybrid_active = recognizer_try_medium_fast_plan(recognizer);
     }
+#endif
     lw_pipeline_profile_add_elapsed(profile == NULL ? NULL : &profile->preprocess_nanoseconds,
                                     started, profile);
     if (profile != NULL) {
@@ -948,7 +1135,21 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
     }
 #endif
     if (!backend_active) {
-        if (recognizer->best_indices != NULL) {
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+        if (hybrid_active) {
+            status = lw_x64_rec_fast_run(
+                recognizer->fast_plan, recognizer->input, recognizer->input_element_count,
+                recognizer->probabilities, recognizer->probability_element_count, error);
+            if (status != LW_STATUS_OK) {
+                lw_x64_rec_fast_plan_free(recognizer->fast_plan);
+                recognizer->fast_plan = NULL;
+                recognizer->fast_plan_disabled = 1u;
+                hybrid_active = 0;
+                lw_error_init(error);
+            }
+        }
+#endif
+        if (!hybrid_active && recognizer->best_indices != NULL) {
             status = lw_execute_session_f32_ctc_greedy(
                 recognizer->session, recognizer->input, recognizer->input_element_count,
                 recognizer->best_indices, recognizer->best_probabilities,
@@ -958,7 +1159,7 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
                 execution_best_indices = recognizer->best_indices;
                 execution_best_probabilities = recognizer->best_probabilities;
             }
-        } else {
+        } else if (!hybrid_active) {
             status = profile == NULL
                          ? lw_execute_session_f32(
                                recognizer->session, recognizer->input,
@@ -978,6 +1179,12 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
                                     profile);
     if (status != LW_STATUS_OK) {
         return status;
+    }
+    if (profile != NULL) {
+        uint64_t* count = (backend_active || hybrid_active)
+                              ? &profile->compiled_backend_lines
+                              : &profile->canonical_fallback_lines;
+        if (*count != UINT64_MAX) ++*count;
     }
     started = lw_pipeline_profile_now(profile);
     if (execution_best_indices != NULL) {

@@ -29,6 +29,10 @@ on:
       - "tools/convert_medium_rec.py"
       - "tools/resolve_medium_validation_contract.py"
       - "tools/run_medium_validation.py"
+      - "tools/check_medium_fast_path.py"
+      - "src/ppocr/recognizer.c"
+      - "src/runtime/x64_rec_fast_*.c"
+      - "tests/rec_fast_prototype_driver.c"
       - "tools/package_ppocrv6_runtime.py"
       - "tools/validate_runtime_model_pack.py"
       - "tools/validate_model_catalog.py"
@@ -114,6 +118,7 @@ jobs:
         run: >-
           cmake --build build --config Release --parallel 2 --target
           det-graph-driver rec-graph-driver lw-ocr-ppm test-dynamic-reshape layout-plan-driver
+          rec-fast-prototype-driver full-ocr-profile-driver
       - name: Run repository contract tests
         run: >-
           ctest --test-dir build -C Release --output-on-failure
@@ -137,6 +142,12 @@ jobs:
           --variant medium
           --contract ci/nhwc-layout-planner.json
           --output build/medium-validation-report/layout-plan.json
+      - name: Gate Medium x64 fast-path numerics and full OCR coverage
+        if: runner.os == 'Windows'
+        run: >-
+          python tools/check_medium_fast_path.py
+          --build-dir build
+          --report-dir build/medium-validation-report
       - name: Upload Medium validation report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7

@@ -75,6 +75,7 @@ typedef struct lw_x64_fast_conv {
     uint32_t dense_kc;
     float* packed_weights;
     uint64_t packed_weight_count;
+    uint8_t packed_weights_borrowed;
     const float* bias;
     float* owned_bias;
     int32_t* dense_tap_offsets;
@@ -172,6 +173,7 @@ typedef struct lw_x64_fast_profile {
 } lw_x64_fast_profile;
 typedef struct lw_x64_rec_fast_plan {
     lw_session* session;
+    const struct lw_x64_rec_fast_plan* packed_source;
     lw_layout_plan layout;
     lw_x64_fast_node* nodes;
     lw_x64_physical_op* ops;
@@ -220,6 +222,10 @@ typedef struct lw_x64_rec_fast_plan {
 lw_status lw_x64_rec_fast_plan_create(lw_session* session,
                                       lw_x64_rec_fast_plan** out_plan,
                                       lw_error* error);
+lw_status lw_x64_rec_fast_plan_create_shared(lw_session* session,
+                                             const lw_x64_rec_fast_plan* packed_source,
+                                             lw_x64_rec_fast_plan** out_plan,
+                                             lw_error* error);
 void lw_x64_rec_fast_plan_free(lw_x64_rec_fast_plan* plan);
 lw_status lw_x64_rec_fast_run_profiled(lw_x64_rec_fast_plan* plan,
                                      const float* input, uint64_t input_element_count,
