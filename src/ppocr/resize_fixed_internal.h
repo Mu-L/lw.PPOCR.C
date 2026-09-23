@@ -7,6 +7,7 @@
  * (CvRoundToShort). */
 
 #include <math.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define LW_FIXED_RESIZE_SCALE 2048

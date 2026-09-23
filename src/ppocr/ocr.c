@@ -658,6 +658,7 @@ static void execute_worker_task(lw_ocr_worker_task* task) {
     }
 }
 
+#if !defined(LW_EXPERIMENTAL_PERSISTENT_LINE_POOL)
 #if defined(_WIN32)
 static unsigned __stdcall worker_entry(void* context) {
     execute_worker_task((lw_ocr_worker_task*)context);
@@ -668,6 +669,7 @@ static void* worker_entry(void* context) {
     execute_worker_task((lw_ocr_worker_task*)context);
     return NULL;
 }
+#endif
 #endif
 
 #if defined(LW_EXPERIMENTAL_PERSISTENT_LINE_POOL)

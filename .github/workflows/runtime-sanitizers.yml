@@ -36,6 +36,15 @@ jobs:
           -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
       - name: Build sanitized runtime
         run: cmake --build build-sanitizers --config RelWithDebInfo
+      - name: Compile fallback line workers without persistent pool
+        run: >-
+          cmake -S . -B build-no-pool -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DLW_BUILD_HTTP_DEMO=OFF
+          -DLW_EXPERIMENTAL_PERSISTENT_LINE_POOL=OFF
+          -DBUILD_TESTING=OFF
+      - name: Build fallback line-worker runtime
+        run: cmake --build build-no-pool --parallel 2 --target lw_ppocr_c
       - name: Run sanitized correctness gates
         run: >-
           ctest --test-dir build-sanitizers
