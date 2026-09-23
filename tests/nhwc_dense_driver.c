@@ -44,6 +44,9 @@ static const dense_case k_cases[] = {
     {"det-graph-stem-16x32", 3u, 16u, 16u, 32u, 3u, 3u, 2u, 2u, 1u, 1u, 1u, 1u},
     {"det-head-3x3-s1-64-16", 64u, 16u, 7u, 13u, 3u, 3u, 1u, 1u, 1u, 1u, 1u, 1u},
     {"border-3x3-s1-asym", 37u, 32u, 7u, 13u, 3u, 3u, 1u, 1u, 1u, 1u, 0u, 2u},
+    /* Small-model 24-channel family: partial 8-lane tail blocks. */
+    {"det-24ch-3x3-s2", 48u, 24u, 9u, 17u, 3u, 3u, 2u, 2u, 1u, 1u, 1u, 1u},
+    {"det-8ch-2x2-s1-pads0011", 12u, 8u, 7u, 13u, 2u, 2u, 1u, 1u, 0u, 0u, 1u, 1u},
 };
 
 static void fill_values(float* values, uint64_t count, uint32_t seed) {
@@ -148,9 +151,13 @@ static int check_pack(const dense_case* test, const float* weights,
             uint32_t kx = tap - ky * test->kernel_w;
             for (uint32_t lane = 0u; lane < LW_NHWC_OC_BLOCK; ++lane) {
                 uint64_t packed_index = ((uint64_t)ic * taps + tap) * LW_NHWC_OC_BLOCK + lane;
-                uint64_t weight_index = (((uint64_t)lane * test->input_channels + ic) *
-                                         test->kernel_h + ky) * test->kernel_w + kx;
-                if (packed[(size_t)packed_index] != weights[(size_t)weight_index]) return 0;
+                float expected = 0.0f;
+                if (lane < test->output_channels) {
+                    uint64_t weight_index = (((uint64_t)lane * test->input_channels + ic) *
+                                             test->kernel_h + ky) * test->kernel_w + kx;
+                    expected = weights[(size_t)weight_index];
+                }
+                if (packed[(size_t)packed_index] != expected) return 0;
             }
         }
     }

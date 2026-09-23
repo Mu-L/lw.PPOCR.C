@@ -484,12 +484,16 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
         ep.bias = op->data.conv.bias;
         if (workers > 1u) {
             uint32_t oc_blocks = op->data.conv.output_channels / 16u;
+            /* OC-block sharding needs whole 16-lane blocks; partial tail
+             * blocks (OC%16 != 0) always shard spatially. */
+            int oc_block_capable = (op->data.conv.output_channels % 16u) == 0u;
+            int spatial_shard = pixels >= workers * LW_NHWC_PIXEL_TILE ||
+                                oc_blocks < workers || !oc_block_capable;
             lw_status status = run_sharded_conv(
                 instance, op, state,
-                pixels >= workers * LW_NHWC_PIXEL_TILE || oc_blocks < workers
-                    ? LW_X64_DET_SHARD_POINTWISE_SPATIAL : LW_X64_DET_SHARD_POINTWISE_OC,
-                pixels >= workers * LW_NHWC_PIXEL_TILE || oc_blocks < workers
-                    ? pixels : oc_blocks, ep);
+                spatial_shard ? LW_X64_DET_SHARD_POINTWISE_SPATIAL
+                              : LW_X64_DET_SHARD_POINTWISE_OC,
+                spatial_shard ? pixels : oc_blocks, ep);
             if (status != LW_STATUS_OK) return status;
             return LW_STATUS_OK;
         }

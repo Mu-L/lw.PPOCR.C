@@ -540,7 +540,7 @@ static lw_status compile_node(const lw_model* model, const lw_session* session,
         op->data.conv_transpose.layout = layout;
         if (layout == LW_X64_DET_LAYOUT_NHWC) {
             uint32_t oc = (uint32_t)output->dimensions[1];
-            if (oc != 1u && (oc & 15u) != 0u) {
+            if (oc != 1u && (oc & 7u) != 0u) {
                 lw_set_error(error, LW_STATUS_UNSUPPORTED,
                              "DET ConvTranspose output channels are not NHWC-lowerable");
                 return LW_STATUS_UNSUPPORTED;

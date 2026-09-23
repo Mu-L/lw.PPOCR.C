@@ -32,7 +32,7 @@ def main() -> int:
         "border-3x3-s1", "border-5x5-s2", "blocked-3x3-s1",
         "medium-rec-3x3-h6-w240", "det-2x2-s1-pads0011", "det-3x3-s2-pad1",
         "det-stem-3x3-s2-ic3", "det-graph-stem-16x32", "det-head-3x3-s1-64-16",
-        "border-3x3-s1-asym",
+        "border-3x3-s1-asym", "det-24ch-3x3-s2", "det-8ch-2x2-s1-pads0011",
     }
     assert len(correctness) == 5 * len(cases), records
     assert len(hardswish) == len(cases), records

@@ -242,14 +242,32 @@ int main(int argc, char** argv) {
                "\"nhwc_speedup\":%.6f,\"nchw_speedup\":%.6f,"
                "\"nhwc_arena_bytes\":%llu,\"nchw_arena_bytes\":%llu,"
                "\"nhwc_conversions\":%u,\"nchw_conversions\":%u,"
-               "\"nhwc_effective\":%u,\"nchw_effective\":%u}\n",
+               "\"nhwc_effective\":%u,\"nchw_effective\":%u,"
+               "\"nhwc_profile\":{\"pointwise_ns\":%llu,\"dense_ns\":%llu,"
+               "\"depthwise_ns\":%llu,\"conv_nchw_ns\":%llu,\"binary_ns\":%llu,"
+               "\"unary_ns\":%llu,\"reduce_ns\":%llu,\"pool_ns\":%llu,"
+               "\"convert_ns\":%llu,\"conv_transpose_ns\":%llu,\"resize_ns\":%llu,"
+               "\"sigmoid_ns\":%llu,\"concat_ns\":%llu}}\n",
                height, width, workers, repeats,
                canonical_median, nhwc_median, nchw_median,
                canonical_median / nhwc_median, canonical_median / nchw_median,
                (unsigned long long)nhwc_program->arena_bytes,
                (unsigned long long)nchw_program->arena_bytes,
                nhwc_program->layout_conversions, nchw_program->layout_conversions,
-               nhwc_program->nhwc_effective_nodes, nhwc_program->nchw_effective_nodes);
+               nhwc_program->nhwc_effective_nodes, nhwc_program->nchw_effective_nodes,
+               (unsigned long long)nhwc->profile.pointwise_ns,
+               (unsigned long long)nhwc->profile.dense_ns,
+               (unsigned long long)nhwc->profile.depthwise_ns,
+               (unsigned long long)nhwc->profile.conv_nchw_ns,
+               (unsigned long long)nhwc->profile.binary_ns,
+               (unsigned long long)nhwc->profile.unary_ns,
+               (unsigned long long)nhwc->profile.reduce_ns,
+               (unsigned long long)nhwc->profile.pool_ns,
+               (unsigned long long)nhwc->profile.convert_ns,
+               (unsigned long long)nhwc->profile.conv_transpose_ns,
+               (unsigned long long)nhwc->profile.resize_ns,
+               (unsigned long long)nhwc->profile.sigmoid_ns,
+               (unsigned long long)nhwc->profile.concat_ns);
         /* The arena lifetime planner must reuse space aggressively. Monotonic
          * allocation would sum every tensor in the graph; a 256 MiB guard
          * catches silent regressions back to that. */

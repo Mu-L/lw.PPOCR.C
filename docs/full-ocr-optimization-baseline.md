@@ -268,3 +268,20 @@ threshold alignment (0.2/0.45/1.4) detects more/larger crops than the old
 defaults, and the serial line pipeline absorbs that cost while the 4w case
 parallelizes it away. Output checksum is worker-count-independent
 (46d99468540b5eb7). Full suite 80/80.
+
+Small-model regression fix (2026-09-23): the user's three-model A/B found
+the small family 5.8-12.3% slower. Root cause: the small DET is the
+24-channel variant, and the planner's dense rule (OC>=16 && OC%16==0)
+rejected every 24-channel conv, so the whole FPN chain ran on the serial
+NCHW arm (251.7 of 486 ms in the NHWC run, plus 63.9 ms of scalar
+ConvTranspose) while the canonical executor sharded it. Fix: the dense rule
+is now OC>=8 && OC%8==0 (the kernels already store partial 16-lane tail
+blocks lane-exactly; the ConvTranspose NHWC kernel gained partial-block
+bias/store handling and its pack now pads tail lanes with zeros; the REC
+fast-plan prototype's own OC%16 gate was synced). Results at 960x960:
+small DET 0.87x -> 1.71x (NHWC 204.7 vs canonical 349.9 ms), tiny
+1.59x -> 1.80x (29.0 vs 52.2 ms, conversions 3 -> 1), medium 3.07x (584.9
+vs 1795.2 ms). End-to-end tiny 4w improved to 89.3 ms (throughput 11.2/s).
+The converter's tiny-only SHA guard now yields to an LW_ALLOW_ANY_DET
+environment override so the small/medium models can be converted for
+testing. Full suite 80/80.

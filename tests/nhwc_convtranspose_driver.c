@@ -117,7 +117,7 @@ static int test_convtranspose_16(uint32_t input_channels, uint32_t output_channe
     {
         /* Verify the packed layout against the ONNX [ic][oc][4] source. */
         uint32_t tap;
-        uint32_t blocks = output_channels / 16u;
+        uint32_t blocks = (output_channels + 15u) / 16u;
         for (tap = 0u; tap < 4u; ++tap) {
             uint32_t block;
             for (block = 0u; block < blocks; ++block) {
@@ -125,9 +125,12 @@ static int test_convtranspose_16(uint32_t input_channels, uint32_t output_channe
                 for (ic_i = 0u; ic_i < input_channels; ++ic_i) {
                     uint32_t lane;
                     for (lane = 0u; lane < 16u; ++lane) {
-                        float expected_weight =
-                            weights[((size_t)ic_i * output_channels + block * 16u + lane) *
-                                    4u + tap];
+                        float expected_weight = 0.0f;
+                        if (block * 16u + lane < output_channels) {
+                            expected_weight =
+                                weights[((size_t)ic_i * output_channels + block * 16u + lane) *
+                                        4u + tap];
+                        }
                         float packed_weight =
                             packed[(((size_t)tap * blocks + block) * input_channels + ic_i) *
                                        16u + lane];
@@ -427,6 +430,8 @@ int main(void) {
     if (!test_convtranspose_16(16u, 32u, 5u, 11u, 1u, LW_NHWC_ACT_RELU, 1)) return 1;
     if (!test_convtranspose_16(12u, 16u, 6u, 8u, 1u, LW_NHWC_ACT_NONE, 0)) return 1;
     if (!test_convtranspose_16(16u, 16u, 160u, 160u, 1u, LW_NHWC_ACT_NONE, 0)) return 1;
+    if (!test_convtranspose_16(24u, 24u, 7u, 9u, 1u, LW_NHWC_ACT_NONE, 0)) return 1;
+    if (!test_convtranspose_16(24u, 24u, 5u, 11u, 2u, LW_NHWC_ACT_RELU, 1)) return 1;
     if (!test_convtranspose_c1(16u, 7u, 9u, 1u, 0)) return 1;
     if (!test_convtranspose_c1(16u, 5u, 11u, 2u, 1)) return 1;
     if (!test_convtranspose_c1(24u, 6u, 8u, 1u, 0)) return 1;

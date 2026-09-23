@@ -25,10 +25,10 @@ int lw_nhwc_convtranspose_packed_weight_count(uint32_t input_channels,
     uint64_t blocks;
     uint64_t count;
     if (input_channels == 0u || output_channels == 0u ||
-        (output_channels & 15u) != 0u || element_count == NULL) {
+        (output_channels & 7u) != 0u || element_count == NULL) {
         return 0;
     }
-    blocks = output_channels / LW_NHWC_OC_BLOCK;
+    blocks = (output_channels + LW_NHWC_OC_BLOCK - 1u) / LW_NHWC_OC_BLOCK;
     count = blocks;
     if (count > UINT64_MAX / input_channels) return 0;
     count *= input_channels;
@@ -45,7 +45,7 @@ void lw_pack_nhwc_convtranspose2x2_f32(const float* weights, uint32_t input_chan
                                        uint32_t output_channels, float* packed_weights) {
     /* ONNX ConvTranspose weights [ic, oc, 2, 2] -> [tap][oc/16][ic][16] with
      * tap = dy*2+dx. */
-    uint32_t blocks = output_channels / LW_NHWC_OC_BLOCK;
+    uint32_t blocks = (output_channels + LW_NHWC_OC_BLOCK - 1u) / LW_NHWC_OC_BLOCK;
     uint32_t tap;
     for (tap = 0u; tap < LW_CT_TAPS; ++tap) {
         uint32_t block;
@@ -60,7 +60,8 @@ void lw_pack_nhwc_convtranspose2x2_f32(const float* weights, uint32_t input_chan
                          LW_NHWC_OC_BLOCK) + lane;
                     size_t weight_index = ((size_t)input_channel * output_channels +
                                            output_channel) * LW_CT_TAPS + tap;
-                    packed_weights[packed_index] = weights[weight_index];
+                    packed_weights[packed_index] = output_channel < output_channels
+                        ? weights[weight_index] : 0.0f;
                 }
             }
         }
@@ -77,12 +78,24 @@ static void convtranspose_tile_16(const float* input_row, const float* packed_we
                                   uint32_t pixels) {
     uint32_t block;
     for (block = 0u; block < oc_blocks; ++block) {
+        uint32_t block_channels = desc->output_channels - block * LW_NHWC_OC_BLOCK;
         uint32_t tap;
         __m256 bias_lo = _mm256_setzero_ps();
         __m256 bias_hi = _mm256_setzero_ps();
+        if (block_channels > LW_NHWC_OC_BLOCK) block_channels = LW_NHWC_OC_BLOCK;
         if (epilogue != NULL && epilogue->bias != NULL) {
-            bias_lo = _mm256_loadu_ps(epilogue->bias + block * LW_NHWC_OC_BLOCK);
-            bias_hi = _mm256_loadu_ps(epilogue->bias + block * LW_NHWC_OC_BLOCK + 8u);
+            if (block_channels < LW_NHWC_OC_BLOCK) {
+                float bias_values[LW_NHWC_OC_BLOCK] = {0.0f};
+                uint32_t lane;
+                for (lane = 0u; lane < block_channels; ++lane) {
+                    bias_values[lane] = epilogue->bias[block * LW_NHWC_OC_BLOCK + lane];
+                }
+                bias_lo = _mm256_loadu_ps(bias_values);
+                bias_hi = _mm256_loadu_ps(bias_values + 8u);
+            } else {
+                bias_lo = _mm256_loadu_ps(epilogue->bias + block * LW_NHWC_OC_BLOCK);
+                bias_hi = _mm256_loadu_ps(epilogue->bias + block * LW_NHWC_OC_BLOCK + 8u);
+            }
         }
         for (tap = 0u; tap < LW_CT_TAPS; ++tap) {
             __m256 acc_lo[LW_CT_TILE];
@@ -119,8 +132,18 @@ static void convtranspose_tile_16(const float* input_row, const float* packed_we
                         acc_lo[pixel] = _mm256_max_ps(acc_lo[pixel], _mm256_setzero_ps());
                         acc_hi[pixel] = _mm256_max_ps(acc_hi[pixel], _mm256_setzero_ps());
                     }
-                    _mm256_storeu_ps(destination, acc_lo[pixel]);
-                    _mm256_storeu_ps(destination + 8u, acc_hi[pixel]);
+                    if (block_channels < LW_NHWC_OC_BLOCK) {
+                        float values[LW_NHWC_OC_BLOCK];
+                        uint32_t lane;
+                        _mm256_storeu_ps(values, acc_lo[pixel]);
+                        _mm256_storeu_ps(values + 8u, acc_hi[pixel]);
+                        for (lane = 0u; lane < block_channels; ++lane) {
+                            destination[lane] = values[lane];
+                        }
+                    } else {
+                        _mm256_storeu_ps(destination, acc_lo[pixel]);
+                        _mm256_storeu_ps(destination + 8u, acc_hi[pixel]);
+                    }
                 }
             }
         }
@@ -137,7 +160,7 @@ lw_status lw_avx2_fma_nhwc_convtranspose2x2_s2_f32(
     if (input == NULL || packed_weights == NULL || output == NULL || desc == NULL ||
         desc->batch == 0u || desc->input_channels == 0u || desc->input_height == 0u ||
         desc->input_width == 0u || desc->output_channels == 0u ||
-        (desc->output_channels & 15u) != 0u || desc->output_height != desc->input_height * 2u ||
+        (desc->output_channels & 7u) != 0u || desc->output_height != desc->input_height * 2u ||
         desc->output_width != desc->input_width * 2u) {
         return LW_STATUS_INVALID_ARGUMENT;
     }
@@ -145,7 +168,7 @@ lw_status lw_avx2_fma_nhwc_convtranspose2x2_s2_f32(
     (void)epilogue;
     return LW_STATUS_UNSUPPORTED;
 #else
-    oc_blocks = desc->output_channels / LW_NHWC_OC_BLOCK;
+    oc_blocks = (desc->output_channels + LW_NHWC_OC_BLOCK - 1u) / LW_NHWC_OC_BLOCK;
     for (batch = 0u; batch < desc->batch; ++batch) {
         const float* input_batch =
             input + (size_t)batch * desc->input_height * desc->input_width * desc->input_channels;
