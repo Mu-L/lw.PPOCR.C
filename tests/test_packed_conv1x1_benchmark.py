@@ -52,6 +52,8 @@ class PackedConv1x1BenchmarkTest(unittest.TestCase):
                     self.assertTrue(math.isfinite(item[field]), (field, item))
                     self.assertGreater(item[field], 0.0, (field, item))
                 self.assertRegex(item["checksum"], re.compile(r"^0x[0-9a-f]{16}$"))
+                self.assertTrue(math.isfinite(item["dispatched_max_abs_error"]), item)
+                self.assertLessEqual(item["dispatched_max_abs_error"], 1.0e-2, item)
                 if "fma_ms" in item:
                     for field in ("fma_ms", "fma_min_ms", "fma_max_ms", "fma_p90_ms", "fma_speedup", "fma_vs_avx2", "fma_max_abs_error", "fma_max_relative_error"):
                         self.assertTrue(math.isfinite(item[field]), (field, item))
@@ -60,6 +62,15 @@ class PackedConv1x1BenchmarkTest(unittest.TestCase):
                     self.assertGreater(item["fma_vs_avx2"], 0.0, item)
                     self.assertLessEqual(item["fma_max_abs_error"], 1.0e-2, item)
                     self.assertRegex(item["fma_checksum"], re.compile(r"^0x[0-9a-f]{16}$"))
+                    if item["name"] in {
+                        "middle-192x384",
+                        "middle-384x192",
+                        "late-768x384",
+                        "medium-512x1024",
+                        "medium-1024x512",
+                        "medium-1536x768",
+                    } and (target_width == 960 or item["height"] == 6):
+                        self.assertEqual(item["checksum"], item["fma_checksum"], item)
                     if "fma8_ms" in item:
                         for field in ("fma8_ms", "fma8_vs_fma", "fma8_max_abs_error"):
                             self.assertTrue(math.isfinite(item[field]), (field, item))

@@ -2,6 +2,7 @@
 #include "lw_infer.h"
 #include "packed_conv3x3_internal.h"
 #include "scalar_kernels.h"
+#include "simd_kernels.h"
 
 #include <inttypes.h>
 #include <math.h>
@@ -151,6 +152,11 @@ static int run_case(const benchmark_case* item, uint32_t target_width, uint32_t 
     double scalar_ms;
     double dispatched_ms;
     double packed_ms;
+#if defined(LW_AVX2_FMA_CONV3X3_DISPATCH)
+    double fma_ms = 0.0;
+    float fma_max_abs_error = 0.0f;
+    int has_fma = 0;
+#endif
     uint64_t checksum;
     uint32_t iteration;
     int ok = 0;
@@ -250,16 +256,45 @@ static int run_case(const benchmark_case* item, uint32_t target_width, uint32_t 
     scalar_ms = (scalar_finished - scalar_started) * 1000.0 / iterations;
     dispatched_ms = (dispatched_finished - dispatched_started) * 1000.0 / iterations;
     packed_ms = (packed_finished - packed_started) * 1000.0 / iterations;
+#if defined(LW_AVX2_FMA_CONV3X3_DISPATCH)
+    if (lw_get_cpu_capabilities().has_avx2_fma &&
+        item->input_height == 24u && item->input_channels >= 96u) {
+        double started = monotonic_seconds();
+        double finished;
+        has_fma = 1;
+        for (iteration = 0u; iteration < iterations; ++iteration) {
+            lw_avx2_fma_packed_conv3x3_stride2_pad1_f32(
+                input, packed_weights, bias, packed_output, input_dimensions,
+                output_dimensions);
+        }
+        finished = monotonic_seconds();
+        fma_ms = (finished - started) * 1000.0 / iterations;
+        fma_max_abs_error = max_abs_difference(reference, packed_output, output_count);
+        if (!isfinite(fma_ms) || fma_ms <= 0.0 ||
+            !isfinite(fma_max_abs_error) || fma_max_abs_error > 1.0e-2f) {
+            fprintf(stderr, "stride-2 Conv FMA candidate failed: %s\n", item->name);
+            goto cleanup;
+        }
+    }
+#endif
     checksum = checksum_bytes(output, output_bytes);
     printf("%s{\"name\":\"%s\",\"input\":[1,%u,%u,%u],"
            "\"output\":[1,%u,%u,%u],\"scalar_ms\":%.6f,"
            "\"dispatched_ms\":%.6f,\"speedup\":%.6f,"
            "\"packed_ms\":%.6f,\"packed_speedup\":%.6f,"
-           "\"checksum\":\"0x%016" PRIx64 "\"}",
+           "\"checksum\":\"0x%016" PRIx64 "\"",
            first ? "" : ",", item->name, item->input_channels, item->input_height,
            input_width, item->output_channels, output_height, output_width, scalar_ms,
            dispatched_ms, scalar_ms / dispatched_ms, packed_ms,
            dispatched_ms / packed_ms, checksum);
+#if defined(LW_AVX2_FMA_CONV3X3_DISPATCH)
+    if (has_fma) {
+        printf(",\"fma_ms\":%.6f,\"fma_vs_packed\":%.6f,"
+               "\"fma_max_abs_error\":%.9g",
+               fma_ms, packed_ms / fma_ms, (double)fma_max_abs_error);
+    }
+#endif
+    putchar('}');
     ok = 1;
 
 cleanup:
@@ -278,6 +313,7 @@ int main(int argc, char** argv) {
         {"stem-3x48", 3u, 48u, 48u, 1u, 0u},
         {"rec-node6-24x48", 24u, 48u, 24u, 2u, 0u},
         {"early-96x48", 96u, 48u, 24u, 2u, 0u},
+        {"medium-rec-128x64", 128u, 64u, 24u, 2u, 0u},
         {"medium-det-64x128", 64u, 64u, 128u, 1u, 0u},
         {"medium-det-64x64", 64u, 64u, 64u, 1u, 0u},
         {"medium-det-64x32", 64u, 64u, 32u, 1u, 0u},

@@ -185,6 +185,7 @@ static int run_case(const benchmark_case* item, uint32_t target_width, uint32_t 
     double avx2_samples[ABBA_ROUNDS];
     double fma_samples[ABBA_ROUNDS];
     double avx2_ms;
+    double dispatched_ms;
     double avx2_min;
     double avx2_max;
     double avx2_p90;
@@ -198,6 +199,7 @@ static int run_case(const benchmark_case* item, uint32_t target_width, uint32_t 
     uint64_t fma_checksum = 0u;
     uint64_t fma8_checksum = 0u;
     float avx2_max_abs_error;
+    float dispatched_max_abs_error;
     float fma_max_abs_error = 0.0f;
     float fma_max_relative_error = 0.0f;
     float fma8_max_abs_error = 0.0f;
@@ -416,16 +418,29 @@ static int run_case(const benchmark_case* item, uint32_t target_width, uint32_t 
         lw_avx2_packed_conv1x1_f32(input, packed, bias, output,
                                    input_dimensions, output_dimensions);
     }
+    if (!measure_kernel(lw_packed_conv1x1_f32, input, packed, bias, output,
+                        input_dimensions, output_dimensions, iterations, &dispatched_ms)) {
+        fprintf(stderr, "dispatched pointwise timer failed: %s\n", item->name);
+        goto cleanup;
+    }
+    dispatched_max_abs_error = max_abs_difference(reference, output, output_count);
+    if (!isfinite(dispatched_max_abs_error) || dispatched_max_abs_error > 1.0e-2f ||
+        dispatched_ms <= 0.0) {
+        fprintf(stderr, "dispatched pointwise correctness check failed: %s\n", item->name);
+        goto cleanup;
+    }
     checksum = checksum_bytes(output, output_bytes);
     printf("%s{\"name\":\"%s\",\"input_channels\":%u,\"output_channels\":%u,"
            "\"height\":%u,\"width\":%u,\"batch\":1,\"scalar_ms\":%.6f,"
            "\"avx2_available\":%s,\"avx2_ms\":%.6f,\"avx2_min_ms\":%.6f,"
            "\"avx2_max_ms\":%.6f,\"avx2_p90_ms\":%.6f,\"avx2_speedup\":%.6f,"
-           "\"dispatched_ms\":%.6f,\"speedup\":%.6f,\"checksum\":\"0x%016" PRIx64 "\"",
+           "\"dispatched_ms\":%.6f,\"speedup\":%.6f,"
+           "\"dispatched_max_abs_error\":%.9g,\"checksum\":\"0x%016" PRIx64 "\"",
            first ? "" : ",", item->name, item->input_channels, item->output_channels,
            item->height, spatial_width, scalar_ms, capabilities.simd == LW_SIMD_LEVEL_AVX2 ? "true" : "false",
            avx2_ms, avx2_min, avx2_max, avx2_p90, scalar_ms / avx2_ms,
-           avx2_ms, scalar_ms / avx2_ms, checksum);
+           dispatched_ms, scalar_ms / dispatched_ms,
+           (double)dispatched_max_abs_error, checksum);
     if (has_fma) {
         printf(",\"fma_ms\":%.6f,\"fma_min_ms\":%.6f,\"fma_max_ms\":%.6f,"
                "\"fma_p90_ms\":%.6f,\"fma_speedup\":%.6f,\"fma_vs_avx2\":%.6f,"

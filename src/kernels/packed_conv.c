@@ -100,6 +100,41 @@ void lw_scalar_packed_conv1x1_f32(const float* input, const float* packed_weight
     }
 }
 
+/* Large Small/Medium REC pointwise layers dominate their graph time. The
+ * remaining FMA candidates stay behind the experimental dispatch switch. */
+static uint32_t lw_large_rec_fma_variant(const int32_t input_dimensions[4],
+                                         const int32_t output_dimensions[4]) {
+    uint32_t input_channels;
+    uint32_t output_channels;
+    uint32_t height;
+    if (input_dimensions == NULL || output_dimensions == NULL ||
+        input_dimensions[0] != 1 || output_dimensions[0] != 1 ||
+        input_dimensions[2] <= 0 || input_dimensions[3] <= 0 ||
+        output_dimensions[2] != input_dimensions[2] ||
+        output_dimensions[3] != input_dimensions[3]) {
+        return 0u;
+    }
+    input_channels = (uint32_t)input_dimensions[1];
+    output_channels = (uint32_t)output_dimensions[1];
+    height = (uint32_t)input_dimensions[2];
+    if (height == 6u && (uint32_t)input_dimensions[3] >= 80u) {
+        if ((input_channels == 192u && output_channels == 384u) ||
+            (input_channels == 384u && output_channels == 192u)) {
+            return 4u;
+        }
+        if ((input_channels == 512u && output_channels == 1024u) ||
+            (input_channels == 1024u && output_channels == 512u)) {
+            return 8u;
+        }
+    }
+    if (height == 3u && (uint32_t)input_dimensions[3] >= 160u &&
+        ((input_channels == 768u && output_channels == 384u) ||
+         (input_channels == 1536u && output_channels == 768u))) {
+        return 8u;
+    }
+    return 0u;
+}
+
 #if defined(LW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH)
 /*
  * FMA can lower the CPU frequency on some x64 hosts. Keep the measured
@@ -170,19 +205,24 @@ void lw_packed_conv1x1_f32(const float* input, const float* packed_weights, cons
                            const int32_t output_dimensions[4]) {
     const lw_cpu_capabilities capabilities = lw_get_cpu_capabilities();
     const lw_simd_level simd_level = capabilities.simd;
+    uint32_t fma_variant = lw_large_rec_fma_variant(input_dimensions, output_dimensions);
 #if defined(LW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH)
-    if (capabilities.has_avx2_fma &&
+    if (fma_variant == 0u &&
         lw_experimental_fma_shape_allowed(input_dimensions, output_dimensions)) {
-        if (lw_experimental_fma_8x8_shape_allowed(input_dimensions, output_dimensions)) {
-            lw_avx2_fma_packed_conv1x1_8x8_f32(input, packed_weights, bias, output,
-                                               input_dimensions, output_dimensions);
-            return;
-        }
-        lw_avx2_fma_packed_conv1x1_f32(input, packed_weights, bias, output, input_dimensions,
-                                       output_dimensions);
-        return;
+        fma_variant = lw_experimental_fma_8x8_shape_allowed(input_dimensions,
+                                                             output_dimensions) ? 8u : 4u;
     }
 #endif
+    if (capabilities.has_avx2_fma && fma_variant != 0u) {
+        if (fma_variant == 8u) {
+            lw_avx2_fma_packed_conv1x1_8x8_f32(input, packed_weights, bias, output,
+                                               input_dimensions, output_dimensions);
+        } else {
+            lw_avx2_fma_packed_conv1x1_f32(input, packed_weights, bias, output,
+                                           input_dimensions, output_dimensions);
+        }
+        return;
+    }
     if (lw_simd_level_is_avx2(simd_level)) {
         lw_avx2_packed_conv1x1_f32(input, packed_weights, bias, output, input_dimensions,
                                    output_dimensions);

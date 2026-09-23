@@ -236,3 +236,22 @@ both one and four workers. Seven local one-shot profile samples gave a
 four-worker median of 87.495 ms (83.212–93.954 ms). This is not a paired
 comparison against the previous release, so no release-level speedup is
 claimed from it.
+
+## Small/Medium canonical REC dispatch
+
+The compiled REC backend currently rejects the Small and Medium graphs at
+their early Concat node, so their lines still use the canonical executor.
+On the 500x500 sample, both models spend most of their one-worker time in REC
+Conv, especially high-channel 1x1 layers. Shape-selective AVX2/FMA dispatch
+now uses the existing four-output kernel for Small's 192/384-channel middle
+layers and the eight-output kernel for the measured 512/1024, 768/384 and
+1536/768 late layers. Small's 96-to-48 stride-2 3x3 layer uses the existing
+FMA kernel only at input widths 320 and 480. Other shapes retain their prior
+dispatch, including the Medium 128-to-64 stride-2 layer where the long-width
+local A/B did not win.
+
+The pointwise and stride-2 benchmark drivers validate the dispatched result
+against the scalar reference and report direct AVX2/FMA timings. Local
+single-pass OCR checks kept the Small and Medium output checksums unchanged
+for one and four workers. Hosted-runner latency and peak working-set claims
+must come from the paired x64 release-comparison CI, not these local runs.

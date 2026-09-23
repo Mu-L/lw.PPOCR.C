@@ -33,6 +33,7 @@ class Conv3x3Stride2BenchmarkTest(unittest.TestCase):
                     ([1, 3, 48, first_width], [1, 48, 24, second_width]),
                     ([1, 24, 24, second_width], [1, 48, 12, second_width // 2]),
                     ([1, 96, 24, second_width], [1, 48, 12, second_width // 2]),
+                    ([1, 128, 24, second_width], [1, 64, 12, second_width // 2]),
                     ([1, 64, 128, first_width], [1, 64, 64, second_width]),
                     ([1, 64, 64, first_width], [1, 64, 32, second_width]),
                     ([1, 64, 32, first_width], [1, 64, 16, second_width]),
@@ -50,6 +51,10 @@ class Conv3x3Stride2BenchmarkTest(unittest.TestCase):
                     self.assertTrue(math.isfinite(item[field]), (field, item))
                     self.assertGreater(item[field], 0.0, (field, item))
                 self.assertRegex(item["checksum"], re.compile(r"^0x[0-9a-f]{16}$"))
+                if "fma_ms" in item:
+                    self.assertGreater(item["fma_ms"], 0.0, item)
+                    self.assertGreater(item["fma_vs_packed"], 0.0, item)
+                    self.assertLessEqual(item["fma_max_abs_error"], 1.0e-2, item)
 
 
 def parse_args() -> argparse.Namespace:
