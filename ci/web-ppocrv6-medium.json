@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "family": "PP-OCRv6",
-  "expected_text_sha256": "80ee582e0d0b62b87477b83400b793c26307b16c77adbca53419845c5442b1eb",
+  "expected_text_sha256": "02ab8dabb68611de6347f60b2800a1dd0fcde00d5e89f1e5e5508fa8f896fc15",
   "sample": "models/ppocrv6-tiny/sample.jpg",
   "expected_line_count": 16,
   "variant": "medium"

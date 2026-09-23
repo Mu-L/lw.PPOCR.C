@@ -462,8 +462,14 @@ python tools/run_small_validation.py \
   --rec-max-width 960 \
   --expected-lines 16 \
   --expected-full-text-sha256 \
-    9cd560aaff37f1013cf10ebd9c616f4e2446b800985a9d15aa408d4010cdba95
+    8dd4a072b9b6dcf85316edca9f3e77f5ec041ae131835f76a448e72ba3751697
 ```
+
+After the x64 DET sharding fix, the current canonical and optimized Windows x64
+builds were run against the same converted LWM files, dictionary, and sample at
+REC width 960. Both returned the same 16 texts, with the SHA-256 above. The
+readable contract is `ci/fixtures/ppocrv6-small-full-ocr.txt`; the hash covers
+its lines joined with `\n`, without a trailing newline.
 
 It stages a manifest-checked analysis bundle, probes the REC dynamic metadata,
 converts DET and REC prototypes, executes all three DET shapes and all five

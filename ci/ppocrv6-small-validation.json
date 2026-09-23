@@ -6,6 +6,6 @@
   "full_ocr": {
     "rec_max_width": 960,
     "expected_lines": 16,
-    "expected_text_sha256": "9cd560aaff37f1013cf10ebd9c616f4e2446b800985a9d15aa408d4010cdba95"
+    "expected_text_sha256": "8dd4a072b9b6dcf85316edca9f3e77f5ec041ae131835f76a448e72ba3751697"
   }
 }

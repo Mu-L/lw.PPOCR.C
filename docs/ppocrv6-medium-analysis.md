@@ -193,7 +193,13 @@ default REC width `960`.
 
 The complete OCR gate requires 16 lines and pins the SHA-256 of the
 newline-joined UTF-8 text to
-`80ee582e0d0b62b87477b83400b793c26307b16c77adbca53419845c5442b1eb`.
+`02ab8dabb68611de6347f60b2800a1dd0fcde00d5e89f1e5e5508fa8f896fc15`.
+After the x64 DET sharding fix, the current canonical and optimized Windows x64
+builds produced identical 16-line OCR text using the same LWM files,
+dictionary, and sample at REC width 960. The readable contract is
+`ci/fixtures/ppocrv6-medium-full-ocr.txt`; its hash excludes the trailing
+newline in the file.
+
 The numerical tolerances and model-catalog location are versioned in
 `ci/ppocrv6-medium-validation.json`. CI uploads the compact conversion,
 numerical-comparison, resolved-contract, and OCR reports, while generated LWM
