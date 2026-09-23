@@ -91,10 +91,10 @@ static int run_recognizer(lw_recognizer* recognizer, const uint8_t* source,
 }
 
 int main(int argc, char** argv) {
-    const uint32_t width = 960u;
+    uint32_t width = 960u;
     const uint32_t height = 48u;
     uint32_t repeats = DEFAULT_REPEATS;
-    uint64_t source_bytes = (uint64_t)width * height * 3u;
+    uint64_t source_bytes;
     lw_recognizer_options options;
     lw_recognizer* backend_recognizer = NULL;
     lw_recognizer* canonical_recognizer = NULL;
@@ -109,13 +109,19 @@ int main(int argc, char** argv) {
     uint32_t repeat;
     int result = 1;
 
-    if (argc > 4 || (argc == 4 && !parse_repeats(argv[3], &repeats))) {
-        fprintf(stderr, "usage: x64-rec-recognizer-benchmark-driver rec.lwm dict.txt [repeats]\n");
+    if (argc < 3 || argc > 5 || (argc >= 4 && !parse_repeats(argv[3], &repeats))) {
+        fprintf(stderr, "usage: x64-rec-recognizer-benchmark-driver rec.lwm dict.txt [repeats] [width]\n");
         return 2;
     }
+    if (argc == 5) {
+        width = (uint32_t)strtoul(argv[4], NULL, 10);
+        if (width != 192u && width != 320u && width != 480u &&
+            width != 640u && width != 960u) return 2;
+    }
+    source_bytes = (uint64_t)width * height * 3u;
     lw_error_init(&error);
     lw_recognizer_options_init(&options);
-    options.target_width = 960u;
+    options.target_width = width;
     if (lw_recognizer_create(argv[1], argv[2], &options, &backend_recognizer, &error) !=
             LW_STATUS_OK ||
         lw_recognizer_create(argv[1], argv[2], &options, &canonical_recognizer, &error) !=

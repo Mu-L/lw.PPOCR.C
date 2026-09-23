@@ -2,6 +2,7 @@
 #define LW_X64_REC_BACKEND_INTERNAL_H
 
 #include "cpu_features.h"
+#include "atomic_internal.h"
 #include "model_internal.h"
 #include "session_internal.h"
 #include "executor_internal.h"
@@ -282,6 +283,8 @@ typedef struct lw_x64_rec_program {
     uint32_t packed_constant_count;
     lw_x64_rec_constant* constants;
     lw_x64_rec_ctc_tail ctc;
+    /* Number of additional owners beyond the original compiler caller. */
+    lw_atomic_u32 shared_refs;
 } lw_x64_rec_program;
 
 typedef struct lw_x64_rec_profile {
@@ -319,6 +322,7 @@ lw_x64_rec_compile_result lw_x64_rec_backend_compile(
     const lw_model* model, uint32_t target_width, lw_x64_rec_program** out_program,
     lw_error* error);
 void lw_x64_rec_program_free(lw_x64_rec_program* program);
+void lw_x64_rec_program_retain(lw_x64_rec_program* program);
 lw_status lw_x64_rec_instance_create(const lw_x64_rec_program* program,
                                      lw_x64_rec_instance** out, lw_error* error);
 void lw_x64_rec_instance_free(lw_x64_rec_instance* instance);

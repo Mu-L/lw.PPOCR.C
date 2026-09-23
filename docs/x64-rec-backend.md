@@ -1,10 +1,10 @@
 # x64 REC Backend
 
-这是实验性的 x64 REC 后端，不属于公开 C ABI。它在 `LW_EXPERIMENTAL_AVX2_FAST_PATH=ON` 且 REC 目标宽度为 960、CPU 支持 AVX2+FMA 时由 recognizer 选择；其他平台、宽度或不满足编译契约时继续走 canonical executor。
+这是实验性的 x64 REC 后端，不属于公开 C ABI。当前在 `LW_EXPERIMENTAL_AVX2_FAST_PATH=ON` 且 CPU 支持 AVX2+FMA 时，recognizer 会为不超过配置上限的 192/320/480/640/960 宽度准备 compiled slot；不满足编译契约的宽度继续走 canonical executor。其他平台不受影响。
 
 ## 当前状态
 
-Tiny REC 已完成目标宽度 960 的 standalone 可执行闭环：
+Tiny REC 已完成 192/320/480/640/960 五宽度的 standalone 与 recognizer 可执行闭环：
 
 - `lw_x64_rec_program` 是只读图程序，保存模型签名、目标宽度、值表、物理算子表、arena/scratch 大小和 CTC 尾部描述；
 - `lw_x64_rec_instance` 独占可复用的 arena、dense scratch、CTC logits、argmax 索引和 emitted probability 缓冲区；program 不持有运行时可变工作区；
@@ -12,7 +12,7 @@ Tiny REC 已完成目标宽度 960 的 standalone 可执行闭环：
 - Conv 按形状选择 pointwise、depthwise 或 dense lowering；pointwise、depthwise、dense 已接入 AVX2+FMA kernel，形状不满足 kernel 契约时才回退到 backend 自己的 scalar 实现；
 - 支持 Tiny REC 主干中的 Conv、BatchNorm、Add/Mul/Div、Relu、Erf、HardSigmoid、ReduceMean、Average/MaxPool、Transpose 和 MatMul；
 - 最末 CTC 投影由独立 `ctc_projection_internal.c` 预打包权重，执行 packed MatMul + argmax + emitted softmax，并初始化 blank/repeated 行的 probability 缓冲；
-- arena 使用 64 字节对齐和溢出检查，instance 可重复运行；当前先保证 physical lifetime 正确，尚未做跨值空间复用。
+- arena 使用 64 字节对齐、溢出检查与 physical lifetime 复用，instance 可重复运行；各 worker 共享只读 program，各自拥有 arena/scratch。
 
 ## 正确性门禁
 
@@ -22,9 +22,9 @@ Tiny REC 已完成目标宽度 960 的 standalone 可执行闭环：
 
 该 backend 仍是实验性实现：
 
-- 目前只在 x64 AVX2+FMA 和 Tiny REC960 上接入 recognizer；192/320/480/640 宽度矩阵、Small/Medium 模型和非 x64 后端尚未宣称覆盖；
+- x64 AVX2+FMA 的 Tiny REC 已接入五个自适应宽度；Small/Medium 模型和非 x64 compiled 后端尚未宣称覆盖；
 - 输入 API 当前要求调用方提供已经排布为 NHWC 的 `float` 输入，输出通过 program 的值表和 CTC 缓冲区读取；
-- arena 仍按所有运行时值单调分配，内存复用和 physical lifetime 压缩留在后续阶段；当前 Tiny REC960 的实例 arena 约 95.2 MiB，优先保证独立 instance 的正确性和可复用性；
+- Tiny REC960 的当前实例 arena 为 3,317,760 字节；跨宽度 packed constants 尚未共享，五宽度各自保留一份 program；
 - GELU fusion、Concat/Resize 等非 Tiny REC960 必需路径暂不宣称覆盖。
 
 ## 构建与测试

@@ -65,6 +65,8 @@ void lw_pipeline_component_profile_accumulate(lw_pipeline_component_profile* des
     add_saturated(&destination->session_cache_hits, source->session_cache_hits);
     add_saturated(&destination->session_cache_misses, source->session_cache_misses);
     add_saturated(&destination->session_reconfigurations, source->session_reconfigurations);
+    add_saturated(&destination->compiled_backend_lines, source->compiled_backend_lines);
+    add_saturated(&destination->canonical_fallback_lines, source->canonical_fallback_lines);
     for (index = 0u; index < LW_REC_WIDTH_HISTOGRAM_BUCKET_COUNT; ++index) {
         uint32_t node;
         for (node = 0u; node < LW_EXECUTION_PROFILE_NODE_CAPACITY; ++node) {

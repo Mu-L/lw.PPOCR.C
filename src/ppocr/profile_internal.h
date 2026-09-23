@@ -21,6 +21,8 @@ typedef struct lw_pipeline_component_profile {
     uint64_t session_cache_hits;
     uint64_t session_cache_misses;
     uint64_t session_reconfigurations;
+    uint64_t compiled_backend_lines;
+    uint64_t canonical_fallback_lines;
     uint64_t node_nanoseconds_by_width[LW_REC_WIDTH_HISTOGRAM_BUCKET_COUNT]
                                     [LW_EXECUTION_PROFILE_NODE_CAPACITY];
     uint64_t node_invocations_by_width[LW_REC_WIDTH_HISTOGRAM_BUCKET_COUNT]

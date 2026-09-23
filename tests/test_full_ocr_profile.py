@@ -133,6 +133,15 @@ class FullOcrProfileTest(unittest.TestCase):
 
                 line_work = report["line_work_nanoseconds"]
                 session_cache = report["rec_session_cache"]
+                coverage = report["rec_backend_coverage"]
+                self.assertEqual(
+                    coverage["compiled_lines"] + coverage["canonical_lines"],
+                    report["lines"],
+                )
+                if ARGUMENTS.expect_compiled_rec:
+                    self.assertEqual(coverage["compiled_lines"], report["lines"])
+                    self.assertEqual(coverage["canonical_lines"], 0)
+                    self.assertEqual(session_cache["reconfigurations"], 0)
                 self.assertEqual(
                     session_cache["hits"] + session_cache["misses"],
                     report["lines"],
@@ -157,10 +166,13 @@ class FullOcrProfileTest(unittest.TestCase):
                 implementation_paths = report["implementation_paths"]
                 operators = report["operators"]
                 self.assertEqual(len(operators), 21)
-                self.assertEqual(
-                    {item["name"] for item in operators if item["invocations"] > 0},
-                    EXPECTED_OPERATORS,
-                )
+                observed_operators = {
+                    item["name"] for item in operators if item["invocations"] > 0
+                }
+                if coverage["canonical_lines"] > 0:
+                    self.assertEqual(observed_operators, EXPECTED_OPERATORS)
+                else:
+                    self.assertTrue(observed_operators <= EXPECTED_OPERATORS)
                 # Lines that reach adaptive width 960 run through the compiled
                 # x64 REC backend and execute outside the per-operator profile
                 # counters. Derive the backend row count from the greedy CTC
@@ -171,6 +183,7 @@ class FullOcrProfileTest(unittest.TestCase):
                     implementation_paths["recognizer"]["ctc_greedy"]
                     // report["iterations"]
                 )
+                self.assertEqual(canonical_rows, coverage["canonical_lines"])
                 self.assertEqual(
                     sum(item["invocations"] for item in operators),
                     242 + report["lines"] * 106 + canonical_rows * 159,
@@ -200,6 +213,8 @@ class FullOcrProfileTest(unittest.TestCase):
                     # bindings entirely, so its counters stay zero even when
                     # prepared execution is enabled for the other components.
                     component_backend = component_name == "detector" and det_backend_active
+                    if component_name == "recognizer" and canonical_rows == 0:
+                        component_backend = True
                     if ARGUMENTS.expect_prepared and not component_backend:
                         self.assertGreater(binding["lookups"], 0)
                         self.assertEqual(
@@ -266,7 +281,7 @@ class FullOcrProfileTest(unittest.TestCase):
                 )
 
                 rec_nodes = report["rec_nodes"]
-                self.assertEqual(len(rec_nodes), 159)
+                self.assertEqual(len(rec_nodes), 159 if canonical_rows > 0 else 0)
                 self.assertEqual(
                     len({item["node"] for item in rec_nodes}), len(rec_nodes)
                 )
@@ -320,7 +335,8 @@ class FullOcrProfileTest(unittest.TestCase):
                             "pads",
                         ):
                             self.assertNotIn(field, item)
-                self.assertGreater(convolution_shape_count, 0)
+                if canonical_rows > 0:
+                    self.assertGreater(convolution_shape_count, 0)
                 rec_width = report["rec_width"]
                 self.assertEqual(rec_width["samples"], report["lines"])
                 self.assertGreater(rec_width["resized_width_sum"], 0)
@@ -457,6 +473,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dictionary", required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--expect-resident", action="store_true")
+    parser.add_argument("--expect-compiled-rec", action="store_true")
     parser.add_argument("--expect-prepared", action="store_true")
     return parser.parse_args()
 

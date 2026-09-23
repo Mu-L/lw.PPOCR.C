@@ -1,4 +1,5 @@
 #include "x64_rec_backend_internal.h"
+#include "ctc_projection_internal.h"
 #include "model_internal.h"
 #include "rec_internal.h"
 #include "session_internal.h"
@@ -50,7 +51,7 @@ static int run_canonical(lw_session* session, const uint8_t* source, uint64_t so
     uint64_t start = clock_ns();
     lw_error error;
     lw_error_init(&error);
-    if (lw_rec_preprocess_bgr_u8(source, source_bytes, width, height, width * 3u, 960u,
+    if (lw_rec_preprocess_bgr_u8(source, source_bytes, width, height, width * 3u, width,
                                  input, input_count, NULL) != LW_STATUS_OK ||
         lw_execute_session_f32_ctc_greedy(session, input, input_count, indices, probabilities,
                                           rows, classes, NULL, &error) != LW_STATUS_OK) {
@@ -69,8 +70,8 @@ static int run_backend(lw_x64_rec_instance* instance, int nchw, const uint8_t* s
     float* input = lw_x64_rec_instance_input(instance, &count);
     uint64_t start = clock_ns();
     if (input == NULL ||
-        (nchw ? lw_rec_preprocess_bgr_u8(source, source_bytes, width, height, width * 3u, 960u, input, count, NULL)
-              : lw_rec_preprocess_bgr_u8_nhwc(source, source_bytes, width, height, width * 3u, 960u, input, count, NULL)) != LW_STATUS_OK) return 0;
+        (nchw ? lw_rec_preprocess_bgr_u8(source, source_bytes, width, height, width * 3u, width, input, count, NULL)
+              : lw_rec_preprocess_bgr_u8_nhwc(source, source_bytes, width, height, width * 3u, width, input, count, NULL)) != LW_STATUS_OK) return 0;
     lw_error error;
     lw_error_init(&error);
     if (lw_x64_rec_instance_run(instance, &error) != LW_STATUS_OK) { fprintf(stderr, "backend run failed: %s\n", error.message); return 0; }
@@ -78,11 +79,49 @@ static int run_backend(lw_x64_rec_instance* instance, int nchw, const uint8_t* s
     if (indices != NULL) for (uint32_t i = 0u; i < rows; ++i) { indices[i] = instance->best_indices[i]; probabilities[i] = instance->best_probabilities[i]; }
     return 1;
 }
+
+/* Diagnostic timing uses the same backbone and CTC kernels as instance_run,
+ * but keeps preprocessing and the fused CTC tail in separate clock spans. */
+static int profile_backend_stages(lw_x64_rec_instance* instance, int nchw,
+                                  const uint8_t* source, uint64_t source_bytes,
+                                  uint32_t width, uint32_t height,
+                                  double* preprocess_ms, double* backbone_ms,
+                                  double* ctc_ms) {
+    uint64_t input_count = 0u;
+    float* input = lw_x64_rec_instance_input(instance, &input_count);
+    const lw_x64_rec_program* program = instance->program;
+    uint64_t start = clock_ns();
+    uint64_t next;
+    lw_error error;
+    if (input == NULL ||
+        (nchw ? lw_rec_preprocess_bgr_u8(source, source_bytes, width, height,
+                                         width * 3u, width, input, input_count, NULL)
+              : lw_rec_preprocess_bgr_u8_nhwc(source, source_bytes, width, height,
+                                              width * 3u, width, input, input_count,
+                                              NULL)) != LW_STATUS_OK) return 0;
+    next = clock_ns();
+    *preprocess_ms = (double)(next - start) / 1000000.0;
+    start = next;
+    lw_error_init(&error);
+    if (lw_x64_rec_instance_run_backbone(instance, &error) != LW_STATUS_OK) return 0;
+    next = clock_ns();
+    *backbone_ms = (double)(next - start) / 1000000.0;
+    start = next;
+    if (program->ctc.enabled != 0u) {
+        const float* activation = (const float*)(const void*)
+            (instance->arena + program->values[program->ctc.activation_value].offset);
+        if (lw_x64_rec_ctc_execute(program, instance, activation, &error) != LW_STATUS_OK)
+            return 0;
+    }
+    *ctc_ms = (double)(clock_ns() - start) / 1000000.0;
+    return 1;
+}
 int main(int argc, char** argv) {
-    const uint32_t width = 960u, height = 48u, warmups = 2u;
+    uint32_t width = 960u;
+    const uint32_t height = 48u, warmups = 2u;
     uint32_t repeats = 10u;
-    const uint64_t source_bytes = (uint64_t)width * height * 3u;
-    const uint64_t input_count = (uint64_t)3u * height * width;
+    uint64_t source_bytes;
+    uint64_t input_count;
     lw_model* model = NULL;
     lw_x64_rec_program* nhwc_program = NULL, *nchw_program = NULL;
     lw_x64_rec_instance* nhwc = NULL, *nchw = NULL;
@@ -95,8 +134,14 @@ int main(int argc, char** argv) {
     float* canonical_probabilities = NULL, *nhwc_probabilities = NULL, *backend_probabilities = NULL;
     double* canonical_ms = NULL, *nhwc_ms = NULL, *nchw_ms = NULL;
     int code = 1;
-    if (argc < 2 || argc > 3) { fprintf(stderr, "usage: x64-rec-layout-benchmark-driver rec.lwm [repeats]\n"); return 2; }
-    if (argc == 3) { repeats = (uint32_t)strtoul(argv[2], NULL, 10); if (repeats == 0u || repeats > 100u) return 2; }
+    if (argc < 2 || argc > 4) { fprintf(stderr, "usage: x64-rec-layout-benchmark-driver rec.lwm [repeats] [width]\n"); return 2; }
+    if (argc >= 3) { repeats = (uint32_t)strtoul(argv[2], NULL, 10); if (repeats == 0u || repeats > 100u) return 2; }
+    if (argc == 4) {
+        width = (uint32_t)strtoul(argv[3], NULL, 10);
+        if (width != 192u && width != 320u && width != 480u && width != 640u && width != 960u) return 2;
+    }
+    source_bytes = (uint64_t)width * height * 3u;
+    input_count = (uint64_t)3u * height * width;
     lw_error_init(&error);
     if (lw_model_load(argv[1], NULL, &model, &error) != LW_STATUS_OK) { fprintf(stderr, "model load failed: %s\n", error.message); goto cleanup; }
     if (lw_x64_rec_backend_compile_ex(model, width, LW_X64_REC_COMPILE_NHWC, &nhwc_program, &error) != LW_X64_REC_COMPILE_OK ||
@@ -161,9 +206,15 @@ int main(int argc, char** argv) {
         double canonical_median = median(canonical_ms, repeats);
         double nhwc_median = median(nhwc_ms, repeats);
         double nchw_median = median(nchw_ms, repeats);
-        printf("{\"schema_version\":1,\"order_rotated\":true,\"width\":%u,\"height\":%u,\"repeats\":%u,\"canonical_ms\":%.3f,\"nhwc_ms\":%.3f,\"nchw_ms\":%.3f,\"nhwc_speedup\":%.6f,\"nchw_speedup\":%.6f,\"nhwc_arena_bytes\":%llu,\"nchw_arena_bytes\":%llu}\n",
+        int winner_nchw = nchw_median < nhwc_median;
+        double preprocess_ms, backbone_ms, ctc_ms;
+        if (!profile_backend_stages(winner_nchw ? nchw : nhwc, winner_nchw,
+                                    source, source_bytes, width, height,
+                                    &preprocess_ms, &backbone_ms, &ctc_ms)) goto cleanup;
+        printf("{\"schema_version\":1,\"order_rotated\":true,\"width\":%u,\"height\":%u,\"repeats\":%u,\"canonical_ms\":%.3f,\"nhwc_ms\":%.3f,\"nchw_ms\":%.3f,\"nhwc_speedup\":%.6f,\"nchw_speedup\":%.6f,\"winner\":\"%s\",\"preprocess_ms\":%.3f,\"backbone_ms\":%.3f,\"ctc_ms\":%.3f,\"indices_match\":true,\"probability_abs_tolerance\":1e-5,\"nhwc_arena_bytes\":%llu,\"nchw_arena_bytes\":%llu}\n",
                width, height, repeats, canonical_median, nhwc_median, nchw_median,
                canonical_median / nhwc_median, canonical_median / nchw_median,
+               winner_nchw ? "nchw" : "nhwc", preprocess_ms, backbone_ms, ctc_ms,
                (unsigned long long)nhwc_program->arena_bytes, (unsigned long long)nchw_program->arena_bytes);
         /* The lifetime planner must reuse arena space aggressively; the
          * monotonic baseline was 99,806,656 bytes and the planned Tiny REC960

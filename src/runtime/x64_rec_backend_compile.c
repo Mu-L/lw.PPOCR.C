@@ -645,4 +645,28 @@ lw_x64_rec_compile_result lw_x64_rec_backend_compile(
                                          out_program, error);
 }
 
-void lw_x64_rec_program_free(lw_x64_rec_program* program){uint32_t i;if(program==NULL)return;lw_x64_rec_ctc_free(&program->ctc);for(i=0u;i<program->packed_constant_count;++i)free(program->constants[i].data);free(program->constants);free(program->ops);free(program->values);free(program);}
+void lw_x64_rec_program_retain(lw_x64_rec_program* program) {
+    uint32_t current;
+    if (program == NULL) return;
+    current = lw_atomic_u32_load_acquire(&program->shared_refs);
+    while (current != UINT32_MAX &&
+           !lw_atomic_u32_compare_exchange_acq_rel(&program->shared_refs, &current,
+                                                    current + 1u)) {}
+}
+
+void lw_x64_rec_program_free(lw_x64_rec_program* program) {
+    uint32_t current;
+    uint32_t i;
+    if (program == NULL) return;
+    current = lw_atomic_u32_load_acquire(&program->shared_refs);
+    while (current != 0u) {
+        if (lw_atomic_u32_compare_exchange_acq_rel(&program->shared_refs, &current,
+                                                   current - 1u)) return;
+    }
+    lw_x64_rec_ctc_free(&program->ctc);
+    for (i = 0u; i < program->packed_constant_count; ++i) free(program->constants[i].data);
+    free(program->constants);
+    free(program->ops);
+    free(program->values);
+    free(program);
+}

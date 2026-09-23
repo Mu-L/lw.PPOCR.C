@@ -23,7 +23,7 @@ option(LW_EXPERIMENTAL_AVX2_FMA_CONV1X1_DISPATCH
 option(LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH
     "Use the experimental AVX2+FMA terminal MatMul dispatch in native builds" OFF)
 option(LW_EXPERIMENTAL_AVX2_FAST_PATH
-    "Enable the compiled AVX2/FMA x64 REC backend (NCHW strategy, width 960)" ON)
+    "Enable compiled AVX2/FMA x64 REC backends for adaptive widths" ON)
 option(LW_EXPERIMENTAL_DET_FIXED_POINT_RESIZE
     "Use the OpenCV-parity fixed-point DET resize with LUT normalization" ON)
 option(LW_EXPERIMENTAL_CLS_FIXED_POINT_RESIZE
@@ -2047,6 +2047,9 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
     if(LW_REC_RESIDENT_WIDTHS AND NOT EMSCRIPTEN)
         list(APPEND full_ocr_profile_test_args --expect-resident)
     endif()
+    if(LW_X64_REC_FAST_ENABLED)
+        list(APPEND full_ocr_profile_test_args --expect-compiled-rec)
+    endif()
     if(LW_EXPERIMENTAL_PREPARED_EXECUTION AND NOT EMSCRIPTEN)
         list(APPEND full_ocr_profile_test_args --expect-prepared)
     endif()
@@ -2326,6 +2329,13 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
         add_test(NAME x64_rec_layout_benchmark
             COMMAND x64-rec-layout-benchmark-driver ${LW_PPOCR_C_REC_LWM} 5)
         set_tests_properties(x64_rec_layout_benchmark PROPERTIES TIMEOUT 120)
+        foreach(rec_width IN ITEMS 192 320 480 640)
+            add_test(NAME x64_rec_layout_benchmark_${rec_width}
+                COMMAND x64-rec-layout-benchmark-driver ${LW_PPOCR_C_REC_LWM}
+                        5 ${rec_width})
+            set_tests_properties(x64_rec_layout_benchmark_${rec_width}
+                PROPERTIES TIMEOUT 120)
+        endforeach()
         add_executable(x64-det-backend-contract-driver
             tests/x64_det_backend_contract_driver.c)
         target_link_libraries(x64-det-backend-contract-driver PRIVATE lw_ppocr_c)
@@ -2421,6 +2431,14 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
         add_test(NAME x64_rec_recognizer_benchmark
             COMMAND x64-rec-recognizer-benchmark-driver ${LW_PPOCR_C_REC_LWM}
                 ${CMAKE_CURRENT_SOURCE_DIR}/models/ppocrv6-tiny/ppocr_keys.txt 5)
+        foreach(rec_width IN ITEMS 192 320 480 640)
+            add_test(NAME x64_rec_recognizer_benchmark_${rec_width}
+                COMMAND x64-rec-recognizer-benchmark-driver ${LW_PPOCR_C_REC_LWM}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/models/ppocrv6-tiny/ppocr_keys.txt
+                    5 ${rec_width})
+            set_tests_properties(x64_rec_recognizer_benchmark_${rec_width}
+                PROPERTIES TIMEOUT 120)
+        endforeach()
         set_tests_properties(x64_rec_recognizer_benchmark PROPERTIES TIMEOUT 120)
         add_executable(x64-rec-pointwise-layout-driver
             tests/x64_rec_pointwise_layout_driver.c)

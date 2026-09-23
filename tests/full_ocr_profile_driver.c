@@ -447,6 +447,9 @@ int main(int argc, char** argv) {
            (unsigned long long)profile.recognizer.session_cache_hits,
            (unsigned long long)profile.recognizer.session_cache_misses,
            (unsigned long long)profile.recognizer.session_reconfigurations);
+    printf("\"rec_backend_coverage\":{\"compiled_lines\":%llu,\"canonical_lines\":%llu},",
+           (unsigned long long)profile.recognizer.compiled_backend_lines,
+           (unsigned long long)profile.recognizer.canonical_fallback_lines);
     printf("\"implementation_paths\":{\"detector\":");
     print_execution_path_counters(&profile.detector.execution);
     printf(",\"classifier\":");

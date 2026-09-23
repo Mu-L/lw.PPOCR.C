@@ -196,3 +196,43 @@ builds keep the canonical path; the recognizer falls back to canonical for
 widths other than 960, for graphs the NCHW strategy cannot lower (NHWC
 wrapper), and on runtime failure. The full build (193 targets) and the
 eleven REC-related CTest entries pass with the new default.
+
+## v17: adaptive-width compiled REC and shared worker programs
+
+The x64 AVX2/FMA recognizer now prepares compiled REC slots for
+`192/320/480/640/960` (up to the configured maximum width). The selected
+backend is consulted before switching the canonical session, so supported
+adaptive-width lines use their own compiled instance and time-step count
+without a canonical session reconfiguration. A failed compile or instance
+allocation for one slot preserves canonical execution for that width. Runtime
+backend errors are still returned rather than silently retried.
+
+Each width owns one immutable Program; OCR worker clones retain those Programs
+and create private Instances (arena, scratch and CTC state). When all five
+slots are available, `LW_REC_RESIDENT_WIDTHS` no longer allocates five
+redundant canonical sessions. Non-AVX2/FMA hosts skip backend compilation.
+
+On the local Windows x64 Release build, ten rotated-order measurements with
+deterministic REC input gave these median end-to-end times in milliseconds.
+The compiled and canonical CTC indices matched exactly and emitted
+probabilities met the existing `1e-5` A/B tolerance at every width.
+
+| width | canonical | NHWC | NCHW |
+| ---: | ---: | ---: | ---: |
+| 192 | 3.786 | 3.141 | 3.230 |
+| 320 | 6.318 | 5.801 | 5.868 |
+| 480 | 9.763 | 7.694 | 8.119 |
+| 640 | 13.075 | 10.212 | 10.802 |
+| 960 | 19.091 | 15.226 | 16.382 |
+
+NHWC won these local runs, so the recognizer currently compiles NHWC for each
+slot. This is not a universal CPU claim; a fixed-runner A/B is still required
+before treating the layout choice as final. The five-width layout and public
+Recognizer UTF-8 equality tests are registered with CTest.
+
+The bundled Tiny 500x500/16-line Full OCR profile now reports 16 compiled
+lines, zero canonical fallback lines and zero session reconfigurations with
+both one and four workers. Seven local one-shot profile samples gave a
+four-worker median of 87.495 ms (83.212–93.954 ms). This is not a paired
+comparison against the previous release, so no release-level speedup is
+claimed from it.

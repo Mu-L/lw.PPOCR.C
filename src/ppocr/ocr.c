@@ -628,7 +628,7 @@ static void process_worker_task(lw_ocr_worker_task* task) {
             lw_profile_add_value(&task->rec_resized_width_sum, recognition.resized_width);
             lw_profile_add_value(
                 &task->rec_target_width_sum,
-                lw_recognizer_current_target_width(ocr->recognizers[task->worker_index]));
+                crop->target_width);
             lw_profile_add_value(&task->rec_width_histogram[bucket], 1u);
         }
 
