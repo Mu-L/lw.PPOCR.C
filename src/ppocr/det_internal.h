@@ -90,4 +90,12 @@ void lw_db_postprocess_workspace_free(lw_db_postprocess_workspace* workspace);
 void lw_detector_set_intra_op_thread_count(lw_detector* detector, uint32_t thread_count);
 uint32_t lw_detector_get_intra_op_thread_count(const lw_detector* detector);
 
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+/* Test-only internal hooks: opt the detector into the compiled x64 DET
+ * backend (the production default stays canonical until the promotion gate
+ * flips it). */
+void lw_detector_test_enable_x64_backend(lw_detector* detector);
+void lw_detector_test_disable_x64_backend(lw_detector* detector);
+#endif
+
 #endif

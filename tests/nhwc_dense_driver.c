@@ -27,13 +27,23 @@ typedef struct dense_case {
     uint32_t stride_w;
     uint32_t pad_top;
     uint32_t pad_left;
+    uint32_t pad_bottom;
+    uint32_t pad_right;
 } dense_case;
 
 static const dense_case k_cases[] = {
-    {"border-3x3-s1", 37u, 32u, 7u, 13u, 3u, 3u, 1u, 1u, 1u, 1u},
-    {"border-5x5-s2", 64u, 48u, 11u, 17u, 5u, 5u, 2u, 2u, 2u, 2u},
-    {"blocked-3x3-s1", 192u, 64u, 8u, 19u, 3u, 3u, 1u, 1u, 1u, 1u},
-    {"medium-rec-3x3-h6-w240", 96u, 192u, 6u, 240u, 3u, 3u, 1u, 1u, 1u, 1u},
+    {"border-3x3-s1", 37u, 32u, 7u, 13u, 3u, 3u, 1u, 1u, 1u, 1u, 1u, 1u},
+    {"border-5x5-s2", 64u, 48u, 11u, 17u, 5u, 5u, 2u, 2u, 2u, 2u, 2u, 2u},
+    {"blocked-3x3-s1", 192u, 64u, 8u, 19u, 3u, 3u, 1u, 1u, 1u, 1u, 1u, 1u},
+    {"medium-rec-3x3-h6-w240", 96u, 192u, 6u, 240u, 3u, 3u, 1u, 1u, 1u, 1u, 1u, 1u},
+    /* DET graph shapes: asymmetric SAME_UPPER 2x2 pads (0,0,1,1) and the
+     * stride-2 FPN stem. */
+    {"det-2x2-s1-pads0011", 8u, 16u, 7u, 13u, 2u, 2u, 1u, 1u, 0u, 0u, 1u, 1u},
+    {"det-3x3-s2-pad1", 32u, 16u, 9u, 17u, 3u, 3u, 2u, 2u, 1u, 1u, 1u, 1u},
+    {"det-stem-3x3-s2-ic3", 3u, 16u, 9u, 17u, 3u, 3u, 2u, 2u, 1u, 1u, 1u, 1u},
+    {"det-graph-stem-16x32", 3u, 16u, 16u, 32u, 3u, 3u, 2u, 2u, 1u, 1u, 1u, 1u},
+    {"det-head-3x3-s1-64-16", 64u, 16u, 7u, 13u, 3u, 3u, 1u, 1u, 1u, 1u, 1u, 1u},
+    {"border-3x3-s1-asym", 37u, 32u, 7u, 13u, 3u, 3u, 1u, 1u, 1u, 1u, 0u, 2u},
 };
 
 static void fill_values(float* values, uint64_t count, uint32_t seed) {
@@ -50,16 +60,17 @@ static uint64_t elements(uint32_t batch, uint32_t height, uint32_t width,
 }
 
 static uint32_t output_extent(uint32_t input, uint32_t kernel, uint32_t stride,
-                              uint32_t padding) {
-    return (input + padding * 2u - kernel) / stride + 1u;
+                              uint32_t pad_before, uint32_t pad_after) {
+    return (input + pad_before + pad_after - kernel) / stride + 1u;
 }
 
 static void reference(const float* input, const float* weights, const float* bias,
-                      float* output, const dense_case* test, uint32_t batch) {
+                      float* output, const dense_case* test, uint32_t batch,
+                      int apply_relu) {
     uint32_t output_height = output_extent(test->input_height, test->kernel_h,
-                                           test->stride_h, test->pad_top);
+                                           test->stride_h, test->pad_top, test->pad_bottom);
     uint32_t output_width = output_extent(test->input_width, test->kernel_w,
-                                          test->stride_w, test->pad_left);
+                                          test->stride_w, test->pad_left, test->pad_right);
     for (uint32_t b = 0u; b < batch; ++b) {
         for (uint32_t oy = 0u; oy < output_height; ++oy) {
             int32_t iy0 = (int32_t)(oy * test->stride_h) - (int32_t)test->pad_top;
@@ -84,7 +95,7 @@ static void reference(const float* input, const float* weights, const float* bia
                             }
                         }
                     }
-                    if (sum < 0.0f) sum = 0.0f;
+                    if (apply_relu && sum < 0.0f) sum = 0.0f;
                     output[(((size_t)b * output_height + oy) * output_width + ox) *
                            test->output_channels + oc] = sum;
                 }
@@ -157,9 +168,9 @@ int main(void) {
     for (size_t case_index = 0u; case_index < sizeof(k_cases) / sizeof(k_cases[0]); ++case_index) {
         const dense_case* test = &k_cases[case_index];
         uint32_t output_height = output_extent(test->input_height, test->kernel_h,
-                                               test->stride_h, test->pad_top);
+                                               test->stride_h, test->pad_top, test->pad_bottom);
         uint32_t output_width = output_extent(test->input_width, test->kernel_w,
-                                              test->stride_w, test->pad_left);
+                                              test->stride_w, test->pad_left, test->pad_right);
         uint64_t input_count = elements(batch, test->input_height, test->input_width,
                                         test->input_channels);
         uint64_t output_count = elements(batch, output_height, output_width,
@@ -192,12 +203,12 @@ int main(void) {
             fprintf(stderr, "pack layout failed for %s\n", test->name);
             return 1;
         }
-        reference(input, weights, bias, expected, test, batch);
+        reference(input, weights, bias, expected, test, batch, 1);
         for (size_t kc_index = 0u; kc_index < sizeof(dense_kc_values) / sizeof(dense_kc_values[0]); ++kc_index) {
             lw_nhwc_dense_desc desc = {batch, test->input_channels, test->input_height,
                 test->input_width, test->output_channels, output_height, output_width,
                 test->kernel_h, test->kernel_w, test->stride_h, test->stride_w,
-                test->pad_top, test->pad_left, test->pad_top, test->pad_left, dense_kc_values[kc_index]};
+                test->pad_top, test->pad_left, test->pad_bottom, test->pad_right, dense_kc_values[kc_index]};
             lw_nhwc_epilogue epilogue = {bias, NULL, LW_NHWC_ACT_RELU, 0u, 0.0f, 0.0f};
             uint64_t scratch_bytes = 0u;
             if (!lw_nhwc_dense_scratch_bytes(&desc, &scratch_bytes)) return 1;
@@ -217,11 +228,48 @@ int main(void) {
             free(scratch);
             if (difference > 1.0e-4f) return 1;
         }
+        /* HARDSWISH store-path parity for the full-16-block path. */
         {
             lw_nhwc_dense_desc desc = {batch, test->input_channels, test->input_height,
                 test->input_width, test->output_channels, output_height, output_width,
                 test->kernel_h, test->kernel_w, test->stride_h, test->stride_w,
-                test->pad_top, test->pad_left, test->pad_top, test->pad_left, 512u};
+                test->pad_top, test->pad_left, test->pad_bottom, test->pad_right, 512u};
+            lw_nhwc_epilogue epilogue = {bias, NULL, LW_NHWC_ACT_HARDSWISH, 0u, 0.0f, 0.0f};
+            uint64_t scratch_bytes = 0u;
+            void* scratch;
+            uint64_t i;
+            float hardswish_difference;
+            reference(input, weights, bias, expected, test, batch, 0);
+            for (i = 0u; i < output_count; ++i) {
+                float value = expected[i];
+                float gate = value + 3.0f;
+                if (gate < 0.0f) gate = 0.0f;
+                if (gate > 6.0f) gate = 6.0f;
+                expected[i] = value * gate * (1.0f / 6.0f);
+            }
+            if (!lw_nhwc_dense_scratch_bytes(&desc, &scratch_bytes)) return 1;
+            scratch = malloc((size_t)scratch_bytes);
+            if (scratch == NULL) return 1;
+            memset(actual, 0, (size_t)output_count * sizeof(float));
+            if (lw_avx2_fma_nhwc_dense_f32(input, packed, &epilogue, actual, &desc,
+                                           scratch, scratch_bytes) != LW_STATUS_OK) {
+                fprintf(stderr, "hardswish kernel failed for %s\n", test->name);
+                free(scratch);
+                return 1;
+            }
+            hardswish_difference = max_abs(expected, actual, output_count);
+            printf("{\"case\":\"%s-hardswish\",\"max_abs\":%.9g}\n", test->name,
+                   hardswish_difference);
+            free(scratch);
+            if (hardswish_difference > 1.0e-4f) return 1;
+            /* Restore the ReLU reference for the perf section below. */
+            reference(input, weights, bias, expected, test, batch, 1);
+        }
+        {
+            lw_nhwc_dense_desc desc = {batch, test->input_channels, test->input_height,
+                test->input_width, test->output_channels, output_height, output_width,
+                test->kernel_h, test->kernel_w, test->stride_h, test->stride_w,
+                test->pad_top, test->pad_left, test->pad_bottom, test->pad_right, 512u};
             lw_nhwc_epilogue epilogue = {bias, NULL, LW_NHWC_ACT_RELU, 0u, 0.0f, 0.0f};
             uint64_t scratch_bytes = 0u;
             double scalar_samples[5];
@@ -230,12 +278,12 @@ int main(void) {
             if (!lw_nhwc_dense_scratch_bytes(&desc, &scratch_bytes)) return 1;
             scratch = malloc((size_t)scratch_bytes);
             if (scratch == NULL) return 1;
-            reference(input, weights, bias, expected, test, batch);
+            reference(input, weights, bias, expected, test, batch, 1);
             (void)lw_avx2_fma_nhwc_dense_f32(input, packed, &epilogue, actual, &desc,
                                              scratch, scratch_bytes);
             for (size_t round = 0u; round < 5u; ++round) {
                 double start = monotonic_seconds();
-                reference(input, weights, bias, expected, test, batch);
+                reference(input, weights, bias, expected, test, batch, 1);
                 scalar_samples[round] = (monotonic_seconds() - start) * 1000.0;
                 start = monotonic_seconds();
                 if (lw_avx2_fma_nhwc_dense_f32(input, packed, &epilogue, actual, &desc,

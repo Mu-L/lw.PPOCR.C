@@ -58,6 +58,9 @@ typedef struct lw_nhwc_dense_desc {
     uint32_t pad_bottom;
     uint32_t pad_right;
     uint32_t dense_kc;
+    /* Optional sharded-row range: output rows [offset, offset + output_height)
+     * of the full output. Zero keeps the whole-output serial semantics. */
+    uint32_t output_row_offset;
 } lw_nhwc_dense_desc;
 
 int lw_nhwc_dense_scratch_bytes(const lw_nhwc_dense_desc* desc, uint64_t* scratch_bytes);
@@ -97,6 +100,9 @@ typedef struct lw_nhwc_depthwise_desc {
     uint32_t pad_left;
     uint32_t pad_bottom;
     uint32_t pad_right;
+    /* Optional sharded-row range: output rows [offset, offset + output_height)
+     * of the full output. Zero keeps the whole-output serial semantics. */
+    uint32_t output_row_offset;
 } lw_nhwc_depthwise_desc;
 
 int lw_nhwc_depthwise_packed_weight_count(uint32_t channels,
@@ -179,4 +185,39 @@ void lw_avx2_nhwc_pool_f32(const float* input, float* output,
                            uint32_t stride_h, uint32_t stride_w,
                            uint32_t pad_top, uint32_t pad_left,
                            uint8_t count_include_pad, uint8_t is_max);
+/* Integer-scale nearest resize (planner-guaranteed scales): each output row
+ * is a whole-row copy of the source row at oy / scale_h, each source pixel
+ * repeated scale_w times. Pure data movement, bit-identical to the scalar
+ * nearest path. */
+void lw_avx2_nhwc_resize_nearest_f32(const float* input, float* output,
+                                     uint32_t batch, uint32_t channels,
+                                     uint32_t input_height, uint32_t input_width,
+                                     uint32_t output_height, uint32_t output_width);
+/* 2x2 stride-2 no-pad ConvTranspose as four per-tap 1x1 GEMMs. Weights are
+ * packed [tap][oc/16][ic][16] from the ONNX [ic, oc, 2, 2] layout. The
+ * epilogue supports bias and ReLU only; Sigmoid is deliberately excluded so
+ * callers can defuse it into a separate bit-identical pass. */
+typedef struct lw_nhwc_convtranspose_desc {
+    uint32_t batch;
+    uint32_t input_channels;
+    uint32_t input_height;
+    uint32_t input_width;
+    uint32_t output_channels;
+    uint32_t output_height;
+    uint32_t output_width;
+} lw_nhwc_convtranspose_desc;
+
+int lw_nhwc_convtranspose_packed_weight_count(uint32_t input_channels,
+                                              uint32_t output_channels,
+                                              uint64_t* element_count);
+void lw_pack_nhwc_convtranspose2x2_f32(const float* weights, uint32_t input_channels,
+                                       uint32_t output_channels, float* packed_weights);
+lw_status lw_avx2_fma_nhwc_convtranspose2x2_s2_f32(
+    const float* input, const float* packed_weights, const lw_nhwc_epilogue* epilogue,
+    float* output, const lw_nhwc_convtranspose_desc* desc);
+/* Single-output-channel probability-map variant; unpaced ONNX weights
+ * [ic, 1, 2, 2], ReLU-only epilogue. */
+lw_status lw_avx2_fma_nhwc_convtranspose2x2_s2_c1_f32(
+    const float* input, const float* weights, const lw_nhwc_epilogue* epilogue,
+    float* output, const lw_nhwc_convtranspose_desc* desc);
 #endif

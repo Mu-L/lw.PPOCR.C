@@ -61,7 +61,8 @@ static int dense_geometry(const lw_nhwc_dense_desc* desc, uint64_t* taps,
                       desc->stride_h + 1u;
     expected_width = (desc->input_width + (uint64_t)desc->pad_left + desc->pad_right - desc->kernel_w) /
                      desc->stride_w + 1u;
-    if (expected_height != desc->output_height || expected_width != desc->output_width ||
+    if ((uint64_t)desc->output_height + desc->output_row_offset > expected_height ||
+        expected_width != desc->output_width ||
         *patch_width > UINT32_MAX ||
         !dense_add_u64(desc->output_width, LW_NHWC_PIXEL_TILE - 1u, x_tiles)) {
         return 0;
@@ -405,6 +406,16 @@ static void dense_tile_avx2(const float* const* row_ptrs, uint32_t rows,
         if (epilogue != NULL && epilogue->activation == LW_NHWC_ACT_RELU) {
             lo[row] = _mm256_max_ps(lo[row], zero);
             hi[row] = _mm256_max_ps(hi[row], zero);
+        } else if (epilogue != NULL && epilogue->activation == LW_NHWC_ACT_HARDSWISH) {
+            /* Match dense_apply_activation: gate = clamp(x + 3, 0, 6);
+             * y = x * gate * (1/6). */
+            const __m256 three = _mm256_set1_ps(3.0f);
+            const __m256 six = _mm256_set1_ps(6.0f);
+            const __m256 inverse_six = _mm256_set1_ps(1.0f / 6.0f);
+            __m256 gate_lo = _mm256_min_ps(_mm256_max_ps(_mm256_add_ps(lo[row], three), zero), six);
+            __m256 gate_hi = _mm256_min_ps(_mm256_max_ps(_mm256_add_ps(hi[row], three), zero), six);
+            lo[row] = _mm256_mul_ps(_mm256_mul_ps(lo[row], gate_lo), inverse_six);
+            hi[row] = _mm256_mul_ps(_mm256_mul_ps(hi[row], gate_hi), inverse_six);
         }
         _mm256_storeu_ps(destination, lo[row]);
         _mm256_storeu_ps(destination + 8u, hi[row]);
@@ -444,7 +455,8 @@ lw_status lw_avx2_fma_nhwc_dense_f32(const float* input, const float* packed_wei
         float* output_batch = output + (size_t)batch * desc->output_height *
                               desc->output_width * desc->output_channels;
         for (uint32_t oy = 0u; oy < desc->output_height; ++oy) {
-            int32_t iy0 = (int32_t)((uint64_t)oy * desc->stride_h) - (int32_t)desc->pad_top;
+            int32_t iy0 = (int32_t)((uint64_t)(oy + desc->output_row_offset) *
+                                    desc->stride_h) - (int32_t)desc->pad_top;
             for (uint32_t tile = 0u; tile < (uint32_t)x_tiles64; ++tile) {
                 uint32_t ox = tile * LW_NHWC_PIXEL_TILE;
                 uint32_t rows = desc->output_width - ox;
@@ -537,7 +549,8 @@ lw_status lw_avx2_fma_nhwc_dense_prepared_f32(const float* input,
         float* output_batch = output + (size_t)batch * desc->output_height *
                               desc->output_width * desc->output_channels;
         for (uint32_t oy = 0u; oy < desc->output_height; ++oy) {
-            int32_t iy0 = (int32_t)((uint64_t)oy * desc->stride_h) - (int32_t)desc->pad_top;
+            int32_t iy0 = (int32_t)((uint64_t)(oy + desc->output_row_offset) *
+                                    desc->stride_h) - (int32_t)desc->pad_top;
             for (uint32_t tile = 0u; tile < (uint32_t)x_tiles64; ++tile) {
                 uint32_t ox = tile * LW_NHWC_PIXEL_TILE;
                 uint32_t rows = desc->output_width - ox;

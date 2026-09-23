@@ -321,6 +321,8 @@ if(LW_EXPERIMENTAL_AVX2_FAST_PATH AND NOT EMSCRIPTEN AND
         src/runtime/x64_rec_backend_compile.c
         src/runtime/x64_rec_backend_execute.c
         src/runtime/x64_rec_backend_arena.c
+        src/runtime/x64_det_backend_compile.c
+        src/runtime/x64_det_backend_execute.c
         src/runtime/ctc_projection_internal.c
         src/runtime/layout_convert_x64.c
         src/kernels/nhwc_pack.c
@@ -328,7 +330,8 @@ if(LW_EXPERIMENTAL_AVX2_FAST_PATH AND NOT EMSCRIPTEN AND
         src/simd/avx2_nhwc_pointwise.c
         src/simd/avx2_nhwc_depthwise.c
         src/simd/avx2_nhwc_support.c
-        src/simd/avx2_nhwc_dense.c)
+        src/simd/avx2_nhwc_dense.c
+        src/simd/avx2_nhwc_convtranspose.c)
 endif()
 if(MSVC AND MSVC_C_ARCHITECTURE_ID MATCHES "^(x64|X86)$")
     set_property(SOURCE src/simd/avx2_binary.c src/simd/avx2_conv1x1.c
@@ -420,7 +423,7 @@ lw_configure_runtime_target(lw_ppocr_c)
 if(LW_X64_REC_FAST_ENABLED)
     target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
     if(MSVC)
-        set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c src/simd/avx2_nhwc_depthwise.c src/simd/avx2_nhwc_support.c APPEND PROPERTY
+        set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c src/simd/avx2_nhwc_depthwise.c src/simd/avx2_nhwc_support.c src/simd/avx2_nhwc_convtranspose.c APPEND PROPERTY
             COMPILE_OPTIONS /arch:AVX2 /fp:strict)
     endif()
 endif()
@@ -482,7 +485,7 @@ lw_configure_runtime_target(lw_ppocr_c_shared)
 if(LW_X64_REC_FAST_ENABLED)
     target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
     if(MSVC)
-        set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c src/simd/avx2_nhwc_depthwise.c src/simd/avx2_nhwc_support.c APPEND PROPERTY
+        set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c src/simd/avx2_nhwc_depthwise.c src/simd/avx2_nhwc_support.c src/simd/avx2_nhwc_convtranspose.c APPEND PROPERTY
             COMPILE_OPTIONS /arch:AVX2 /fp:strict)
     endif()
 endif()
@@ -1398,16 +1401,18 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
     target_include_directories(layout-plan-driver PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime")
     target_compile_features(layout-plan-driver PRIVATE c_std_11)
-    add_dependencies(layout-plan-driver convert_rec_model)
+    add_dependencies(layout-plan-driver convert_rec_model convert_det_model)
     if(MSVC)
         target_compile_options(layout-plan-driver PRIVATE /W4 /WX /utf-8)
     else()
         target_compile_options(layout-plan-driver PRIVATE -Wall -Wextra -Wpedantic -Werror)
     endif()
     add_test(NAME layout_plan_analysis
-        COMMAND layout-plan-driver "${LW_PPOCR_C_REC_LWM}" 960)
+        COMMAND layout-plan-driver "${LW_PPOCR_C_REC_LWM}" 48 960)
     add_test(NAME layout_plan_direct_input
-        COMMAND layout-plan-driver "${LW_PPOCR_C_REC_LWM}" 960 direct-nhwc)
+        COMMAND layout-plan-driver "${LW_PPOCR_C_REC_LWM}" 48 960 direct-nhwc)
+    add_test(NAME layout_plan_det
+        COMMAND layout-plan-driver "${LW_PPOCR_C_DET_LWM}" 640 640 direct-nhwc)
 
     add_executable(workspace-report-driver tests/workspace_report_driver.c)
     target_link_libraries(workspace-report-driver PRIVATE lw_ppocr_c)
@@ -2210,6 +2215,25 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_nhwc_dense_benchmark.py"
                     --driver "$<TARGET_FILE:nhwc-dense-benchmark-driver>")
         set_tests_properties(nhwc_dense_benchmark PROPERTIES TIMEOUT 120)
+        add_executable(nhwc-convtranspose-driver
+            tests/nhwc_convtranspose_driver.c)
+        target_link_libraries(nhwc-convtranspose-driver PRIVATE lw_ppocr_c)
+        target_include_directories(nhwc-convtranspose-driver PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/simd")
+        target_compile_features(nhwc-convtranspose-driver PRIVATE c_std_11)
+        target_compile_definitions(nhwc-convtranspose-driver PRIVATE
+            LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+        if(MSVC)
+            target_compile_definitions(nhwc-convtranspose-driver PRIVATE
+                _CRT_SECURE_NO_WARNINGS)
+            target_compile_options(nhwc-convtranspose-driver PRIVATE /W4 /WX /utf-8)
+        else()
+            target_compile_options(nhwc-convtranspose-driver PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+        endif()
+        add_test(NAME nhwc_convtranspose_contract COMMAND nhwc-convtranspose-driver)
+        set_tests_properties(nhwc_convtranspose_contract PROPERTIES TIMEOUT 120)
         add_executable(x64-rec-backend-contract-driver
             tests/x64_rec_backend_contract_driver.c)
         target_link_libraries(x64-rec-backend-contract-driver PRIVATE lw_ppocr_c)
@@ -2301,6 +2325,55 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
         add_test(NAME x64_rec_layout_benchmark
             COMMAND x64-rec-layout-benchmark-driver ${LW_PPOCR_C_REC_LWM} 5)
         set_tests_properties(x64_rec_layout_benchmark PROPERTIES TIMEOUT 120)
+        add_executable(x64-det-backend-contract-driver
+            tests/x64_det_backend_contract_driver.c)
+        target_link_libraries(x64-det-backend-contract-driver PRIVATE lw_ppocr_c)
+        target_include_directories(x64-det-backend-contract-driver PRIVATE
+            src/runtime
+            src/kernels
+            src/simd
+            src/ppocr)
+        target_compile_features(x64-det-backend-contract-driver PRIVATE c_std_11)
+        target_compile_definitions(x64-det-backend-contract-driver PRIVATE
+            LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+        add_dependencies(x64-det-backend-contract-driver convert_det_model)
+        if(MSVC)
+            target_compile_definitions(x64-det-backend-contract-driver PRIVATE
+                _CRT_SECURE_NO_WARNINGS)
+            target_compile_options(x64-det-backend-contract-driver PRIVATE /W4 /WX /utf-8)
+        else()
+            target_compile_options(x64-det-backend-contract-driver PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+        endif()
+        add_test(NAME x64_det_backend_contract
+            COMMAND x64-det-backend-contract-driver ${LW_PPOCR_C_DET_LWM} 32 64)
+        set_tests_properties(x64_det_backend_contract PROPERTIES TIMEOUT 120)
+        add_test(NAME x64_det_backend_contract_sharded
+            COMMAND x64-det-backend-contract-driver ${LW_PPOCR_C_DET_LWM} 640 640)
+        set_tests_properties(x64_det_backend_contract_sharded PROPERTIES TIMEOUT 180)
+        add_executable(x64-det-layout-benchmark-driver
+            tests/x64_det_layout_benchmark_driver.c)
+        target_link_libraries(x64-det-layout-benchmark-driver PRIVATE lw_ppocr_c)
+        target_include_directories(x64-det-layout-benchmark-driver PRIVATE
+            src/runtime
+            src/kernels
+            src/simd
+            src/ppocr)
+        target_compile_features(x64-det-layout-benchmark-driver PRIVATE c_std_11)
+        target_compile_definitions(x64-det-layout-benchmark-driver PRIVATE
+            LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+        add_dependencies(x64-det-layout-benchmark-driver convert_det_model)
+        if(MSVC)
+            target_compile_definitions(x64-det-layout-benchmark-driver PRIVATE
+                _CRT_SECURE_NO_WARNINGS)
+            target_compile_options(x64-det-layout-benchmark-driver PRIVATE /W4 /WX /utf-8)
+        else()
+            target_compile_options(x64-det-layout-benchmark-driver PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+        endif()
+        add_test(NAME x64_det_layout_benchmark
+            COMMAND x64-det-layout-benchmark-driver ${LW_PPOCR_C_DET_LWM} 32 64 1 3)
+        set_tests_properties(x64_det_layout_benchmark PROPERTIES TIMEOUT 120)
         add_executable(x64-rec-backend-benchmark-driver
             tests/x64_rec_backend_benchmark_driver.c)
         target_link_libraries(x64-rec-backend-benchmark-driver PRIVATE lw_ppocr_c)

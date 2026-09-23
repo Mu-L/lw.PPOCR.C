@@ -22,7 +22,8 @@ static void depthwise_block32(const float* input, const float* weights, const fl
                               float* output, const lw_nhwc_depthwise_desc* desc,
                               uint32_t output_y, uint32_t output_x, uint32_t channel_base, uint32_t vector_count) {
     __m256 sums[4];
-    int32_t input_y0 = (int32_t)((uint64_t)output_y * desc->stride_h) - (int32_t)desc->pad_top;
+    int32_t input_y0 = (int32_t)((uint64_t)(output_y + desc->output_row_offset) * desc->stride_h) -
+        (int32_t)desc->pad_top;
     int32_t input_x0 = (int32_t)((uint64_t)output_x * desc->stride_w) - (int32_t)desc->pad_left;
     for (uint32_t lane = 0u; lane < vector_count; ++lane) {
         sums[lane] = bias == NULL ? _mm256_setzero_ps() :
@@ -55,7 +56,8 @@ static void depthwise_block32(const float* input, const float* weights, const fl
 LW_DW_TARGET
 static int depthwise_pair_is_interior(const lw_nhwc_depthwise_desc* desc,
                                       uint32_t output_y, uint32_t output_x) {
-    int32_t input_y0 = (int32_t)((uint64_t)output_y * desc->stride_h) - (int32_t)desc->pad_top;
+    int32_t input_y0 = (int32_t)((uint64_t)(output_y + desc->output_row_offset) * desc->stride_h) -
+        (int32_t)desc->pad_top;
     int32_t input_x0 = (int32_t)((uint64_t)output_x * desc->stride_w) - (int32_t)desc->pad_left;
     return input_y0 >= 0 &&
            input_y0 + (int32_t)desc->kernel_h <= (int32_t)desc->input_height &&
@@ -70,7 +72,8 @@ static void depthwise_block32_x2(const float* input, const float* weights, const
                                   uint32_t output_y, uint32_t output_x, uint32_t channel_base) {
     __m256 sum0[4];
     __m256 sum1[4];
-    int32_t input_y0 = (int32_t)((uint64_t)output_y * desc->stride_h) - (int32_t)desc->pad_top;
+    int32_t input_y0 = (int32_t)((uint64_t)(output_y + desc->output_row_offset) * desc->stride_h) -
+        (int32_t)desc->pad_top;
     int32_t input_x0 = (int32_t)((uint64_t)output_x * desc->stride_w) - (int32_t)desc->pad_left;
     for (uint32_t lane = 0u; lane < 4u; ++lane) {
         __m256 initial = bias == NULL ? _mm256_setzero_ps() :
@@ -115,8 +118,9 @@ static lw_status depthwise_execute(const float* input, const float* packed_weigh
         desc->stride_h == 0u || desc->stride_w == 0u) return LW_STATUS_INVALID_ARGUMENT;
     if ((uint64_t)desc->input_height + desc->pad_top + desc->pad_bottom < desc->kernel_h ||
         (uint64_t)desc->input_width + desc->pad_left + desc->pad_right < desc->kernel_w ||
-        ((uint64_t)desc->input_height + desc->pad_top + desc->pad_bottom - desc->kernel_h) /
-            desc->stride_h + 1u != desc->output_height ||
+        (uint64_t)desc->output_height + desc->output_row_offset >
+            (desc->input_height + (uint64_t)desc->pad_top + desc->pad_bottom - desc->kernel_h) /
+                desc->stride_h + 1u ||
         ((uint64_t)desc->input_width + desc->pad_left + desc->pad_right - desc->kernel_w) /
             desc->stride_w + 1u != desc->output_width) return LW_STATUS_INVALID_SHAPE;
 #if LW_DW_X86

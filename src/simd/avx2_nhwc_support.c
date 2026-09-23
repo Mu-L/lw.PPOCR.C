@@ -3,6 +3,7 @@
 #include <float.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
 #include <immintrin.h>
@@ -191,6 +192,76 @@ void lw_avx2_nhwc_pool_f32(const float* input, float* output,
                         channels + channel)] = value;
                 }
             }
+        }
+    }
+}
+
+#if LW_NHWC_SUPPORT_X86
+LW_NHWC_SUPPORT_TARGET
+static void resize_copy_row(const float* source, float* destination, uint32_t input_width,
+                            uint32_t channels, uint32_t scale_w) {
+    uint32_t input_x;
+    for (input_x = 0u; input_x < input_width; ++input_x) {
+        const float* pixel = source + (size_t)input_x * channels;
+        float* output_pixel = destination + (size_t)input_x * scale_w * channels;
+        uint32_t repeat;
+        for (repeat = 0u; repeat < scale_w; ++repeat) {
+            uint32_t channel = 0u;
+            while (channel + 8u <= channels) {
+                _mm256_storeu_ps(output_pixel + channel,
+                                 _mm256_loadu_ps(pixel + channel));
+                channel += 8u;
+            }
+            while (channel < channels) {
+                output_pixel[channel] = pixel[channel];
+                ++channel;
+            }
+            output_pixel += channels;
+        }
+    }
+}
+#endif
+
+void lw_avx2_nhwc_resize_nearest_f32(const float* input, float* output,
+                                     uint32_t batch, uint32_t channels,
+                                     uint32_t input_height, uint32_t input_width,
+                                     uint32_t output_height, uint32_t output_width) {
+    uint32_t scale_h;
+    uint32_t scale_w;
+    uint32_t n;
+    uint32_t output_y;
+    if (input == NULL || output == NULL || input == output || batch == 0u ||
+        channels == 0u || input_height == 0u || input_width == 0u ||
+        output_height < input_height || output_width < input_width ||
+        output_height % input_height != 0u || output_width % input_width != 0u) {
+        return;
+    }
+    scale_h = output_height / input_height;
+    scale_w = output_width / input_width;
+    for (n = 0u; n < batch; ++n) {
+        const float* input_batch = input + (size_t)n * input_height * input_width * channels;
+        float* output_batch = output + (size_t)n * output_height * output_width * channels;
+        for (output_y = 0u; output_y < output_height; ++output_y) {
+            uint32_t source_y = output_y / scale_h;
+            const float* source_row =
+                input_batch + (size_t)source_y * input_width * channels;
+            float* output_row =
+                output_batch + (size_t)output_y * output_width * channels;
+#if LW_NHWC_SUPPORT_X86
+            resize_copy_row(source_row, output_row, input_width, channels, scale_w);
+#else
+            {
+                uint32_t input_x;
+                for (input_x = 0u; input_x < input_width; ++input_x) {
+                    uint32_t repeat;
+                    for (repeat = 0u; repeat < scale_w; ++repeat) {
+                        memcpy(output_row + ((size_t)input_x * scale_w + repeat) * channels,
+                               source_row + (size_t)input_x * channels,
+                               (size_t)channels * sizeof(float));
+                    }
+                }
+            }
+#endif
         }
     }
 }

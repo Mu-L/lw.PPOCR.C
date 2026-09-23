@@ -23,20 +23,28 @@ def main() -> int:
     if len(records) == 1 and records[0].get("status") == "skipped":
         assert records[0]["reason"] == "requires_avx2_fma"
         return 0
-    correctness = [record for record in records if "max_abs" in record]
+    correctness = [record for record in records
+                   if "max_abs" in record and "-hardswish" not in record["case"]]
+    hardswish = [record for record in records
+                 if "max_abs" in record and "-hardswish" in record["case"]]
     performance = [record for record in records if "perf_case" in record]
-    assert len(correctness) == 20, records
-    assert len(performance) == 4, records
-    assert {record["case"] for record in correctness} == {
-        "border-3x3-s1", "border-5x5-s2", "blocked-3x3-s1", "medium-rec-3x3-h6-w240",
+    cases = {
+        "border-3x3-s1", "border-5x5-s2", "blocked-3x3-s1",
+        "medium-rec-3x3-h6-w240", "det-2x2-s1-pads0011", "det-3x3-s2-pad1",
+        "det-stem-3x3-s2-ic3", "det-graph-stem-16x32", "det-head-3x3-s1-64-16",
+        "border-3x3-s1-asym",
     }
-    assert {record["perf_case"] for record in performance} == {
-        "border-3x3-s1", "border-5x5-s2", "blocked-3x3-s1", "medium-rec-3x3-h6-w240",
-    }
+    assert len(correctness) == 5 * len(cases), records
+    assert len(hardswish) == len(cases), records
+    assert len(performance) == len(cases), records
+    assert {record["case"] for record in correctness} == cases
+    assert {record["case"].removesuffix("-hardswish") for record in hardswish} == cases
+    assert {record["perf_case"] for record in performance} == cases
     assert {record["kc"] for record in correctness} == {0, 128, 256, 512, 1024}
-    for record in correctness:
+    for record in correctness + hardswish:
         assert record["max_abs"] <= 1.0e-4, record
-        assert record["scratch_bytes"] > 0, record
+        if "kc" in record:
+            assert record["scratch_bytes"] > 0, record
     for record in performance:
         assert record["scalar_ms"] > 0.0, record
         assert record["dense_ms"] > 0.0, record

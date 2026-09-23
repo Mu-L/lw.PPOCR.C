@@ -3,6 +3,7 @@
 #endif
 
 #include "cpu_topology.h"
+#include "parallel_internal.h"
 
 /* CPU discovery is deliberately dependency-free and best effort. Failure to
  * inspect topology must reduce parallelism conservatively, never prevent OCR. */

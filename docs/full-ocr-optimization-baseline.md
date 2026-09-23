@@ -119,3 +119,152 @@ scalar NaN behavior). Golden corpus stays bit-identical.
 
 Note: local benchmark runs fluctuate ~10% with machine load; the numbers in
 this file are informational reference points, not release gates.
+
+## Phase 2 (NHWC DET graph) progress
+
+Phase 0 (layout coverage probe, 2026-09-22): `layout-plan-driver` now takes
+`[height] [width] [direct-nhwc]` (backward-compatible `[width] [direct-nhwc]`
+form kept), prints conv params (`conv nodes:` section, raw weight dims —
+Conv=[OC,IC/g,kh,kw], ConvTranspose=[IC,OC,kh,kw]) and full tensor shapes
+(`tensor shapes:` section). New ctest `layout_plan_det` probes det.lwm at
+640x640 direct-nhwc.
+
+Probe results (tiny det, direct-nhwc, identical at 32x64 — structure is
+shape-independent): 205/242 nodes NHWC, 37 NCHW, planner conversions=2
+(tensor 167 [1,16,320,320] at node 002 and tensor 169 [1,8,320,320] at node
+004, both at the FPN head), 28 islands. The 8 non-aligned dense convs
+(OC=4x4, 8x2, 12x1, 40x1) are 1 real conv (002, w=[8,16,2,2] at the FPN
+head) plus 7 SE-gate squeezes operating on neutral [1,C,1,1] tensors —
+layout-irrelevant and conversion-free. The probability-map tail
+([1,1,640,640] is neutral) and SE gates cost nothing to keep NCHW.
+
+v1 backend (island-exit nodes forced NCHW) would pay ~16 conversions /
+~75 MB of copies (~4-5 ms): 007 Concat ~26 MB, 6 Resizes ~16 MB, 233
+Concat ~8 MB, 236/239 ConvTranspose ~14.5 MB, planner's own ~9.8 MB. This
+exceeds the 12-conversion / 2 ms thresholds, so the Phase-2 NHWC kernels are
+mandatory; the probe ranks Concat as the single biggest island-exit item
+(~34 MB across the two concats), so the kernel order is Resize ->
+ConvTranspose -> Concat.
+
+Phase 1 (x64_det_backend skeleton + A/B harness, 2026-09-22): new
+`src/runtime/x64_det_backend_internal.h/_compile.c/_execute.c` (REC-backend
+clone: two-pass lowering, greedy-by-size arena interval planner with
+alternate-layout slots, per-op layout fields). New design piece: the
+effective-layout walk crosses the planner's NHWC classification with the v1
+lowerability set (Resize/ConvTranspose/Concat/Sigmoid stay NCHW), and tensors
+crossing an effective-layout boundary get a lazily materialized
+LAYOUT_CONVERT physical op writing a dedicated alternate arena slot. Both
+compile strategies (NCHW / NHWC) lower det.lwm 100%: the NCHW arm covers the
+det conv zoo (1x1 packed, 3x3s2/3x3s1/2x2-pad-end1 AVX2, depthwise 3x3/3x3s2x1/
+5x5, scalar fallback) plus scalar ConvTranspose/Resize/Sigmoid/Concat; the
+NHWC arm reuses the REC pointwise/dense/depthwise kernels. The detector gains
+opt-in hooks (`lw_detector_test_enable_x64_backend`/`_disable_`, production
+default stays canonical until the promotion gate) and a profiled backend
+execution path that maps physical-op time onto the semantic profile.
+
+New tests: `x64_det_backend_contract` (prob map vs canonical within
+1e-3/1e-5 at 32x64 and 640x640, bit-determinism, arena-overlap checker,
+per-tensor NCHW/NHWC parity replay with in-situ convert verification, profile
+telemetry assertions, detector-level box smoke), `x64_det_layout_benchmark`
+(rotated-order median A/B with per-round correctness), and 6 new dense-kernel
+cases incl. asymmetric SAME_UPPER 2x2 pads (0,0,1,1), the ic=3 stride-2 stem,
+and the 64->16 head.
+
+Debugging note (fixed): the cloned REC `compile_conv` read the graph input's
+primary slot directly, bypassing `det_slot_offset`, so the NHWC stem consumed
+the NCHW input as NHWC. Localized by the snapshot-based per-tensor parity
+replay (the first divergence was tensor 166, the stem output, at 13.9 vs the
+FMA-noise scale of 1e-4) after end-of-run reads proved meaningless because
+arena slots are legally reused. Fixed by resolving conv inputs through
+`det_slot_offset`.
+
+A/B (640x640, rotated order, median of 8): canonical 1w 110.65 ms, NCHW arm
+107.59 ms (1.03x), NHWC arm 87.27 ms (1.27x) — the NHWC arm already wins
+single-threaded (REC's NHWC arm was a 0.50x negative control). Canonical at 8
+threads is 55.93 ms; the single-threaded NHWC arm is 0.62x of it, so Phase 3
+threading is the decisive step. NHWC prob map matches canonical within
+2.7e-8 at 640x640; NHWC arena 37.7 MB / NCHW 31.1 MB. Full suite 78/78.
+
+Phase 2 (NHWC op coverage, 2026-09-23): three new kernels, all bit-exact
+against the scalar references (max_abs 0, kernel-level driver
+`nhwc_convtranspose_contract`): `lw_avx2_nhwc_resize_nearest_f32` (integer
+scales, whole-row copies in avx2_nhwc_support.c), the 16-OC
+`lw_avx2_fma_nhwc_convtranspose2x2_s2_f32` (four per-tap 1x1 GEMMs, weights
+packed [tap][oc/16][ic][16] from ONNX [ic,oc,2,2] via the new
+`lw_pack_nhwc_convtranspose2x2_f32` in avx2_nhwc_convtranspose.c), and the
+1-OC probability-map `lw_avx2_fma_nhwc_convtranspose2x2_s2_c1_f32`
+(strided-weight gather, ReLU-only epilogue, Sigmoid defused). Also fixed the
+dense HARDSWISH store-path gap (avx2_nhwc_dense.c: the vectorized full-block
+store silently dropped HARDSWISH; now min(max(x+3,0),6)*x/6, with 10 new
+per-case hardswish parity checks in the dense driver) and the NHWC Concat
+(channel-axis per-pixel copies inline in the execute switch).
+
+Backend wiring: Resize/ConvTranspose/Concat joined the NHWC arm (Sigmoid
+stays defused NCHW-scalar — canonical parity, and neutral tensors make it
+conversion-free). NHWC conversions dropped 20 -> 3 (graph input + the FPN
+head pair), NHWC-effective nodes 195 -> 205 (the 37 NCHW nodes are the 8
+non-aligned convs, the neutral SE gates, and the Sigmoid tail), NHWC arena
+37.7 -> 31.1 MB (equal to the NCHW arm). A/B (640x640, 1w, median of 8):
+canonical 102.28 ms, NCHW arm 106.06 ms, NHWC arm 59.22 ms (1.73x) — the
+single-threaded NHWC arm is now within 3% of the 8-thread canonical
+(57.59 ms). Phase 3 threading is the remaining decisive step. Full suite
+79/79.
+Phase 3 (threading, 2026-09-23): generic shard wrapper in
+x64_det_backend_execute.c with the reference thresholds (dense/pointwise 2M
+MACs, depthwise and the 1-OC prob map 1M — depthwise MACs counted without
+the channel factor), workers capped at 16, whole-tile/whole-row contiguous
+ranges only (bit-identical sharded output). Partitioning per kernel:
+pointwise flat pixel ranges (or OC blocks for small spatial), dense and
+depthwise output-row ranges, ConvTranspose input-row ranges. Dense and
+depthwise kernels gained an optional `output_row_offset` desc field
+(validation became a range check: offset + height <= full height; the
+serial semantics are untouched at offset 0). Per-worker dense scratch
+slices come from a per-instance shard-scratch arena
+(program scratch x 16 workers, ~90 KB at 640x640). The detector hookup now
+passes its session pool and intra-op count via
+`lw_x64_det_instance_run_profiled_ex`; thread histograms record the workers
+actually used per sharded conv / prob map.
+
+Debugging notes: the first sharded validation (`output_height + offset ==
+full height`) accepted only the last row range and pushed every other worker
+into a scalar fallback that itself double-offset its rows; the parity
+replay (now a third sharded pass in the contract driver via the new
+`lw_x64_det_instance_run_op_ex` hook) localized the first divergent op
+(node 12, the 3x3 depthwise) and the standalone depthwise row-shard test
+pinned the validation bug.
+
+A/B (640x640, rotated, median of 8): canonical 1w 107.1 ms vs NHWC 60.0
+(1.79x); 2w 69.3 vs 47.0 (1.48x); 4w 56.4 vs 38.5 (1.46x); 8w 53.6 vs 33.8
+(1.59x); 16w 51.0 vs 31.6 (1.61x). The 8-thread default already clears the
+1.15x promotion gate. Full suite 80/80 (new ctest
+`x64_det_backend_contract_sharded` runs the 640x640 sharded parity,
+histogram smoke, and a threaded detector smoke).
+
+Phase 4 (promotion, 2026-09-23): the sharded NHWC DET backend is now the
+production default (`x64_backend_enabled` on in `lw_detector_create`,
+NHWC-first with NCHW fallback and canonical fallback; the test disable hook
+remains). The promotion gate was cleared at the 8-thread default (1.59x,
+median, rotated). Profile integration: every backend conv records its
+worker count in the thread histograms (serial runs at index 1, matching the
+canonical executor's accounting), and the full-OCR profile test now
+expects `layout.selected_nodes > 0` with `fallback == candidate -
+selected`, and zero prepared/kernel-path counters for the detector when the
+backend is active.
+
+SMT evaluation (negative result, recorded): det at 16 logical threads
+speeds the standalone graph (~7%: 33.8 -> 31.6 ms) but slows the full OCR
+pipeline by ~13% (4w 106.4 -> 92.1 ms with the physical-core cap) because
+16 DET threads plus 4 line workers over-subscribe the physical cores. The
+default therefore stays on physical cores (cap 8, the proven policy); the
+16-thread path remains available via `lw_ocr_set_det_intra_op_thread_count`
+and the backend itself is verified thread-count-independent (16-worker
+sharded parity at 640x640 is bit-exact).
+
+End-to-end (lw-ocr-benchmark, 500x500 sample): 4w OCR mean 92.2 ms
+(baseline 104.8 ms, 1.14x; detector alone 40.8 ms vs baseline 71.3 ms),
+throughput 10.8/s. 1w OCR mean 262.5 ms (baseline 251.8 ms): DET dropped
+from 72.5 to 42.1 ms but the line phase grew ~44 ms — the Phase-3
+threshold alignment (0.2/0.45/1.4) detects more/larger crops than the old
+defaults, and the serial line pipeline absorbs that cost while the 4w case
+parallelizes it away. Output checksum is worker-count-independent
+(46d99468540b5eb7). Full suite 80/80.

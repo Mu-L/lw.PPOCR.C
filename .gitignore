@@ -1,5 +1,6 @@
 /build/
 /build-*/
+/Testing/
 /build-local-data/
 /android/.gradle/
 /android/build/

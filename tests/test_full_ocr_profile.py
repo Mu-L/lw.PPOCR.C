@@ -182,15 +182,25 @@ class FullOcrProfileTest(unittest.TestCase):
 
                 layout = report["layout"]
                 self.assertGreater(layout["candidate_nodes"], 0)
-                self.assertEqual(layout["selected_nodes"], 0)
-                self.assertEqual(layout["fallback_nodes"], layout["candidate_nodes"])
+                # The promoted NHWC DET backend selects its effective NHWC
+                # nodes; the rest stay on the canonical fallback.
+                self.assertGreater(layout["selected_nodes"], 0)
+                self.assertEqual(
+                    layout["fallback_nodes"],
+                    layout["candidate_nodes"] - layout["selected_nodes"],
+                )
                 self.assertGreaterEqual(layout["transform_nanoseconds"], 0)
                 self.assertGreaterEqual(layout["transform_invocations"], 0)
                 self.assertGreaterEqual(layout["transform_bytes"], 0)
+                det_backend_active = layout["selected_nodes"] > 0
 
                 for component_name in ("detector", "classifier", "recognizer"):
                     binding = implementation_paths[component_name]["prepared_binding"]
-                    if ARGUMENTS.expect_prepared:
+                    # The compiled DET backend bypasses the executor's prepared
+                    # bindings entirely, so its counters stay zero even when
+                    # prepared execution is enabled for the other components.
+                    component_backend = component_name == "detector" and det_backend_active
+                    if ARGUMENTS.expect_prepared and not component_backend:
                         self.assertGreater(binding["lookups"], 0)
                         self.assertEqual(
                             binding["hits"] + binding["fallbacks"], binding["lookups"]
@@ -220,12 +230,21 @@ class FullOcrProfileTest(unittest.TestCase):
                     conv = next(
                         item for item in operators if item["name"] == "Conv"
                     )[component_key]
-                    self.assertEqual(
-                        paths["packed_conv1x1"]
-                        + paths["packed_conv3x3_stride2"]
-                        + paths["unpacked_conv"],
-                        conv,
-                    )
+                    if component_name == "detector" and det_backend_active:
+                        # The compiled DET backend runs outside the executor's
+                        # kernel-path counters, so those stay zero while the
+                        # operator profile still records every Conv.
+                        self.assertEqual(paths["packed_conv1x1"], 0)
+                        self.assertEqual(paths["packed_conv3x3_stride2"], 0)
+                        self.assertEqual(paths["unpacked_conv"], 0)
+                        self.assertGreater(conv, 0)
+                    else:
+                        self.assertEqual(
+                            paths["packed_conv1x1"]
+                            + paths["packed_conv3x3_stride2"]
+                            + paths["unpacked_conv"],
+                            conv,
+                        )
                     matmul = next(
                         item for item in operators if item["name"] == "MatMul"
                     )[component_key]

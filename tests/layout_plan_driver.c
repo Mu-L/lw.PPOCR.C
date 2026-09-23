@@ -2,6 +2,7 @@
 #include "model_internal.h"
 #include "lwm_read.h"
 #include "operator_internal.h"
+#include "session_internal.h"
 
 #include "lw_infer.h"
 
@@ -77,9 +78,78 @@ static void dump_nodes(const lw_model* model, const lw_layout_plan* plan) {
         printf(" output=%" PRIu32 "\n", lwm_read_u32(node + 40u));
     }
 }
+/* Conv/ConvTranspose params in a separate section so the snapshot parser's
+ * node-line regex (which requires the line to end at output=N) keeps matching.
+ * Weight dims are raw: Conv weights are [OC, IC/g, kh, kw], ConvTranspose
+ * weights are [IC, OC, kh, kw] (ONNX order, as indexed by the scalar kernel). */
+static void dump_conv_nodes(const lw_model* model, const lw_session* session) {
+    uint32_t node_index;
+    printf("conv nodes:\n");
+    for (node_index = 0u; node_index < model->info.node_count; ++node_index) {
+        const uint8_t* node = model->bytes + (size_t)model->node_offset +
+                              (size_t)node_index * LWM_V0_NODE_SIZE;
+        uint16_t operation = lwm_read_u16(node);
+        uint64_t params_offset;
+        const uint8_t* params;
+        uint32_t weight_index;
+        const lw_runtime_tensor* weight;
+        if (operation != LW_OP_CONV && operation != LW_OP_CONV_TRANSPOSE) {
+            continue;
+        }
+        params_offset = lwm_read_u64(node + 56u);
+        if (params_offset == 0u || params_offset > model->byte_count ||
+            model->byte_count - (size_t)params_offset < 48u) {
+            printf("%03" PRIu32 " %-13s params missing\n", node_index,
+                   operation_name(operation));
+            continue;
+        }
+        params = model->bytes + (size_t)params_offset;
+        weight_index = lwm_read_u32(node + 12u);
+        if (weight_index >= session->model->info.tensor_count) {
+            printf("%03" PRIu32 " %-13s weight missing\n", node_index,
+                   operation_name(operation));
+            continue;
+        }
+        weight = &session->tensors[weight_index];
+        printf("%03" PRIu32 " %-13s w=[%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 "]"
+               " g=%" PRIu32 " k=%" PRId32 "x%" PRId32 " s=%" PRId32 "x%" PRId32
+               " d=%" PRId32 "x%" PRId32 " pads=%" PRId32 ",%" PRId32 ",%" PRId32 ",%" PRId32 "\n",
+               node_index, operation_name(operation),
+               (uint32_t)weight->dimensions[0], (uint32_t)weight->dimensions[1],
+               (uint32_t)weight->dimensions[2], (uint32_t)weight->dimensions[3],
+               lwm_read_u32(params + 4u), lwm_read_i32(params + 8u), lwm_read_i32(params + 12u),
+               lwm_read_i32(params + 16u), lwm_read_i32(params + 20u),
+               lwm_read_i32(params + 24u), lwm_read_i32(params + 28u),
+               lwm_read_i32(params + 32u), lwm_read_i32(params + 36u),
+               lwm_read_i32(params + 40u), lwm_read_i32(params + 44u));
+    }
+}
+
+static void dump_tensor_shapes(const lw_model* model, const lw_session* session) {
+    uint32_t tensor_index;
+    printf("tensor shapes:\n");
+    for (tensor_index = 0u; tensor_index < model->info.tensor_count; ++tensor_index) {
+        const lw_runtime_tensor* tensor = &session->tensors[tensor_index];
+        uint32_t dimension;
+        printf("%03" PRIu32 " [", tensor_index);
+        for (dimension = 0u; dimension < tensor->rank && dimension < LW_MAX_DIMS; ++dimension) {
+            if (dimension != 0u) {
+                putchar(',');
+            }
+            printf("%" PRId32, tensor->dimensions[dimension]);
+        }
+        printf("]%s%s%s\n",
+               (tensor->flags & LWM_V0_TENSOR_FLAG_CONSTANT) != 0u ? " const" : "",
+               (tensor->flags & LWM_V0_TENSOR_FLAG_INPUT) != 0u ? " input" : "",
+               (tensor->flags & LWM_V0_TENSOR_FLAG_OUTPUT) != 0u ? " output" : "");
+    }
+}
+
 int main(int argc, char** argv) {
     const char* model_path;
+    int32_t height = 48;
     int32_t width = 960;
+    int direct_nhwc = 0;
     lw_model* model = NULL;
     lw_session* session = NULL;
     lw_tensor_desc input;
@@ -89,22 +159,36 @@ int main(int argc, char** argv) {
     lw_status status;
     uint32_t node;
     uint32_t tensor;
-    if (argc < 2 || argc > 4) {
-        fprintf(stderr, "usage: %s model.lwm [width] [direct-nhwc]\n", argv[0]);
+    if (argc < 2 || argc > 5) {
+        fprintf(stderr, "usage: %s model.lwm [height] [width] [direct-nhwc]\n", argv[0]);
         return 2;
     }
     model_path = argv[1];
-    if (argc >= 3 && !parse_width(argv[2], &width)) {
-        fprintf(stderr, "invalid width: %s\n", argv[2]);
-        return 2;
+    if (argc == 4 && strcmp(argv[3], "direct-nhwc") == 0) {
+        /* Backward-compatible two-arg form: model.lwm <width> direct-nhwc. */
+        if (!parse_width(argv[2], &width)) {
+            fprintf(stderr, "invalid width: %s\n", argv[2]);
+            return 2;
+        }
+        direct_nhwc = 1;
+    } else {
+        if (argc >= 4 && !parse_width(argv[2], &height)) {
+            fprintf(stderr, "invalid height: %s\n", argv[2]);
+            return 2;
+        }
+        if (argc >= 3 && !parse_width(argv[3], &width)) {
+            fprintf(stderr, "invalid width: %s\n", argv[3]);
+            return 2;
+        }
+        if (argc == 5 && strcmp(argv[4], "direct-nhwc") == 0) {
+            direct_nhwc = 1;
+        } else if (argc == 5) {
+            fprintf(stderr, "unknown option: %s\n", argv[4]);
+            return 2;
+        }
     }
     memset(&options, 0, sizeof(options));
-    if (argc == 4 && strcmp(argv[3], "direct-nhwc") == 0) {
-        options.allow_direct_nhwc_graph_input = 1u;
-    } else if (argc == 4) {
-        fprintf(stderr, "unknown option: %s\n", argv[3]);
-        return 2;
-    }
+    options.allow_direct_nhwc_graph_input = (uint8_t)direct_nhwc;
     memset(&plan, 0, sizeof(plan));
     lw_error_init(&error);
     status = lw_model_load(model_path, NULL, &model, &error);
@@ -117,7 +201,7 @@ int main(int argc, char** argv) {
     input.rank = 4u;
     input.dimensions[0] = 1;
     input.dimensions[1] = 3;
-    input.dimensions[2] = 48;
+    input.dimensions[2] = height;
     input.dimensions[3] = width;
     lw_error_init(&error);
     status = lw_session_create(model, &input, 1u, NULL, &session, &error);
@@ -163,7 +247,7 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    printf("model=%s input=[1,3,48,%" PRId32 "]\n", model_path, width);
+    printf("model=%s input=[1,3,%" PRId32 ",%" PRId32 "]\n", model_path, height, width);
     printf("layout_plan tensor_count=%" PRIu32 " node_count=%" PRIu32
            " nhwc_nodes=%" PRIu32 " nchw_nodes=%" PRIu32
            " conversions=%" PRIu32 " islands=%" PRIu32
@@ -172,6 +256,8 @@ int main(int argc, char** argv) {
            plan.layout_conversion_count, plan.nhwc_island_count,
            (unsigned)plan.graph_input_direct_nhwc, width);
     dump_nodes(model, &plan);
+    dump_conv_nodes(model, session);
+    dump_tensor_shapes(model, session);
     lw_layout_plan_free(&plan);
     lw_session_free(session);
     lw_model_free(model);

@@ -12,6 +12,10 @@
 #include "profile_internal.h"
 #include "session_internal.h"
 
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+#include "x64_det_backend_internal.h"
+#endif
+
 #include <limits.h>
 #include <math.h>
 #include <stddef.h>
@@ -43,6 +47,11 @@ struct lw_detector {
     uint8_t* padded_source;
     uint32_t padded_width;
     uint32_t padded_height;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    lw_x64_det_program* x64_program;
+    lw_x64_det_instance* x64_instance;
+    uint8_t x64_backend_enabled;
+#endif
 };
 
 static void clear_result(lw_detection_result* result) {
@@ -159,6 +168,61 @@ static int model_is_tiny(const lw_model* model) {
     return 0;
 }
 
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+/* Compile and instantiate the x64 DET backend for the current input size.
+ * NHWC arm preferred (the promoted winner), NCHW fallback; any failure
+ * leaves the fields NULL, which keeps the canonical path. Enabled by default
+ * on x64 AVX2+FMA builds; the test disable hook reverts to canonical. */
+static void detector_try_backend(lw_detector* detector, uint32_t width, uint32_t height) {
+    lw_error backend_error;
+    lw_x64_det_program* program = NULL;
+    lw_x64_det_instance* instance = NULL;
+    lw_error_init(&backend_error);
+    if (detector->x64_backend_enabled == 0u) {
+        program = NULL;
+        instance = NULL;
+    } else if (lw_x64_det_backend_compile_ex(detector->model, height, width,
+                                             LW_X64_DET_COMPILE_NHWC, &program,
+                                             &backend_error) != LW_X64_DET_COMPILE_OK ||
+               lw_x64_det_instance_create(program, &instance, &backend_error) != LW_STATUS_OK) {
+        lw_x64_det_program_free(program);
+        program = NULL;
+        instance = NULL;
+        if (lw_x64_det_backend_compile_ex(detector->model, height, width,
+                                          LW_X64_DET_COMPILE_NCHW, &program,
+                                          &backend_error) == LW_X64_DET_COMPILE_OK &&
+            lw_x64_det_instance_create(program, &instance, &backend_error) != LW_STATUS_OK) {
+            lw_x64_det_program_free(program);
+            program = NULL;
+            instance = NULL;
+        }
+    }
+    lw_x64_det_program_free(detector->x64_program);
+    lw_x64_det_instance_free(detector->x64_instance);
+    detector->x64_program = program;
+    detector->x64_instance = instance;
+}
+
+void lw_detector_test_enable_x64_backend(lw_detector* detector) {
+    if (detector == NULL) {
+        return;
+    }
+    detector->x64_backend_enabled = 1u;
+    detector_try_backend(detector, detector->resized_width, detector->resized_height);
+}
+
+void lw_detector_test_disable_x64_backend(lw_detector* detector) {
+    if (detector == NULL) {
+        return;
+    }
+    detector->x64_backend_enabled = 0u;
+    lw_x64_det_program_free(detector->x64_program);
+    detector->x64_program = NULL;
+    lw_x64_det_instance_free(detector->x64_instance);
+    detector->x64_instance = NULL;
+}
+#endif
+
 static lw_status ensure_session(lw_detector* detector, uint32_t width, uint32_t height,
                                 lw_error* error) {
     lw_tensor_desc input_desc;
@@ -223,6 +287,9 @@ static lw_status ensure_session(lw_detector* detector, uint32_t width, uint32_t 
     detector->probability_element_count = plane;
     detector->resized_width = width;
     detector->resized_height = height;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    detector_try_backend(detector, width, height);
+#endif
     return LW_STATUS_OK;
 
 fail:
@@ -251,6 +318,11 @@ lw_status lw_detector_create(const char* model_path_utf8, const lw_detector_opti
     }
     detector->intra_op_thread_count = 1u;
     detector->reading_order = LW_READING_ORDER_HORIZONTAL_LTR;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    /* Promoted default: the sharded NHWC backend is on; failures inside
+     * detector_try_backend fall back to the canonical executor. */
+    detector->x64_backend_enabled = 1u;
+#endif
     status = validate_options(options, &detector->info, &model_options, &detector->session_options,
                               error);
     if (status != LW_STATUS_OK)
@@ -293,6 +365,10 @@ uint32_t lw_detector_get_intra_op_thread_count(const lw_detector* detector) {
 void lw_detector_free(lw_detector* detector) {
     if (detector == NULL)
         return;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    lw_x64_det_program_free(detector->x64_program);
+    lw_x64_det_instance_free(detector->x64_instance);
+#endif
     free(detector->probabilities);
     free(detector->input);
     lw_session_free(detector->session);
@@ -438,14 +514,34 @@ static lw_status detector_detect_bgr_u8_impl(
     lw_pipeline_profile_add_elapsed(profile == NULL ? NULL : &profile->preprocess_nanoseconds,
                                     started, profile);
     started = lw_pipeline_profile_now(profile);
-    status = profile == NULL
-                 ? lw_execute_session_f32(detector->session, detector->input,
-                                          detector->input_element_count, detector->probabilities,
-                                          detector->probability_element_count, error)
-                 : lw_execute_session_f32_profiled(
-                       detector->session, detector->input, detector->input_element_count,
-                       detector->probabilities, detector->probability_element_count,
-                       &profile->execution, error);
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    if (detector->x64_instance != NULL) {
+        uint64_t backend_input_count = 0u;
+        float* backend_input = lw_x64_det_instance_input(detector->x64_instance,
+                                                         &backend_input_count);
+        if (backend_input == NULL || backend_input_count != detector->input_element_count) {
+            status = LW_STATUS_INVALID_ARGUMENT;
+        } else {
+            memcpy(backend_input, detector->input, (size_t)backend_input_count * sizeof(float));
+            status = lw_x64_det_instance_run_profiled_ex(
+                detector->x64_instance, detector->probabilities,
+                detector->probability_element_count, detector->session->thread_pool,
+                detector->intra_op_thread_count,
+                profile == NULL ? NULL : &profile->execution, error);
+        }
+    } else
+#endif
+    {
+        status = profile == NULL
+                     ? lw_execute_session_f32(detector->session, detector->input,
+                                              detector->input_element_count,
+                                              detector->probabilities,
+                                              detector->probability_element_count, error)
+                     : lw_execute_session_f32_profiled(
+                           detector->session, detector->input, detector->input_element_count,
+                           detector->probabilities, detector->probability_element_count,
+                           &profile->execution, error);
+    }
     lw_pipeline_profile_add_elapsed(profile == NULL ? NULL : &profile->graph_nanoseconds, started,
                                     profile);
     if (status != LW_STATUS_OK) {
