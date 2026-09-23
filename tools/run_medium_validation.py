@@ -302,7 +302,20 @@ def main() -> int:
             f"expected {resolved['expected_lines']}"
         )
     text_sha256 = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+    gate_report = {
+        "expected_lines": resolved["expected_lines"],
+        "actual_lines": len(lines),
+        "expected_text_sha256": resolved["expected_full_text_sha256"],
+        "actual_text_sha256": text_sha256,
+        "texts": [{"index": index, "text": text} for index, text in enumerate(lines)],
+    }
+    (output / "full-ocr-gate.json").write_text(
+        json.dumps(gate_report, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
     if text_sha256 != resolved["expected_full_text_sha256"]:
+        print(json.dumps(gate_report, ensure_ascii=False, indent=2))
         raise RuntimeError(
             "Medium full OCR text SHA-256 mismatch: "
             f"{text_sha256} != {resolved['expected_full_text_sha256']}"

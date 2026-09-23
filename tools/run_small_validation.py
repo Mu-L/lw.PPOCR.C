@@ -20,6 +20,14 @@ from tools.stage_small_validation_bundle import create_bundle
 LINE_RE = re.compile(r"^\d+ text=(?P<text>.*?) rec=")
 
 
+def configure_utf8_output() -> None:
+    """Keep Windows CI diagnostics readable when OCR output contains Unicode."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def recognized_text(stdout: str) -> list[str]:
     return [match.group("text") for line in stdout.splitlines() if (match := LINE_RE.match(line))]
 
@@ -63,6 +71,7 @@ def repository_path(root: Path, path: Path) -> Path:
 
 
 def main() -> int:
+    configure_utf8_output()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--detector", type=Path, required=True)
     parser.add_argument("--classifier", type=Path, required=True)
@@ -169,6 +178,7 @@ def main() -> int:
         ],
         root,
     )
+    (output / "full-ocr.txt").write_text(stdout, encoding="utf-8", newline="\n")
     match = re.search(r"(?m)^lines=(\d+)\s", stdout)
     if match is None or int(match.group(1)) != args.expected_lines:
         raise RuntimeError(
@@ -181,19 +191,30 @@ def main() -> int:
             f"expected {args.expected_lines}"
         )
     text_sha256 = recognized_text_sha256(stdout)
-    if args.expected_full_text_sha256 and text_sha256.lower() != args.expected_full_text_sha256.lower():
-        raise RuntimeError(
-            "full OCR text SHA-256 mismatch: "
-            f"{text_sha256} != {args.expected_full_text_sha256}"
-        )
-    (output / "full-ocr.txt").write_text(stdout, encoding="utf-8", newline="\n")
-
     converted_dir = output / "converted-runtime"
     converted_dir.mkdir(exist_ok=True)
     shutil.copyfile(det_lwm, converted_dir / "det.lwm")
     shutil.copyfile(build / "models" / "cls.lwm", converted_dir / "cls.lwm")
     shutil.copyfile(rec_lwm, converted_dir / "rec.lwm")
     shutil.copyfile(output / "model" / "ppocr_keys.txt", converted_dir / "ppocr_keys.txt")
+    gate_report = {
+        "expected_lines": args.expected_lines,
+        "actual_lines": len(text_lines),
+        "expected_text_sha256": args.expected_full_text_sha256,
+        "actual_text_sha256": text_sha256,
+        "texts": [{"index": index, "text": text} for index, text in enumerate(text_lines)],
+    }
+    (output / "full-ocr-gate.json").write_text(
+        json.dumps(gate_report, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    if args.expected_full_text_sha256 and text_sha256.lower() != args.expected_full_text_sha256.lower():
+        print(json.dumps(gate_report, ensure_ascii=False, indent=2))
+        raise RuntimeError(
+            "full OCR text SHA-256 mismatch: "
+            f"{text_sha256} != {args.expected_full_text_sha256}"
+        )
     pack_dir = output / "runtime-model"
     run("canonical runtime staging", [sys.executable, "tools/prepare_ppocrv6_runtime_variant.py", "--variant", "small", "--build-dir", str(build), "--output-dir", str(pack_dir), "--converted-dir", str(converted_dir)], root)
     pack = output / "ppocrv6-small-runtime.zip"
