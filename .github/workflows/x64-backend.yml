@@ -1,0 +1,68 @@
+name: x64 backend correctness
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/runtime/x64_*"
+      - "src/runtime/layout_*"
+      - "src/simd/avx2_*"
+      - "src/ppocr/**"
+      - "tests/x64_*"
+      - "tests/test_ocr_text_contract_fixtures.py"
+      - "tests/test_compare_ocr_text_output.py"
+      - "tools/compare_ocr_text_output.py"
+      - "ci/fixtures/**"
+      - "ci/ppocrv6-*-validation.json"
+      - "ci/web-ppocrv6-*.json"
+      - "CMakeLists.txt"
+      - ".github/workflows/x64-backend.yml"
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  correctness:
+    name: x64 backend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-22.04]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-converter.txt
+      - name: Install converter dependencies
+        run: python -m pip install -r requirements-converter.txt
+      - name: Verify readable OCR contracts
+        run: python -m unittest discover -s tests -p "test_*ocr_text*.py"
+      - name: Configure Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: >-
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          -DBUILD_TESTING=ON -DLW_EXPERIMENTAL_AVX2_FAST_PATH=ON
+      - name: Configure Linux
+        if: runner.os == 'Linux'
+        run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTING=ON -DLW_EXPERIMENTAL_AVX2_FAST_PATH=ON
+      - name: Build x64 backend correctness drivers
+        run: >-
+          cmake --build build --config Release --parallel 2 --target
+          x64-rec-backend-contract-driver
+          x64-rec-backend-execution-driver
+          x64-rec-backend-nchw-driver
+          x64-rec-recognizer-benchmark-driver
+          x64-det-backend-contract-driver
+      - name: Run x64 backend correctness
+        run: >-
+          ctest --test-dir build -C Release --output-on-failure
+          -R "^(x64_rec_backend_contract|x64_rec_backend_execution|x64_rec_backend_nchw|x64_rec_recognizer_benchmark|x64_det_backend_contract|x64_det_backend_contract_sharded)$"
