@@ -184,9 +184,20 @@ class FullOcrProfileTest(unittest.TestCase):
                     // report["iterations"]
                 )
                 self.assertEqual(canonical_rows, coverage["canonical_lines"])
+                # A compiled x64 CLS backend executes outside the per-operator
+                # profile counters just like compiled REC lines do; detect it
+                # from the classifier implementation-path counters (all zero
+                # when every line took the compiled backend).
+                cls_impl = implementation_paths["classifier"]
+                cls_canonical_invocations = sum(
+                    value for value in cls_impl.values() if isinstance(value, int)
+                )
+                cls_canonical_lines = (
+                    report["lines"] if cls_canonical_invocations > 0 else 0
+                )
                 self.assertEqual(
                     sum(item["invocations"] for item in operators),
-                    242 + report["lines"] * 106 + canonical_rows * 159,
+                    242 + cls_canonical_lines * 106 + canonical_rows * 159,
                 )
                 self.assertGreater(report["graph_work_nanoseconds"], 0)
                 self.assertAlmostEqual(

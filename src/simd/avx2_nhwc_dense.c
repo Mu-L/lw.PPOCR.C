@@ -256,6 +256,9 @@ static float dense_apply_activation(float value, uint16_t activation) {
         if (gate > 6.0f) gate = 6.0f;
         return value * gate * (1.0f / 6.0f);
     }
+    if (activation == LW_NHWC_ACT_GELU) {
+        return lw_nhwc_gelu_scalar_exact_f32(value);
+    }
     return value;
 }
 
@@ -304,7 +307,13 @@ static void dense_tile_scalar(const float* const* row_ptrs, uint32_t rows,
         const float* residual = epilogue == NULL || epilogue->residual == NULL
             ? NULL : epilogue->residual + (size_t)row * output_stride;
         for (lane = 0u; lane < block_channels; ++lane) {
-            float value = sums[row][lane] + (residual == NULL ? 0.0f : residual[lane]);
+            float value = sums[row][lane];
+            if (epilogue != NULL && epilogue->post_bias != NULL) {
+                value += epilogue->post_bias[lane];
+            }
+            if (residual != NULL) {
+                value += residual[lane];
+            }
             destination[lane] = dense_apply_activation(value,
                 epilogue == NULL ? LW_NHWC_ACT_NONE : epilogue->activation);
         }
@@ -389,13 +398,41 @@ static void dense_tile_avx2(const float* const* row_ptrs, uint32_t rows,
             _mm256_storeu_ps(values + 8u, hi[row]);
             for (uint32_t lane = 0u; lane < block_channels; ++lane) {
                 float value = values[lane];
+                if (epilogue != NULL && epilogue->post_bias != NULL) {
+                    value += epilogue->post_bias[lane];
+                }
                 if (epilogue != NULL && epilogue->residual != NULL) {
                     value += epilogue->residual[(size_t)row * output_stride + lane];
                 }
-                destination[lane] = dense_apply_activation(
-                    value, epilogue == NULL ? LW_NHWC_ACT_NONE : epilogue->activation);
+                values[lane] = value;
+            }
+            if (epilogue != NULL && epilogue->activation == LW_NHWC_ACT_GELU) {
+                /* Match the standalone pass layout: full 8-lane groups use
+                 * the vector polynomial, the sub-8 tail the scalar erff
+                 * helper. block_channels < 16, so at most one vector group. */
+                uint32_t vector_end = block_channels & ~7u;
+                uint32_t lane;
+                if (vector_end >= 8u) {
+                    _mm256_storeu_ps(values,
+                        lw_nhwc_avx2_gelu_vector_exact_f32(_mm256_loadu_ps(values)));
+                }
+                for (lane = vector_end; lane < block_channels; ++lane) {
+                    values[lane] = lw_nhwc_gelu_scalar_exact_f32(values[lane]);
+                }
+                for (lane = 0u; lane < block_channels; ++lane) {
+                    destination[lane] = values[lane];
+                }
+                continue;
+            }
+            for (uint32_t lane = 0u; lane < block_channels; ++lane) {
+                destination[lane] = dense_apply_activation(values[lane],
+                    epilogue == NULL ? LW_NHWC_ACT_NONE : epilogue->activation);
             }
             continue;
+        }
+        if (epilogue != NULL && epilogue->post_bias != NULL) {
+            lo[row] = _mm256_add_ps(lo[row], _mm256_loadu_ps(epilogue->post_bias));
+            hi[row] = _mm256_add_ps(hi[row], _mm256_loadu_ps(epilogue->post_bias + 8u));
         }
         if (epilogue != NULL && epilogue->residual != NULL) {
             __m256 residual_lo = _mm256_loadu_ps(epilogue->residual + row * output_stride);
@@ -416,6 +453,9 @@ static void dense_tile_avx2(const float* const* row_ptrs, uint32_t rows,
             __m256 gate_hi = _mm256_min_ps(_mm256_max_ps(_mm256_add_ps(hi[row], three), zero), six);
             lo[row] = _mm256_mul_ps(_mm256_mul_ps(lo[row], gate_lo), inverse_six);
             hi[row] = _mm256_mul_ps(_mm256_mul_ps(hi[row], gate_hi), inverse_six);
+        } else if (epilogue != NULL && epilogue->activation == LW_NHWC_ACT_GELU) {
+            lo[row] = lw_nhwc_avx2_gelu_vector_exact_f32(lo[row]);
+            hi[row] = lw_nhwc_avx2_gelu_vector_exact_f32(hi[row]);
         }
         _mm256_storeu_ps(destination, lo[row]);
         _mm256_storeu_ps(destination + 8u, hi[row]);
@@ -443,9 +483,6 @@ lw_status lw_avx2_fma_nhwc_dense_f32(const float* input, const float* packed_wei
                              &patch, &partial) ||
         !dense_build_offsets(desc, tap_offsets, patch_offsets, (uint32_t)patch_width64)) {
         return LW_STATUS_INVALID_ARGUMENT;
-    }
-    if (epilogue != NULL && epilogue->activation == LW_NHWC_ACT_GELU) {
-        return LW_STATUS_UNSUPPORTED;
     }
     kc = desc->dense_kc == 0u ? (uint32_t)k_total64 : desc->dense_kc;
     if (kc == 0u) return LW_STATUS_INVALID_ARGUMENT;
@@ -487,6 +524,7 @@ lw_status lw_avx2_fma_nhwc_dense_f32(const float* input, const float* packed_wei
                     lw_nhwc_epilogue local_epilogue = epilogue == NULL
                         ? (lw_nhwc_epilogue){0} : *epilogue;
                     if (local_epilogue.bias != NULL) local_epilogue.bias += block * LW_NHWC_OC_BLOCK;
+                    if (local_epilogue.post_bias != NULL) local_epilogue.post_bias += block * LW_NHWC_OC_BLOCK;
                     if (local_epilogue.residual != NULL) {
                         local_epilogue.residual += ((size_t)batch * desc->output_height * desc->output_width +
                             (size_t)oy * desc->output_width + ox) * desc->output_channels +
@@ -538,9 +576,6 @@ lw_status lw_avx2_fma_nhwc_dense_prepared_f32(const float* input,
         !dense_prepared_scratch_views(desc, scratch, scratch_bytes, &patch, &partial)) {
         return LW_STATUS_INVALID_ARGUMENT;
     }
-    if (epilogue != NULL && epilogue->activation == LW_NHWC_ACT_GELU) {
-        return LW_STATUS_UNSUPPORTED;
-    }
     kc = desc->dense_kc == 0u ? (uint32_t)k_total64 : desc->dense_kc;
     if (kc == 0u) return LW_STATUS_INVALID_ARGUMENT;
     for (uint32_t batch = 0u; batch < desc->batch; ++batch) {
@@ -584,6 +619,7 @@ lw_status lw_avx2_fma_nhwc_dense_prepared_f32(const float* input,
                     lw_nhwc_epilogue local_epilogue = epilogue == NULL
                         ? (lw_nhwc_epilogue){0} : *epilogue;
                     if (local_epilogue.bias != NULL) local_epilogue.bias += block * LW_NHWC_OC_BLOCK;
+                    if (local_epilogue.post_bias != NULL) local_epilogue.post_bias += block * LW_NHWC_OC_BLOCK;
                     if (local_epilogue.residual != NULL) {
                         local_epilogue.residual += ((size_t)batch * desc->output_height * desc->output_width +
                             (size_t)oy * desc->output_width + ox) * desc->output_channels +

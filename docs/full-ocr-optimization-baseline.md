@@ -314,3 +314,200 @@ The shared REC converter remains Tiny-only and retains strict ONNX shape
 inference: relaxing its SHA guard does not lower Small/Medium dynamic Reshape
 nodes. Those variants use their dedicated conversion tools. DET's
 `LW_ALLOW_ANY_DET` override does not apply to REC.
+
+
+REC epilogue fusion + transpose fast path + cross-width arena sharing
+(2026-09-24): (a) Conv epilogue fusion in the REC x64 backend lowering:
+a single-consumer channel-bias Add, a residual Add, and the five-node
+exact-GELU chain (Div/Erf/Add/Mul/Mul, two consumers of the conv output,
+matched via tensor_consumed_within) fold into the preceding NHWC
+pointwise/depthwise conv. The GELU epilogue uses an erff-based scalar +
+AVX2 no-FMA vector helper that reproduces the standalone GELU pass bit
+for bit (partial blocks: full 8-lane vectors plus scalar erff remainder,
+identical to the pass layout). Dense convs are excluded from folding:
+measurements showed dense+epilogue runs ~28% slower (1.81 vs 1.41 ms/line
+at width 960), wiping out the gain. Depthwise folds bias only. (b) The
+TRANSPOSE op got an AVX2 8x8-block 2D fast path (effective 2D
+transpositions only; degenerate permutations degrade to memcpy, others
+fall back to scalar): 0.89 -> 0.02 ms/line at width 960. (c) All width
+slots of one recognizer instance now share a single arena/scratch/CTC
+allocation sized to the max program requirement (borrowed workspace;
+each worker clone owns its own shared block, thread-safe), replacing
+per-slot buffers. Bit-exactness: golden corpus checksum unchanged
+(46d99468540b5eb7) in every ctest and benchmark run. Full suite 88/88.
+
+Measurements (interleaved A/B vs a clean HEAD build, quiet machine):
+REC op timer total_run_ms per line, width 960: 16.02 vs 16.60 ms (-3.5%);
+width 640: ~10.7 vs 10.8 (parity); width 320: 6.18 vs 6.15 (parity).
+REC arena per instance: 3,317,760 -> 2,764,800 bytes (-16.6%).
+End-to-end sample.ppm 4w: 101.7 vs 102.6 ms mean (-0.9%); 1w: ~229 vs
+~230-250 ms (parity to slightly faster). Process private commit at
+create: 4 workers 93.6 vs 118.6 MB (-25 MB, -21%); 1 worker 51.0 vs
+57.2 MB (-11%); default 8 workers 150.5 vs 200.5 MB (-50 MB, -25%).
+
+
+CLS compiled x64 backend (2026-09-24): the classifier reuses the REC
+lowering/execution machinery. The compile entry gained an explicit input
+height plus an allow-CTC-tail switch (`lw_x64_rec_backend_compile_input`;
+REC wrappers keep height 48 and CTC detection on) because the CLS head is
+also MatMul -> Add -> Softmax and would otherwise be misdetected as a CTC
+tail. The backend learned a SOFTMAX physical op that delegates to
+`lw_scalar_softmax_f32` (bit-exact with the canonical executor by
+construction). `lw_avx2_nhwc_reduce_mean_hw_f32`'s vector path now divides
+by H*W instead of multiplying by the reciprocal, matching its own scalar
+remainder and the canonical NCHW reduce bit for bit (this cut the CLS
+score drift against the canonical executor from 5.0e-6 to 2.0e-6, inside
+the reference test's 5-place tolerance). classifier.c compiles the CLS
+graph at create (NHWC strategy, 3x80x160, CTC off), converts the NCHW
+preprocess planes into the instance input (pure data movement), runs, and
+reads the two logits from the arena output value; any compile/runtime
+failure falls back to the canonical session. The full-OCR profile test now
+derives the expected canonical operator count from the classifier
+implementation-path counters (zero when all lines take the compiled
+backend), mirroring the existing compiled-REC handling.
+
+Measurements (interleaved A/B vs clean HEAD build): CLS classify
+1.66-1.70 ms vs 2.00-2.05 ms per crop (-17%, label and score bit-
+identical on the sample crop). End-to-end sample.ppm: 4w 100.9 vs
+103.5 ms mean (-2.5%); 8w 78.1 vs 78.4 ms (-0.4%, workers saturated).
+Private commit at create: 4w 100.2 vs 118.6 MB (-15.5%); 8w 163.4 vs
+200.5 MB (-18.5%) — the compiled CLS instance adds ~1.3 MB per worker
+versus the REC-only shared-workspace state. Golden corpus checksum
+unchanged (46d99468540b5eb7); full suite 88/88.
+
+
+DET Conv+GELU epilogue fusion (2026-09-24): the DET lowering now folds the
+five-node exact-GELU chain directly after an NHWC pointwise/dense conv into
+the conv epilogue (mirroring the REC fold; the chain reads the conv output
+twice, so a det_tensor_consumed_within range check replaces the
+single-consumer test). Physical DET ops at 512x512: 176 -> 163; standalone
+GELU time (4.78 ms of 20.7 ms per run at 8 workers) disappears into the
+convs, DET op total 20.7 -> 15.6 ms (-25%). The scalar NHWC conv fallback
+learned the exact erff-based GELU so forced-fallback contract parity holds
+(bit-identical to the vector epilogue by construction). REC pointwise
+kernel assessment: pure conv math already runs at 84-116 GF/s against a
+~128 GF/s single-core AVX2-FMA peak, so the remaining REC graph time is
+near the FP floor; CTC already uses the packed matmul + fused argmax path.
+End-to-end sample.ppm vs clean HEAD: 8w 72.5 vs 75.9 ms (-4.5%), 4w 94.0
+vs 97.8 ms (-3.9%). Golden corpus checksum unchanged
+(46d99468540b5eb7); full suite 88/88.
+
+
+## 第四轮：DET elementwise / pool 算子挂线程池分片（2026-09-24）
+
+借鉴 SimdPaddleOCR 的 UnaryParallel 思路：此前 DET 后端只有卷积类算子分片，
+elementwise 全部单线程。本轮把逐元素独立的算子挂上 DET 已有线程池，
+按元素/像素/行范围分片，每元素仍由同一个逐元素核计算，逐位一致。
+
+改动（src/runtime/x64_det_backend_execute.c，单一文件）：
+- 新增 shard kind：BINARY_SAME / BINARY_SCALAR / BINARY_CHANNEL / SIGMOID /
+  CONCAT_NHWC / POOL_NCHW_CHANNELS / POOL_NHWC_ROWS，统一走
+  run_sharded_elementwise() 辅助函数（阈值 128K 元素，小算子保持串行）。
+- add/mul/div 的 contiguous、right-scalar、channel-broadcast 三种 AVX2 路径
+  全部按输出元素范围分片；sigmoid_nchw 按元素分片；concat_nhwc 按像素分片。
+- max_pool/avg_pool：NCHW 按通道切（指针偏移 + dims 切片）；NHWC 按输出行切，
+  begin>0 的分片把输入指针偏移 begin*stride_h-pad_top 行并置 pad_top=0
+  （派发侧保证 stride_h>=pad_top），窗口裁剪与串行完全一致。
+- 串行契约钩子 lw_x64_det_instance_run_op（state=NULL）行为不变。
+
+DET 512x512 算子级（8 线程，det-op-timer，ms/次）：
+| 算子 | 融合GELU后 | 分片后 | 变化 |
+| --- | --- | --- | --- |
+| add | 1.92 | 0.60 | -69% |
+| max_pool | 1.01 | 0.17 | -83% |
+| sigmoid_nchw | 0.89 | 0.15 | -83% |
+| mul | 0.72 | 0.36 | -50% |
+| concat_nhwc | 1.45 | 0.28 | -81% |
+| DET 算子总计 | 15.6 | 10.8 | -31% |
+
+端到端（sample.ppm 500x500，16 行，交替 A/B 各 3 轮取均值 vs HEAD）：
+| 线程 | HEAD 基线 | 本轮累计 | 变化 |
+| --- | --- | --- | --- |
+| 8w | 90.19 ms | 75.96 ms | -15.8% |
+| 4w | 113.38 ms | 106.83 ms | -5.8% |
+
+ctest 88/88 绿；golden checksum 46d99468540b5eb7 全部轮次不变。
+
+
+## 第五轮：DET conv epilogue 折叠 Add + reduce_mean 分片（2026-09-24 下午）
+
+关键定位修正：benchmark 的 detector_ms ~56ms 远大于 det-op-timer 512x512 的
+10.8ms，原因是 limit_side_length=960 把 500x500 图像放大到 960x960 跑 DET
+（(960/512)^2 ≈ 3.5x）。真实负载下 DET 占端到端约 77%，仍是最大头。
+
+改动：
+1. Conv epilogue 折叠（移植 REC 的 fold_conv_epilogue 思路到 DET 编译器）：
+   NHWC pointwise/dense conv 后贪婪吸收 channel-bias Add（常量）+ 残差 Add
+   （非常量同尺寸张量）+ 末尾 Relu 或五节点精确 GELU 链，统一替换原来的
+   Conv+Relu / Conv+GELU 两个独立块。核内顺序 accumulator -> +post_bias ->
+   +residual -> activation 与原算子序完全一致，逐位不变。
+   - lw_x64_det_conv_op 增加 post_bias / residual_offset / has_residual 字段。
+   - 执行侧：POINTWISE/DENSE case 解析 residual 运行时指针；分片 worker 按
+     片首像素/行偏移 residual（核按片内局部索引）；scalar_nhwc_conv_row_range
+     增加 post_bias/residual 参数（绝对行索引），depthwise 传 NULL。
+   - 限制：仅 POINTWISE/DENSE（depthwise 核只接受 bias 指针，不动）；
+     要求 Add 节点 NHWC-effective、两侧 value 均 NHWC 布局、单消费者。
+   - 效果：物理算子 163 -> 153，960x960 add 8.3 -> 6.0ms。剩余 add 的生产者
+     是 mul（hardswish 尾部 x*h(x)+residual）和 resize_nhwc（DB head 上采样
+     特征相加），不是 conv，不可折叠。
+2. reduce_mean 按通道分片：新增 lw_avx2_nhwc_reduce_mean_hw_strided_f32
+   （行跨步参数化，每通道像素访问顺序不变，逐位一致）；NCHW 路径在 worker
+   里按通道范围跑原标量循环。960x960 reduce_mean 6.5 -> 1.7ms。
+
+端到端（sample.ppm，交替 A/B 各 3 轮取均值 vs HEAD，checksum 全部
+46d99468540b5eb7 不变，ctest 88/88 绿）：
+| 线程 | HEAD 基线 | 本轮累计 | 变化 |
+| --- | --- | --- | --- |
+| 8w | 76.92 ms | 68.95 ms | -10.4% |
+| 4w | 95.97 ms | 85.82 ms | -10.6% |
+
+剩余热点（960x960，8 线程）：pointwise ~23ms、dense ~16ms（卷积核本身，
+接近算力上限）、depthwise ~7ms、add ~6ms（mul/resize 尾部，访存受限）、
+concat_nhwc ~4ms、convert ~3.7ms、relu ~3.6ms（depthwise 后，核不支持
+activation）、mul ~2.8ms。
+
+
+## 第六轮：pointwise 全张量展开核（REC/DET 共享）+ 三档模型占比实测（2026-09-24 傍晚）
+
+### 阶段占比实测（当前优化构建，16 行文本样图）
+
+DET 内算子线程数固定为物理核数（8），与 workers 无关；行级（CLS+REC）阶段
+按行跨 worker 并行。ocr_ms 减去 detector_ms 即行级阶段：
+
+| 档位 | workers | det_ms | ocr_ms | 行级阶段 | 行级占比 |
+| --- | --- | --- | --- | --- | --- |
+| tiny | 1 | 47.2 | 224.9 | 177.7 | 79% |
+| tiny | 4 | 47.1 | 85.4 | 38.3 | 45% |
+| small | 1 | 118.4 | 1309.3 | 1190.9 | 91% |
+| small | 4 | 119.2 | 520.7 | 401.5 | 77% |
+| medium | 1 | 975.9 | 5171.3 | 4195.4 | 81% |
+| medium | 4 | 973.7 | 2054.3 | 1080.6 | 53% |
+
+结论：低 workers 时 REC（行级阶段）确实是大头（79-91%）；8 workers 时 DET
+与行级各占一半左右。两条线都要压。
+
+### pointwise 展开核
+
+tiny REC 单行 pointwise 占 70%（11.3/16.3ms），扩张卷积（48→96 等）只有
+38 GF/s（单核峰值 ~128）。微基准定位：现有 generic 6x16 tile 的
+`__m256 lo[6]/hi[6]` 数组在 MSVC 下寄存器分配不佳；手写全展开命名寄存器
+版本 79 -> 111 GF/s，输出逐位一致。
+
+但把展开 tile 塞进 grouped 循环（每 tile 一次调用）没有收益——每次调用的
+栈帧序言（sub rsp,290h + 9 个 xmm 保存）吃掉了增益。最终方案：
+lw_nhwc_pointwise_unrolled_all()，整个卷积一次调用，tile-outer/oc-inner
+循环 + 内联 12 寄存器展开累加 + store_row16 epilogue，noinline 防止被
+分组循环内联劣化。仅在 Cout%16==0 且权重 <=256KB（L2 友好）时启用，
+其余形状仍走 grouped（大权重下 grouped 的 oc-outer 序更省缓存）。
+微基准（2880px, 48->96）：79 -> 107 GF/s；REC 单行总耗时 -9%。
+
+尝试过的弯路：把 REC 多像素 pointwise 切到 3x32/4x16 核——慢 2 倍
+（3 行 tile 寄存器块效率低），已回退。
+
+端到端（sample.ppm，交替 A/B 各 3 轮取均值 vs HEAD，checksum 全部
+46d99468540b5eb7 不变，ctest 88/88 绿）：
+| 线程 | HEAD 基线 | 本会话累计 | 变化 |
+| --- | --- | --- | --- |
+| 1w | 256.8 ms | 224.4 ms | -12.6% |
+| 4w | 103.1 ms | 87.4 ms | -15.2% |
+| 8w | 77.7 ms | 65.4 ms | -15.8% |

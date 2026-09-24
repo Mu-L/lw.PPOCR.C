@@ -145,6 +145,12 @@ typedef struct lw_x64_det_conv_op {
     const float* packed_weights;
     const float* original_weights;
     const float* bias;
+    /* Folded epilogue extras: a per-channel constant Add applied to the
+     * finished accumulator (post_bias), and an elementwise residual Add read
+     * from the arena at residual_offset when has_residual != 0. */
+    const float* post_bias;
+    uint64_t residual_offset;
+    uint8_t has_residual;
     uint8_t scalar_fallback;
     uint8_t pointwise_kernel;
     uint8_t nchw_pointwise_kernel;

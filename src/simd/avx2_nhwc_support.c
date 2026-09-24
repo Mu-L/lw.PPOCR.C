@@ -80,7 +80,7 @@ void lw_avx2_nhwc_reduce_mean_hw_f32(const float* input, float* output,
                     sum = _mm256_add_ps(sum, _mm256_loadu_ps(source));
                 }
             }
-            sum = _mm256_mul_ps(sum, _mm256_set1_ps(1.0f / ((float)height * (float)width)));
+            sum = _mm256_div_ps(sum, _mm256_set1_ps((float)height * (float)width));
             _mm256_storeu_ps(output + (size_t)n * channels + channel, sum);
         }
 #endif
@@ -119,6 +119,41 @@ static void lw_nhwc_pool_valid_window(int32_t input_y0, int32_t input_x0,
     *ky_end = (uint32_t)y_end;
     *kx_begin = (uint32_t)x_begin;
     *kx_end = (uint32_t)x_end;
+}
+
+LW_NHWC_SUPPORT_TARGET
+void lw_avx2_nhwc_reduce_mean_hw_strided_f32(const float* input, float* output,
+                                             uint32_t batch, uint32_t height,
+                                             uint32_t width, uint32_t channels,
+                                             uint32_t input_stride, uint32_t output_stride) {
+    uint32_t n;
+    if (input == NULL || output == NULL || batch == 0u || height == 0u ||
+        width == 0u || channels == 0u || input_stride == 0u || output_stride == 0u) return;
+    for (n = 0u; n < batch; ++n) {
+        uint32_t channel = 0u;
+#if LW_NHWC_SUPPORT_X86
+        for (; channel + 8u <= channels; channel += 8u) {
+            __m256 sum = _mm256_setzero_ps();
+            for (uint32_t y = 0u; y < height; ++y) {
+                for (uint32_t x = 0u; x < width; ++x) {
+                    const float* source = input + ((((size_t)n * height + y) * width + x) * input_stride + channel);
+                    sum = _mm256_add_ps(sum, _mm256_loadu_ps(source));
+                }
+            }
+            sum = _mm256_div_ps(sum, _mm256_set1_ps((float)height * (float)width));
+            _mm256_storeu_ps(output + (size_t)n * output_stride + channel, sum);
+        }
+#endif
+        for (; channel < channels; ++channel) {
+            float sum = 0.0f;
+            for (uint32_t y = 0u; y < height; ++y) {
+                for (uint32_t x = 0u; x < width; ++x) {
+                    sum += input[(((size_t)n * height + y) * width + x) * input_stride + channel];
+                }
+            }
+            output[(size_t)n * output_stride + channel] = sum / ((float)height * (float)width);
+        }
+    }
 }
 
 LW_NHWC_SUPPORT_TARGET

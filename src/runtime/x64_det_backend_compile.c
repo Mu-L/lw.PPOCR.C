@@ -891,6 +891,36 @@ static uint32_t det_tensor_consumer_count(const lw_model* model, uint32_t tensor
     return count;
 }
 
+/* Every consumer of the tensor must be one of the `span` nodes starting at
+ * `first`, and the tensor must not be a graph output. The GELU chain reads
+ * its input twice, so a plain single-consumer test is too strict. */
+static int det_tensor_consumed_within(const lw_model* model, uint32_t tensor, uint32_t first,
+                                      uint32_t span) {
+    uint32_t node;
+    uint32_t output;
+    int used = 0;
+    for (node = 0u; node < model->info.node_count; ++node) {
+        const uint8_t* current = node_bytes(model, node);
+        uint16_t input_count = lwm_read_u16(current + 2u);
+        uint16_t input_index;
+        for (input_index = 0u; input_index < input_count; ++input_index) {
+            if (lwm_read_u32(current + 8u + (size_t)input_index * sizeof(uint32_t)) == tensor) {
+                if (node < first || node >= first + span) {
+                    return 0;
+                }
+                used = 1;
+            }
+        }
+    }
+    for (output = 0u; output < model->info.output_count; ++output) {
+        if (lwm_read_u32(model->bytes + (size_t)model->output_offset +
+                         (size_t)output * sizeof(uint32_t)) == tensor) {
+            return 0;
+        }
+    }
+    return used;
+}
+
 static int det_input_is_neutral(const lw_session* session, uint32_t tensor_index) {
     return tensor_index < session->model->info.tensor_count &&
            lw_layout_tensor_is_neutral(session, tensor_index);
@@ -1077,32 +1107,134 @@ static lw_x64_det_compile_result lower_ops(const lw_model* model, const lw_sessi
             program->values[lwm_read_u32(node + 40u)].producer = (int32_t)physical;
             update_input_uses(model, session, program, i, (int32_t)physical);
             ++physical;
-            /* Conv+Relu epilogue fusion: a single-consumer Relu directly
-             * after an NHWC pointwise/dense conv folds into the epilogue
-             * (the kernels already apply bias+ReLU lane-exactly). The elided
-             * Relu output aliases the conv output. */
-            if (semantic == LW_OP_CONV && i + 1u < model->info.node_count) {
-                const uint8_t* next = node_bytes(model, i + 1u);
+            /* Conv epilogue folding: greedily absorb a trailing channel-bias
+             * Add, a residual Add, and a final Relu or five-node exact-GELU
+             * chain into an NHWC pointwise/dense conv's fused epilogue. The
+             * kernels apply accumulator -> +post_bias -> +residual ->
+             * activation in exactly the original op order, so results stay
+             * bit-identical to the unfused sequence. Elided intermediate
+             * tensors never materialize (producer/last_use = -1). */
+            if (semantic == LW_OP_CONV) {
+                lw_x64_det_op* conv_op = &program->ops[physical - 1u];
                 uint32_t conv_output = lwm_read_u32(node + 40u);
-                if (lwm_read_u16(next) == LW_OP_RELU &&
-                    lwm_read_u32(next + 8u) == conv_output &&
-                    det_tensor_consumer_count(model, conv_output) == 1u) {
-                    lw_x64_det_op* conv_op = &program->ops[physical - 1u];
-                    if ((conv_op->kind == LW_X64_DET_OP_POINTWISE ||
-                         conv_op->kind == LW_X64_DET_OP_DENSE) &&
-                        conv_op->data.conv.activation == LW_NHWC_ACT_NONE) {
-                        uint32_t relu_output = lwm_read_u32(next + 40u);
-                        conv_op->data.conv.activation = LW_NHWC_ACT_RELU;
-                        conv_op->semantic_count = 2u;
-                        /* The conv output is consumed inline by the epilogue;
-                         * the fused op's slot is the Relu output tensor. */
+                if ((conv_op->kind == LW_X64_DET_OP_POINTWISE ||
+                     conv_op->kind == LW_X64_DET_OP_DENSE) &&
+                    conv_op->data.conv.activation == LW_NHWC_ACT_NONE &&
+                    program->values[conv_output].layout == LW_X64_DET_LAYOUT_NHWC) {
+                    uint32_t current = conv_output;
+                    uint64_t current_bytes = program->values[current].bytes;
+                    uint32_t cursor = i + 1u;
+                    uint32_t consumed = 0u;
+                    uint32_t residual_tensor = UINT32_MAX;
+                    uint32_t final_out = current;
+                    const float* post_bias = NULL;
+                    uint16_t activation = LW_NHWC_ACT_NONE;
+                    uint32_t intermediates[3];
+                    uint32_t intermediate_count = 0u;
+                    /* Channel-bias Add and residual Add, in either order, at
+                     * most one of each. Both must be NHWC-effective so no
+                     * layout convert would have sat between conv and Add. */
+                    while (cursor < model->info.node_count &&
+                           (post_bias == NULL || residual_tensor == UINT32_MAX)) {
+                        const uint8_t* add = node_bytes(model, cursor);
+                        uint32_t left;
+                        uint32_t right;
+                        uint32_t other;
+                        uint32_t add_out;
+                        uint32_t root;
+                        lw_x64_det_value* other_value;
+                        if (lwm_read_u16(add) != LW_OP_ADD ||
+                            lwm_read_u16(add + 2u) != 2u ||
+                            node_eff_layout(program, cursor) != LW_X64_DET_LAYOUT_NHWC ||
+                            det_tensor_consumer_count(model, current) != 1u) {
+                            break;
+                        }
+                        left = lwm_read_u32(add + 8u);
+                        right = lwm_read_u32(add + 12u);
+                        other = left == current ? right
+                            : right == current ? left : UINT32_MAX;
+                        if (other == UINT32_MAX || other == current) break;
+                        add_out = lwm_read_u32(add + 40u);
+                        if (add_out == current ||
+                            program->values[add_out].bytes != current_bytes ||
+                            program->values[add_out].alias != 0u) {
+                            break;
+                        }
+                        root = resolve_alias_root(program, other);
+                        other_value = &program->values[root];
+                        if (other_value->constant_data != NULL) {
+                            if (post_bias != NULL ||
+                                other_value->bytes !=
+                                    (uint64_t)conv_op->data.conv.output_channels *
+                                        sizeof(float)) {
+                                break;
+                            }
+                            post_bias = other_value->constant_data;
+                        } else {
+                            if (residual_tensor != UINT32_MAX ||
+                                other_value->bytes != current_bytes ||
+                                other_value->layout != LW_X64_DET_LAYOUT_NHWC) {
+                                break;
+                            }
+                            residual_tensor = root;
+                        }
+                        intermediates[intermediate_count++] = current;
+                        current = add_out;
+                        final_out = add_out;
+                        ++consumed;
+                        ++cursor;
+                    }
+                    /* Relu or five-node exact-GELU chain after the adds. The
+                     * GELU chain reads its input twice (Div and outer Mul),
+                     * so require every consumer to live inside the chain. */
+                    if (cursor < model->info.node_count) {
+                        const uint8_t* next = node_bytes(model, cursor);
+                        if (lwm_read_u16(next) == LW_OP_RELU &&
+                            lwm_read_u32(next + 8u) == current &&
+                            det_tensor_consumer_count(model, current) == 1u) {
+                            intermediates[intermediate_count++] = current;
+                            activation = LW_NHWC_ACT_RELU;
+                            final_out = lwm_read_u32(next + 40u);
+                            ++consumed;
+                        } else {
+                            lw_fused_gelu_match match;
+                            if (cursor + 5u <= model->info.node_count &&
+                                lw_match_fused_gelu(session, cursor, &match) &&
+                                match.inputs[0][0] == current &&
+                                fused_gelu_temporaries_private(model, cursor, &match) &&
+                                det_tensor_consumed_within(model, current, cursor, 5u)) {
+                                intermediates[intermediate_count++] = current;
+                                activation = LW_NHWC_ACT_GELU;
+                                final_out = match.outputs[4];
+                                consumed += 5u;
+                            }
+                        }
+                    }
+                    if (consumed > 0u) {
+                        uint32_t k;
+                        conv_op->data.conv.post_bias = post_bias;
+                        if (residual_tensor != UINT32_MAX) {
+                            conv_op->data.conv.has_residual = 1u;
+                            conv_op->data.conv.residual_offset =
+                                det_slot_offset(program, residual_tensor,
+                                                LW_X64_DET_LAYOUT_NHWC);
+                            if (program->values[residual_tensor].last_use <
+                                (int32_t)(physical - 1u)) {
+                                program->values[residual_tensor].last_use =
+                                    (int32_t)(physical - 1u);
+                            }
+                        }
+                        conv_op->data.conv.activation = activation;
                         conv_op->data.conv.output_offset =
-                            program->values[relu_output].offset;
-                        program->values[conv_output].producer = -1;
-                        program->values[conv_output].last_use = -1;
-                        program->values[relu_output].producer = (int32_t)(physical - 1u);
-                        ++program->semantic_elided;
-                        ++i;
+                            program->values[final_out].offset;
+                        conv_op->semantic_count = (uint16_t)(1u + consumed);
+                        for (k = 0u; k < intermediate_count; ++k) {
+                            program->values[intermediates[k]].producer = -1;
+                            program->values[intermediates[k]].last_use = -1;
+                        }
+                        program->values[final_out].producer = (int32_t)(physical - 1u);
+                        program->semantic_elided += consumed;
+                        i += consumed;
                         continue;
                     }
                 }

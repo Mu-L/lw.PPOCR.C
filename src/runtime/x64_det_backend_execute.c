@@ -30,8 +30,10 @@ static float* offset_ptr(lw_x64_det_instance* instance, uint64_t offset) {
 /* Defined below; the shard machinery sits between these and the op loop. */
 static lw_scalar_binary_op binary_operation(uint16_t operation);
 static void scalar_nhwc_conv_row_range(const lw_x64_det_conv_op* conv, const float* input,
-                                       float* output, uint32_t row_begin, uint32_t row_end);
-static void scalar_nhwc_conv(const lw_x64_det_conv_op* conv, const float* input, float* output);
+                                       float* output, uint32_t row_begin, uint32_t row_end,
+                                       const float* post_bias, const float* residual);
+static void scalar_nhwc_conv(const lw_x64_det_conv_op* conv, const float* input, float* output,
+                             const float* post_bias, const float* residual);
 static void scalar_nhwc_batch_norm(const lw_x64_det_affine_op* affine, const float* input,
                                    float* output);
 
@@ -48,6 +50,8 @@ typedef struct lw_x64_det_run_state {
  * pool size (16). */
 #define LW_X64_DET_CONV_SHARD_MACS UINT64_C(2000000)
 #define LW_X64_DET_DEPTHWISE_SHARD_MACS UINT64_C(1000000)
+#define LW_X64_DET_ELEMENTWISE_SHARD_ELEMS UINT64_C(131072)
+#define LW_X64_DET_CONCAT_SHARD_PIXELS UINT64_C(8192)
 
 static uint64_t conv_macs(const lw_x64_det_conv_op* conv) {
     uint64_t macs = (uint64_t)conv->output_channels * conv->input_channels *
@@ -70,6 +74,8 @@ static uint32_t det_shard_workers(const lw_x64_det_run_state* state, uint64_t ma
         ? LW_PARALLEL_MAX_WORKERS : state->worker_count;
 }
 
+static lw_scalar_binary_op binary_operation(uint16_t operation);
+
 /* Shard worker context: one physical op, per-kind subranges. Whole-tile and
  * whole-row partitioning keeps every output element computed by exactly one
  * worker in the same summation order as the serial run (bit-identical). */
@@ -78,15 +84,26 @@ typedef enum lw_x64_det_shard_kind {
     LW_X64_DET_SHARD_DENSE_ROWS = 2,
     LW_X64_DET_SHARD_DEPTHWISE_ROWS = 3,
     LW_X64_DET_SHARD_CT16_ROWS = 4,
-    LW_X64_DET_SHARD_CTC1_ROWS = 5
+    LW_X64_DET_SHARD_CTC1_ROWS = 5,
+    LW_X64_DET_SHARD_BINARY_SAME = 6,
+    LW_X64_DET_SHARD_BINARY_SCALAR = 7,
+    LW_X64_DET_SHARD_BINARY_CHANNEL = 8,
+    LW_X64_DET_SHARD_SIGMOID = 9,
+    LW_X64_DET_SHARD_CONCAT_NHWC = 10,
+    LW_X64_DET_SHARD_POOL_NCHW_CHANNELS = 11,
+    LW_X64_DET_SHARD_POOL_NHWC_ROWS = 12,
+    LW_X64_DET_SHARD_REDUCE_CHANNELS = 13
 } lw_x64_det_shard_kind;
 
 typedef struct lw_x64_det_shard_ctx {
     uint16_t kind;
     uint16_t pointwise_kernel;
     const lw_x64_det_op* op;
+    lw_x64_det_instance* instance;
     const float* input;
+    const float* input2;
     float* output_base;
+    uint8_t binary_left_is_channel;
     lw_nhwc_epilogue epilogue;
     uint32_t items;
     uint32_t dense_kc;
@@ -102,37 +119,42 @@ static void det_shard_worker(void* opaque, uint32_t worker_index, uint32_t worke
     uint32_t end;
     ctx->statuses[worker_index] = LW_STATUS_OK;
     switch (ctx->kind) {
-    case LW_X64_DET_SHARD_POINTWISE_SPATIAL:
+    case LW_X64_DET_SHARD_POINTWISE_SPATIAL: {
+        lw_nhwc_epilogue ep = ctx->epilogue;
         begin = (uint32_t)(((uint64_t)ctx->items * worker_index) / worker_count);
         end = (uint32_t)(((uint64_t)ctx->items * (worker_index + 1u)) / worker_count);
         if (begin >= end) return;
+        /* The pointwise kernels index the residual by slice-local pixel, so
+         * advance it to this worker's first pixel (same offset as output). */
+        if (ep.residual != NULL) ep.residual += (size_t)begin * conv->output_channels;
         switch (ctx->pointwise_kernel) {
         case LW_X64_DET_PW_4X16:
             lw_avx2_fma_nhwc_pointwise_4x16_f32(
                 ctx->input + (size_t)begin * conv->input_channels, conv->packed_weights,
-                &ctx->epilogue, ctx->output_base + (size_t)begin * conv->output_channels,
+                &ep, ctx->output_base + (size_t)begin * conv->output_channels,
                 end - begin, conv->input_channels, conv->output_channels);
             break;
         case LW_X64_DET_PW_3X32:
             lw_avx2_fma_nhwc_pointwise_3x32_f32(
                 ctx->input + (size_t)begin * conv->input_channels, conv->packed_weights,
-                &ctx->epilogue, ctx->output_base + (size_t)begin * conv->output_channels,
+                &ep, ctx->output_base + (size_t)begin * conv->output_channels,
                 end - begin, conv->input_channels, conv->output_channels);
             break;
         case LW_X64_DET_PW_2X32:
             lw_avx2_fma_nhwc_pointwise_2x32_f32(
                 ctx->input + (size_t)begin * conv->input_channels, conv->packed_weights,
-                &ctx->epilogue, ctx->output_base + (size_t)begin * conv->output_channels,
+                &ep, ctx->output_base + (size_t)begin * conv->output_channels,
                 end - begin, conv->input_channels, conv->output_channels);
             break;
         default:
             lw_avx2_fma_nhwc_pointwise_f32(
                 ctx->input + (size_t)begin * conv->input_channels, conv->packed_weights,
-                &ctx->epilogue, ctx->output_base + (size_t)begin * conv->output_channels,
+                &ep, ctx->output_base + (size_t)begin * conv->output_channels,
                 end - begin, conv->input_channels, conv->output_channels);
             break;
         }
         break;
+    }
     case LW_X64_DET_SHARD_DENSE_ROWS: {
         begin = (uint32_t)(((uint64_t)ctx->items * worker_index) / worker_count);
         end = (uint32_t)(((uint64_t)ctx->items * (worker_index + 1u)) / worker_count);
@@ -156,13 +178,22 @@ static void det_shard_worker(void* opaque, uint32_t worker_index, uint32_t worke
         desc.pad_right = conv->pad_right;
         desc.dense_kc = ctx->dense_kc;
         desc.output_row_offset = begin;
-        ctx->statuses[worker_index] = lw_avx2_fma_nhwc_dense_f32(
-            ctx->input, conv->packed_weights, &ctx->epilogue,
-            ctx->output_base + (size_t)begin * conv->output_width * conv->output_channels,
-            &desc, ctx->scratch_base + (size_t)worker_index * ctx->scratch_bytes,
-            ctx->scratch_bytes);
+        {
+            lw_nhwc_epilogue ep = ctx->epilogue;
+            /* The dense kernel indexes the residual by slice-local row, so
+             * advance it to this worker's first row (same offset as output). */
+            if (ep.residual != NULL) {
+                ep.residual += (size_t)begin * conv->output_width * conv->output_channels;
+            }
+            ctx->statuses[worker_index] = lw_avx2_fma_nhwc_dense_f32(
+                ctx->input, conv->packed_weights, &ep,
+                ctx->output_base + (size_t)begin * conv->output_width * conv->output_channels,
+                &desc, ctx->scratch_base + (size_t)worker_index * ctx->scratch_bytes,
+                ctx->scratch_bytes);
+        }
         if (ctx->statuses[worker_index] != LW_STATUS_OK) {
-            scalar_nhwc_conv_row_range(conv, ctx->input, ctx->output_base, begin, end);
+            scalar_nhwc_conv_row_range(conv, ctx->input, ctx->output_base, begin, end,
+                                       ctx->epilogue.post_bias, ctx->epilogue.residual);
             ctx->statuses[worker_index] = LW_STATUS_OK;
         }
         break;
@@ -193,7 +224,8 @@ static void det_shard_worker(void* opaque, uint32_t worker_index, uint32_t worke
             ctx->output_base + (size_t)begin * conv->output_width * conv->output_channels,
             &desc);
         if (ctx->statuses[worker_index] != LW_STATUS_OK) {
-            scalar_nhwc_conv_row_range(conv, ctx->input, ctx->output_base, begin, end);
+            scalar_nhwc_conv_row_range(conv, ctx->input, ctx->output_base, begin, end,
+                                       NULL, NULL);
             ctx->statuses[worker_index] = LW_STATUS_OK;
         }
         break;
@@ -225,6 +257,149 @@ static void det_shard_worker(void* opaque, uint32_t worker_index, uint32_t worke
                 ct->packed_weights, &ctx->epilogue,
                 ctx->output_base + (size_t)(begin * 2u) * desc.output_width *
                     desc.output_channels, &desc);
+        }
+        break;
+    }
+    case LW_X64_DET_SHARD_BINARY_SAME:
+    case LW_X64_DET_SHARD_BINARY_SCALAR:
+    case LW_X64_DET_SHARD_SIGMOID: {
+        uint64_t element_begin = ((uint64_t)ctx->items * worker_index) / worker_count;
+        uint64_t element_end = ((uint64_t)ctx->items * (worker_index + 1u)) / worker_count;
+        if (element_begin >= element_end) return;
+        if (ctx->kind == LW_X64_DET_SHARD_SIGMOID) {
+            ctx->statuses[worker_index] = lw_scalar_sigmoid_f32(
+                ctx->input + element_begin, ctx->output_base + element_begin,
+                element_end - element_begin);
+        } else if (ctx->kind == LW_X64_DET_SHARD_BINARY_SCALAR) {
+            lw_avx2_binary_right_scalar_f32(
+                binary_operation(ctx->op->data.binary.operation),
+                ctx->input + element_begin, ctx->op->data.binary.right_constant[0],
+                ctx->output_base + element_begin, element_end - element_begin);
+        } else {
+            lw_avx2_binary_contiguous_f32(
+                binary_operation(ctx->op->data.binary.operation),
+                ctx->input + element_begin, ctx->input2 + element_begin,
+                ctx->output_base + element_begin, element_end - element_begin);
+        }
+        break;
+    }
+    case LW_X64_DET_SHARD_BINARY_CHANNEL: {
+        uint32_t channels = ctx->op->data.binary.channels;
+        begin = (uint32_t)(((uint64_t)ctx->items * worker_index) / worker_count);
+        end = (uint32_t)(((uint64_t)ctx->items * (worker_index + 1u)) / worker_count);
+        if (begin >= end) return;
+        lw_avx2_binary_channel_f32(binary_operation(ctx->op->data.binary.operation),
+                                   ctx->input + (size_t)begin * channels, ctx->input2,
+                                   ctx->output_base + (size_t)begin * channels,
+                                   (uint64_t)(end - begin), channels,
+                                   ctx->binary_left_is_channel);
+        break;
+    }
+    case LW_X64_DET_SHARD_CONCAT_NHWC: {
+        const float* inputs[LWM_V0_MAX_NODE_INPUTS];
+        uint32_t input_slot;
+        uint32_t output_channels = 0u;
+        uint64_t pixel;
+        begin = (uint32_t)(((uint64_t)ctx->items * worker_index) / worker_count);
+        end = (uint32_t)(((uint64_t)ctx->items * (worker_index + 1u)) / worker_count);
+        if (begin >= end) return;
+        for (input_slot = 0u; input_slot < ctx->op->data.concat.input_count; ++input_slot) {
+            inputs[input_slot] =
+                offset_ptr(ctx->instance, ctx->op->data.concat.input_offsets[input_slot]);
+            if (inputs[input_slot] == NULL) {
+                ctx->statuses[worker_index] = LW_STATUS_INVALID_ARGUMENT;
+                return;
+            }
+            output_channels += (uint32_t)ctx->op->data.concat.input_dimensions[input_slot][1];
+        }
+        for (pixel = begin; pixel < end; ++pixel) {
+            float* destination = ctx->output_base + (size_t)pixel * output_channels;
+            for (input_slot = 0u; input_slot < ctx->op->data.concat.input_count; ++input_slot) {
+                uint32_t channels =
+                    (uint32_t)ctx->op->data.concat.input_dimensions[input_slot][1];
+                memcpy(destination, inputs[input_slot] + (size_t)pixel * channels,
+                       (size_t)channels * sizeof(float));
+                destination += channels;
+            }
+        }
+        break;
+    }
+    case LW_X64_DET_SHARD_POOL_NCHW_CHANNELS: {
+        int32_t input_dims[4];
+        int32_t output_dims[4];
+        size_t input_slice;
+        size_t output_slice;
+        begin = (uint32_t)(((uint64_t)ctx->items * worker_index) / worker_count);
+        end = (uint32_t)(((uint64_t)ctx->items * (worker_index + 1u)) / worker_count);
+        if (begin >= end) return;
+        memcpy(input_dims, ctx->op->data.pool.input_dimensions, sizeof(input_dims));
+        memcpy(output_dims, ctx->op->data.pool.output_dimensions, sizeof(output_dims));
+        input_slice = (size_t)input_dims[2] * (size_t)input_dims[3];
+        output_slice = (size_t)output_dims[2] * (size_t)output_dims[3];
+        input_dims[1] = (int32_t)(end - begin);
+        output_dims[1] = (int32_t)(end - begin);
+        ctx->statuses[worker_index] = ctx->op->kind == LW_X64_DET_OP_MAX_POOL
+            ? lw_scalar_max_pool2d_f32(ctx->input + (size_t)begin * input_slice,
+                                       ctx->output_base + (size_t)begin * output_slice,
+                                       input_dims, output_dims, ctx->op->data.pool.kernel,
+                                       ctx->op->data.pool.strides, ctx->op->data.pool.pads, 0u)
+            : lw_scalar_average_pool2d_f32(ctx->input + (size_t)begin * input_slice,
+                                           ctx->output_base + (size_t)begin * output_slice,
+                                           input_dims, output_dims, ctx->op->data.pool.kernel,
+                                           ctx->op->data.pool.strides, ctx->op->data.pool.pads, 0u,
+                                           ctx->op->data.pool.count_include_pad);
+        break;
+    }
+    case LW_X64_DET_SHARD_POOL_NHWC_ROWS: {
+        uint32_t channels = (uint32_t)ctx->op->data.pool.input_dimensions[3];
+        uint32_t input_width = (uint32_t)ctx->op->data.pool.input_dimensions[2];
+        uint32_t output_width = (uint32_t)ctx->op->data.pool.output_dimensions[2];
+        uint32_t stride_h = (uint32_t)ctx->op->data.pool.strides[0];
+        uint32_t pad_top = (uint32_t)ctx->op->data.pool.pads[0];
+        const float* input = ctx->input;
+        uint32_t input_height = (uint32_t)ctx->op->data.pool.input_dimensions[1];
+        uint32_t pad = pad_top;
+        begin = (uint32_t)(((uint64_t)ctx->items * worker_index) / worker_count);
+        end = (uint32_t)(((uint64_t)ctx->items * (worker_index + 1u)) / worker_count);
+        if (begin >= end) return;
+        if (begin > 0u) {
+            uint32_t row_offset = begin * stride_h - pad_top;
+            input = ctx->input + (size_t)row_offset * input_width * channels;
+            input_height -= row_offset;
+            pad = 0u;
+        }
+        lw_avx2_nhwc_pool_f32(
+            input, ctx->output_base + (size_t)begin * output_width * channels, 1u,
+            input_height, input_width, end - begin, output_width, channels,
+            (uint32_t)ctx->op->data.pool.kernel[0], (uint32_t)ctx->op->data.pool.kernel[1],
+            stride_h, (uint32_t)ctx->op->data.pool.strides[1], pad,
+            (uint32_t)ctx->op->data.pool.pads[1], ctx->op->data.pool.count_include_pad,
+            ctx->op->data.pool.is_max);
+        break;
+    }
+    case LW_X64_DET_SHARD_REDUCE_CHANNELS: {
+        uint32_t channels = ctx->op->data.reduce.channels;
+        uint32_t height = ctx->op->data.reduce.height;
+        uint32_t width = ctx->op->data.reduce.width;
+        begin = (uint32_t)(((uint64_t)ctx->items * worker_index) / worker_count);
+        end = (uint32_t)(((uint64_t)ctx->items * (worker_index + 1u)) / worker_count);
+        if (begin >= end) return;
+        if (ctx->op->data.reduce.layout == LW_X64_DET_LAYOUT_NCHW) {
+            uint32_t channel;
+            for (channel = begin; channel < end; ++channel) {
+                const float* source = ctx->input + (size_t)channel * height * width;
+                float sum = 0.0f;
+                uint32_t spatial;
+                for (spatial = 0u; spatial < height * width; ++spatial) {
+                    sum += source[spatial];
+                }
+                ctx->output_base[channel] = sum / (float)(height * width);
+            }
+        } else {
+            lw_avx2_nhwc_reduce_mean_hw_strided_f32(
+                ctx->input + begin, ctx->output_base + begin,
+                ctx->op->data.reduce.batch, height, width, end - begin,
+                channels, channels);
         }
         break;
     }
@@ -293,6 +468,39 @@ static lw_status run_sharded_conv(lw_x64_det_instance* instance, const lw_x64_de
     return LW_STATUS_OK;
 }
 
+/* Elementwise-style sharding: every output element is computed independently
+ * by the same per-element kernel as the serial path, so splitting the
+ * contiguous range keeps results bit-identical. Returns LW_STATUS_UNSUPPORTED
+ * when the op is too small or no pool is available and the caller must run
+ * the serial kernel instead. */
+static lw_status run_sharded_elementwise(lw_x64_det_instance* instance,
+                                         const lw_x64_det_op* op,
+                                         const lw_x64_det_run_state* state,
+                                         uint16_t shard_kind, const float* input,
+                                         const float* input2, float* output, uint64_t items,
+                                         uint64_t threshold, int binary_left_is_channel) {
+    lw_x64_det_shard_ctx ctx;
+    uint32_t workers;
+    uint32_t w;
+    if (items > UINT32_MAX) return LW_STATUS_UNSUPPORTED;
+    workers = det_shard_workers(state, items, threshold);
+    if (workers <= 1u) return LW_STATUS_UNSUPPORTED;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.kind = shard_kind;
+    ctx.op = op;
+    ctx.instance = instance;
+    ctx.input = input;
+    ctx.input2 = input2;
+    ctx.output_base = output;
+    ctx.items = (uint32_t)items;
+    ctx.binary_left_is_channel = (uint8_t)binary_left_is_channel;
+    lw_thread_pool_run(state->pool, workers, det_shard_worker, &ctx);
+    for (w = 0u; w < workers; ++w) {
+        if (ctx.statuses[w] != LW_STATUS_OK) return ctx.statuses[w];
+    }
+    return LW_STATUS_OK;
+}
+
 static lw_scalar_binary_op binary_operation(uint16_t operation) {
     switch (operation) {
     case LW_OP_ADD: return LW_SCALAR_BINARY_ADD;
@@ -304,7 +512,8 @@ static lw_scalar_binary_op binary_operation(uint16_t operation) {
 }
 
 static void scalar_nhwc_conv_row_range(const lw_x64_det_conv_op* conv, const float* input,
-                                       float* output, uint32_t row_begin, uint32_t row_end) {
+                                       float* output, uint32_t row_begin, uint32_t row_end,
+                                       const float* post_bias, const float* residual) {
     uint32_t oy, ox, oc, ky, kx, ic;
     for (oy = row_begin; oy < row_end; ++oy) {
         for (ox = 0u; ox < conv->output_width; ++ox) {
@@ -329,7 +538,13 @@ static void scalar_nhwc_conv_row_range(const lw_x64_det_conv_op* conv, const flo
                         }
                     }
                 }
+                if (post_bias != NULL) sum += post_bias[oc];
+                if (residual != NULL) {
+                    sum += residual[((size_t)oy * conv->output_width + ox) *
+                                    conv->output_channels + oc];
+                }
                 if (conv->activation == LW_NHWC_ACT_RELU && sum < 0.0f) sum = 0.0f;
+                else if (conv->activation == LW_NHWC_ACT_GELU) sum = lw_nhwc_gelu_scalar_exact_f32(sum);
                 output[((size_t)oy * conv->output_width + ox) * conv->output_channels + oc] = sum;
             }
         }
@@ -337,8 +552,9 @@ static void scalar_nhwc_conv_row_range(const lw_x64_det_conv_op* conv, const flo
 }
 
 static void scalar_nhwc_conv(const lw_x64_det_conv_op* conv, const float* input,
-                             float* output) {
-    scalar_nhwc_conv_row_range(conv, input, output, 0u, conv->output_height);
+                             float* output, const float* post_bias, const float* residual) {
+    scalar_nhwc_conv_row_range(conv, input, output, 0u, conv->output_height,
+                               post_bias, residual);
 }
 
 static void scalar_nhwc_batch_norm(const lw_x64_det_affine_op* affine, const float* input,
@@ -460,6 +676,11 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
         output = offset_ptr(instance, op->data.conv.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
         ep.bias = op->data.conv.bias;
+        ep.post_bias = op->data.conv.post_bias;
+        if (op->data.conv.has_residual) {
+            ep.residual = offset_ptr(instance, op->data.conv.residual_offset);
+            if (ep.residual == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        }
         if (workers > 1u) {
             /* The pointwise kernels write tightly packed pixel rows. Shard by
              * pixels so each worker keeps the full NHWC output-channel stride. */
@@ -516,9 +737,14 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
         memset(&ep, 0, sizeof(ep));
         ep.bias = op->data.conv.bias;
         ep.activation = op->data.conv.activation;
+        ep.post_bias = op->data.conv.post_bias;
         input = offset_ptr(instance, op->data.conv.input_offset);
         output = offset_ptr(instance, op->data.conv.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        if (op->data.conv.has_residual) {
+            ep.residual = offset_ptr(instance, op->data.conv.residual_offset);
+            if (ep.residual == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        }
         if (det_shard_workers(state, conv_macs(&op->data.conv),
                               LW_X64_DET_CONV_SHARD_MACS) > 1u &&
             op->data.conv.output_height > 1u) {
@@ -529,7 +755,7 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
             input, op->data.conv.packed_weights, &ep, output, &desc,
             instance->scratch, op->data.conv.scratch_bytes);
         if (status == LW_STATUS_OK) return LW_STATUS_OK;
-        scalar_nhwc_conv(&op->data.conv, input, output);
+        scalar_nhwc_conv(&op->data.conv, input, output, ep.post_bias, ep.residual);
         return LW_STATUS_OK;
     }
     case LW_X64_DET_OP_DEPTHWISE: {
@@ -563,7 +789,7 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
         status = lw_avx2_fma_nhwc_depthwise_f32(input, op->data.conv.packed_weights,
                                                 op->data.conv.bias, output, &desc);
         if (status == LW_STATUS_OK) return LW_STATUS_OK;
-        scalar_nhwc_conv(&op->data.conv, input, output);
+        scalar_nhwc_conv(&op->data.conv, input, output, NULL, NULL);
         return LW_STATUS_OK;
     }
     case LW_X64_DET_OP_LAYOUT_CONVERT:
@@ -651,6 +877,12 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
         input = offset_ptr(instance, op->data.unary.input_offset);
         output = offset_ptr(instance, op->data.unary.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        if (state != NULL) {
+            lw_status sharded = run_sharded_elementwise(
+                instance, op, state, LW_X64_DET_SHARD_SIGMOID, input, NULL, output,
+                op->data.unary.element_count, LW_X64_DET_ELEMENTWISE_SHARD_ELEMS, 0);
+            if (sharded != LW_STATUS_UNSUPPORTED) return sharded;
+        }
         return lw_scalar_sigmoid_f32(input, output, op->data.unary.element_count);
     case LW_X64_DET_OP_CONCAT_NCHW: {
         const float* inputs[LWM_V0_MAX_NODE_INPUTS];
@@ -692,6 +924,12 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
                       (uint64_t)(uint32_t)op->data.concat.input_dimensions[0][3];
         output = offset_ptr(instance, op->data.concat.output_offset);
         if (output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        if (state != NULL) {
+            lw_status sharded = run_sharded_elementwise(
+                instance, op, state, LW_X64_DET_SHARD_CONCAT_NHWC, NULL, NULL, output,
+                pixel_count, LW_X64_DET_CONCAT_SHARD_PIXELS, 0);
+            if (sharded != LW_STATUS_UNSUPPORTED) return sharded;
+        }
         for (pixel = 0u; pixel < pixel_count; ++pixel) {
             float* destination = output + (size_t)pixel * output_channels;
             for (input_slot = 0u; input_slot < op->data.concat.input_count; ++input_slot) {
@@ -748,6 +986,14 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
                 ? (float*)(uintptr_t)op->data.binary.left_constant
                 : offset_ptr(instance, op->data.binary.left_offset);
             if (full == NULL || channel == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+            if (state != NULL && op->data.binary.channels > 0u) {
+                uint64_t ch_threshold = LW_X64_DET_ELEMENTWISE_SHARD_ELEMS /
+                                        op->data.binary.channels;
+                lw_status sharded = run_sharded_elementwise(
+                    instance, op, state, LW_X64_DET_SHARD_BINARY_CHANNEL, full, channel, output,
+                    op->data.binary.pixels, ch_threshold < 2u ? 2u : ch_threshold, 1);
+                if (sharded != LW_STATUS_UNSUPPORTED) return sharded;
+            }
             lw_avx2_binary_channel_f32(binary_operation(op->data.binary.operation), full, channel,
                                        output, op->data.binary.pixels, op->data.binary.channels, 1);
             return LW_STATUS_OK;
@@ -755,6 +1001,12 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
         if (op->data.binary.broadcast_kind == LW_X64_DET_BROADCAST_RIGHT_SCALAR &&
             op->data.binary.right_constant != NULL) {
+            if (state != NULL) {
+                lw_status sharded = run_sharded_elementwise(
+                    instance, op, state, LW_X64_DET_SHARD_BINARY_SCALAR, input, NULL, output,
+                    op->data.binary.element_count, LW_X64_DET_ELEMENTWISE_SHARD_ELEMS, 0);
+                if (sharded != LW_STATUS_UNSUPPORTED) return sharded;
+            }
             lw_avx2_binary_right_scalar_f32(binary_operation(op->data.binary.operation), input,
                                             op->data.binary.right_constant[0], output,
                                             op->data.binary.element_count);
@@ -765,6 +1017,12 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
                 ? (float*)(uintptr_t)op->data.binary.right_constant
                 : offset_ptr(instance, op->data.binary.right_offset);
             if (right == NULL) return LW_STATUS_INVALID_ARGUMENT;
+            if (state != NULL) {
+                lw_status sharded = run_sharded_elementwise(
+                    instance, op, state, LW_X64_DET_SHARD_BINARY_SAME, input, right, output,
+                    op->data.binary.element_count, LW_X64_DET_ELEMENTWISE_SHARD_ELEMS, 0);
+                if (sharded != LW_STATUS_UNSUPPORTED) return sharded;
+            }
             lw_avx2_binary_contiguous_f32(binary_operation(op->data.binary.operation), input,
                                           right, output, op->data.binary.element_count);
             return LW_STATUS_OK;
@@ -774,6 +1032,14 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
                 ? (float*)(uintptr_t)op->data.binary.right_constant
                 : offset_ptr(instance, op->data.binary.right_offset);
             if (channel == NULL) return LW_STATUS_INVALID_ARGUMENT;
+            if (state != NULL && op->data.binary.channels > 0u) {
+                uint64_t ch_threshold = LW_X64_DET_ELEMENTWISE_SHARD_ELEMS /
+                                        op->data.binary.channels;
+                lw_status sharded = run_sharded_elementwise(
+                    instance, op, state, LW_X64_DET_SHARD_BINARY_CHANNEL, input, channel, output,
+                    op->data.binary.pixels, ch_threshold < 2u ? 2u : ch_threshold, 0);
+                if (sharded != LW_STATUS_UNSUPPORTED) return sharded;
+            }
             lw_avx2_binary_channel_f32(binary_operation(op->data.binary.operation), input, channel,
                                        output, op->data.binary.pixels, op->data.binary.channels, 0);
             return LW_STATUS_OK;
@@ -814,6 +1080,15 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
         input = offset_ptr(instance, op->data.reduce.input_offset);
         output = offset_ptr(instance, op->data.reduce.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        if (state != NULL && op->data.reduce.channels > 1u &&
+            (uint64_t)op->data.reduce.batch * op->data.reduce.channels *
+                    op->data.reduce.height * op->data.reduce.width >=
+                LW_X64_DET_ELEMENTWISE_SHARD_ELEMS) {
+            lw_status sharded = run_sharded_elementwise(
+                instance, op, state, LW_X64_DET_SHARD_REDUCE_CHANNELS, input, NULL,
+                output, op->data.reduce.channels, 2u, 0);
+            if (sharded != LW_STATUS_UNSUPPORTED) return sharded;
+        }
         if (op->data.reduce.layout == LW_X64_DET_LAYOUT_NCHW) {
             uint32_t channel;
             for (channel = 0u; channel < op->data.reduce.channels; ++channel) {
@@ -838,6 +1113,17 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
         output = offset_ptr(instance, op->data.pool.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
         if (op->data.pool.layout == LW_X64_DET_LAYOUT_NCHW) {
+            if (state != NULL && op->data.pool.input_dimensions[0] == 1 &&
+                op->data.pool.input_dimensions[1] > 1 &&
+                (uint64_t)op->data.pool.input_dimensions[1] *
+                        (uint64_t)op->data.pool.input_dimensions[2] *
+                        (uint64_t)op->data.pool.input_dimensions[3] >=
+                    LW_X64_DET_ELEMENTWISE_SHARD_ELEMS) {
+                lw_status sharded = run_sharded_elementwise(
+                    instance, op, state, LW_X64_DET_SHARD_POOL_NCHW_CHANNELS, input, NULL,
+                    output, (uint64_t)op->data.pool.input_dimensions[1], 2u, 0);
+                if (sharded != LW_STATUS_UNSUPPORTED) return sharded;
+            }
             return op->kind == LW_X64_DET_OP_MAX_POOL
                 ? lw_scalar_max_pool2d_f32(input, output, op->data.pool.input_dimensions,
                                            op->data.pool.output_dimensions, op->data.pool.kernel,
@@ -846,6 +1132,18 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
                                                op->data.pool.output_dimensions, op->data.pool.kernel,
                                                op->data.pool.strides, op->data.pool.pads, 0u,
                                                op->data.pool.count_include_pad);
+        }
+        if (state != NULL && op->data.pool.input_dimensions[0] == 1 &&
+            op->data.pool.strides[0] >= op->data.pool.pads[0] &&
+            op->data.pool.output_dimensions[1] > 1 &&
+            (uint64_t)op->data.pool.input_dimensions[1] *
+                    (uint64_t)op->data.pool.input_dimensions[2] *
+                    (uint64_t)op->data.pool.input_dimensions[3] >=
+                LW_X64_DET_ELEMENTWISE_SHARD_ELEMS) {
+            lw_status sharded = run_sharded_elementwise(
+                instance, op, state, LW_X64_DET_SHARD_POOL_NHWC_ROWS, input, NULL, output,
+                (uint64_t)op->data.pool.output_dimensions[1], 2u, 0);
+            if (sharded != LW_STATUS_UNSUPPORTED) return sharded;
         }
         lw_avx2_nhwc_pool_f32(input, output, (uint32_t)op->data.pool.input_dimensions[0],
                               (uint32_t)op->data.pool.input_dimensions[1],

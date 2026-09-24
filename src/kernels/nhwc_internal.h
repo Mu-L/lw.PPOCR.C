@@ -26,7 +26,17 @@ typedef struct lw_nhwc_epilogue {
     uint16_t reserved;
     float alpha;
     float beta;
+    /* Optional channel bias folded from a separate Add node. Applied to the
+     * finished accumulator AFTER accumulation (and before residual and
+     * activation), preserving the bit-exact conv -> add -> ... ordering. */
+    const float* post_bias;
 } lw_nhwc_epilogue;
+
+float lw_nhwc_gelu_scalar_exact_f32(float value);
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#include <immintrin.h>
+__m256 lw_nhwc_avx2_gelu_vector_exact_f32(__m256 value);
+#endif
 
 int lw_nhwc_dense_packed_weight_count(uint32_t input_channels,
                                       uint32_t output_channels,
@@ -103,6 +113,10 @@ typedef struct lw_nhwc_depthwise_desc {
     /* Optional sharded-row range: output rows [offset, offset + output_height)
      * of the full output. Zero keeps the whole-output serial semantics. */
     uint32_t output_row_offset;
+    /* Optional channel bias folded from a separate Add node: the accumulator
+     * starts at zero (bias stays NULL) and post_bias is added lane-exactly
+     * before the store, matching a standalone Add pass bit for bit. */
+    const float* post_bias;
 } lw_nhwc_depthwise_desc;
 
 int lw_nhwc_depthwise_packed_weight_count(uint32_t channels,
@@ -177,6 +191,14 @@ void lw_avx2_nchw_affine_f32(const float* input, const float* mul, const float* 
 void lw_avx2_nhwc_reduce_mean_hw_f32(const float* input, float* output,
                                      uint32_t batch, uint32_t height,
                                      uint32_t width, uint32_t channels);
+/* Channel-group variant for sharded execution: processes channels
+ * [0, channels) of a tensor whose rows are input_stride wide, writing to
+ * output rows of output_stride. Per-channel pixel visit order is identical
+ * to lw_avx2_nhwc_reduce_mean_hw_f32, so results are bit-identical. */
+void lw_avx2_nhwc_reduce_mean_hw_strided_f32(const float* input, float* output,
+                                             uint32_t batch, uint32_t height,
+                                             uint32_t width, uint32_t channels,
+                                             uint32_t input_stride, uint32_t output_stride);
 void lw_avx2_nhwc_pool_f32(const float* input, float* output,
                            uint32_t batch, uint32_t input_height,
                            uint32_t input_width, uint32_t output_height,

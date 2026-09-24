@@ -47,6 +47,12 @@ static void depthwise_block32(const float* input, const float* weights, const fl
     }
     float* destination = output + (((size_t)output_y * desc->output_width + output_x) *
                                    desc->channels + channel_base);
+    if (desc->post_bias != NULL) {
+        for (uint32_t lane = 0u; lane < vector_count; ++lane) {
+            sums[lane] = _mm256_add_ps(sums[lane],
+                _mm256_loadu_ps(desc->post_bias + channel_base + lane * 8u));
+        }
+    }
     for (uint32_t lane = 0u; lane < vector_count; ++lane) _mm256_storeu_ps(destination + lane * 8u, sums[lane]);
 }
 #endif
@@ -100,6 +106,13 @@ static void depthwise_block32_x2(const float* input, const float* weights, const
     float* destination0 = output + (((size_t)output_y * desc->output_width + output_x) *
         desc->channels + channel_base);
     float* destination1 = destination0 + desc->channels;
+    if (desc->post_bias != NULL) {
+        for (uint32_t lane = 0u; lane < 4u; ++lane) {
+            __m256 post = _mm256_loadu_ps(desc->post_bias + channel_base + lane * 8u);
+            sum0[lane] = _mm256_add_ps(sum0[lane], post);
+            sum1[lane] = _mm256_add_ps(sum1[lane], post);
+        }
+    }
     for (uint32_t lane = 0u; lane < 4u; ++lane) {
         _mm256_storeu_ps(destination0 + lane * 8u, sum0[lane]);
         _mm256_storeu_ps(destination1 + lane * 8u, sum1[lane]);

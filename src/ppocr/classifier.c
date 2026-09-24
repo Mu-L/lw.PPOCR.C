@@ -8,6 +8,10 @@
 #include "executor_internal.h"
 #include "profile_internal.h"
 
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+#include "x64_rec_backend_internal.h"
+#endif
+
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -25,6 +29,13 @@ struct lw_classifier {
     uint64_t max_image_pixels;
     lw_classifier_info info;
     lw_cls_preprocess_workspace preprocess_workspace;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    /* Compiled x64 backbone (reuses the REC lowering with the CLS input
+     * shape and no CTC tail). NULL when unsupported; the canonical session
+     * above remains the fallback. */
+    lw_x64_rec_program* x64_program;
+    lw_x64_rec_instance* x64_instance;
+#endif
 };
 
 static void clear_result(lw_classification_result* result) {
@@ -178,6 +189,25 @@ lw_status lw_classifier_create(const char* model_path_utf8, const lw_classifier_
     classifier->info.input_height = LW_CLS_INPUT_HEIGHT;
     classifier->info.class_count = LW_CLS_CLASS_COUNT;
     classifier->info.workspace_size = session_info.workspace_size;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    {
+        lw_error backend_error;
+        lw_error_init(&backend_error);
+        if (lw_x64_rec_backend_compile_input(classifier->model, LW_CLS_INPUT_HEIGHT,
+                                             LW_CLS_INPUT_WIDTH, LW_X64_REC_COMPILE_NHWC, 0u,
+                                             &classifier->x64_program,
+                                             &backend_error) != LW_X64_REC_COMPILE_OK ||
+            classifier->x64_program == NULL ||
+            classifier->x64_program->unsupported_nodes != 0u ||
+            lw_x64_rec_instance_create(classifier->x64_program, &classifier->x64_instance,
+                                       &backend_error) != LW_STATUS_OK) {
+            lw_x64_rec_instance_free(classifier->x64_instance);
+            lw_x64_rec_program_free(classifier->x64_program);
+            classifier->x64_instance = NULL;
+            classifier->x64_program = NULL;
+        }
+    }
+#endif
     *out_classifier = classifier;
     lw_set_error(error, LW_STATUS_OK, "");
     return LW_STATUS_OK;
@@ -191,6 +221,10 @@ void lw_classifier_free(lw_classifier* classifier) {
     if (classifier == NULL) {
         return;
     }
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    lw_x64_rec_instance_free(classifier->x64_instance);
+    lw_x64_rec_program_free(classifier->x64_program);
+#endif
     free(classifier->input);
     lw_session_free(classifier->session);
     lw_model_free(classifier->model);
@@ -255,13 +289,51 @@ static lw_status classifier_classify_bgr_u8_impl(lw_classifier* classifier, cons
     lw_pipeline_profile_add_elapsed(profile == NULL ? NULL : &profile->preprocess_nanoseconds,
                                     started, profile);
     started = lw_pipeline_profile_now(profile);
-    status = profile == NULL
-                 ? lw_execute_session_f32(classifier->session, classifier->input,
-                                          classifier->input_element_count,
-                                          classifier->probabilities, LW_CLS_CLASS_COUNT, error)
-                 : lw_execute_session_f32_profiled(
-                       classifier->session, classifier->input, classifier->input_element_count,
-                       classifier->probabilities, LW_CLS_CLASS_COUNT, &profile->execution, error);
+    status = LW_STATUS_UNSUPPORTED;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    if (classifier->x64_instance != NULL) {
+        uint64_t backend_input_count = 0u;
+        float* backend_input =
+            lw_x64_rec_instance_input(classifier->x64_instance, &backend_input_count);
+        if (backend_input != NULL &&
+            backend_input_count == classifier->input_element_count) {
+            /* NCHW planes -> interleaved NHWC; pure data movement, bit-exact. */
+            const uint32_t height = LW_CLS_INPUT_HEIGHT;
+            const uint32_t width = LW_CLS_INPUT_WIDTH;
+            uint32_t y;
+            uint32_t x;
+            for (y = 0u; y < height; ++y) {
+                for (x = 0u; x < width; ++x) {
+                    uint32_t channel;
+                    for (channel = 0u; channel < 3u; ++channel) {
+                        backend_input[((size_t)y * width + x) * 3u + channel] =
+                            classifier->input[((size_t)channel * height + y) * width + x];
+                    }
+                }
+            }
+            status = lw_x64_rec_instance_run(classifier->x64_instance, error);
+            if (status == LW_STATUS_OK) {
+                const lw_x64_rec_program* program = classifier->x64_program;
+                const float* probabilities =
+                    (const float*)(const void*)(classifier->x64_instance->arena +
+                                                (size_t)program->values[program->output_value]
+                                                    .offset);
+                classifier->probabilities[0] = probabilities[0];
+                classifier->probabilities[1] = probabilities[1];
+            }
+        }
+    }
+#endif
+    if (status == LW_STATUS_UNSUPPORTED) {
+        status = profile == NULL
+                     ? lw_execute_session_f32(classifier->session, classifier->input,
+                                              classifier->input_element_count,
+                                              classifier->probabilities, LW_CLS_CLASS_COUNT, error)
+                     : lw_execute_session_f32_profiled(
+                           classifier->session, classifier->input, classifier->input_element_count,
+                           classifier->probabilities, LW_CLS_CLASS_COUNT, &profile->execution,
+                           error);
+    }
     lw_pipeline_profile_add_elapsed(profile == NULL ? NULL : &profile->graph_nanoseconds, started,
                                     profile);
     if (status != LW_STATUS_OK) {

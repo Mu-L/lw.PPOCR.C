@@ -11,15 +11,15 @@
 #include <stdio.h>
 #include <string.h>
 
-static lw_status make_shape_session(const lw_model* model, uint32_t width, lw_session** out,
-                                    lw_error* error) {
+static lw_status make_shape_session(const lw_model* model, uint32_t height, uint32_t width,
+                                    lw_session** out, lw_error* error) {
     lw_tensor_desc input;
     lw_tensor_desc_init(&input);
     input.dtype = LW_DTYPE_F32;
     input.rank = 4u;
     input.dimensions[0] = 1;
     input.dimensions[1] = 3;
-    input.dimensions[2] = 48;
+    input.dimensions[2] = (int32_t)height;
     input.dimensions[3] = (int32_t)width;
     return lw_session_create(model, &input, 1u, NULL, out, error);
 }
@@ -192,6 +192,194 @@ static int fused_gelu_temporaries_private(const lw_model* model, uint32_t node_i
         }
     }
     return 1;
+}
+
+/* Count how many node input slots reference `tensor`; returns UINT32_MAX when
+ * the tensor is also a model output (treat as externally consumed). */
+static uint32_t tensor_use_count(const lw_model* model, uint32_t tensor) {
+    uint32_t uses = 0u;
+    uint32_t node;
+    uint32_t output;
+    for (node = 0u; node < model->info.node_count; ++node) {
+        const uint8_t* current = node_bytes(model, node);
+        uint16_t input_count = lwm_read_u16(current + 2u);
+        uint16_t input_index;
+        for (input_index = 0u; input_index < input_count; ++input_index) {
+            if (lwm_read_u32(current + 8u + (size_t)input_index * sizeof(uint32_t)) == tensor) {
+                ++uses;
+            }
+        }
+    }
+    for (output = 0u; output < model->info.output_count; ++output) {
+        if (lwm_read_u32(model->bytes + (size_t)model->output_offset +
+                         (size_t)output * sizeof(uint32_t)) == tensor) {
+            return UINT32_MAX;
+        }
+    }
+    return uses;
+}
+
+/* True when `tensor` is consumed exactly once, by node `consumer`. */
+static int tensor_single_consumer(const lw_model* model, uint32_t tensor,
+                                  uint32_t consumer) {
+    const uint8_t* consumer_bytes;
+    uint16_t input_count;
+    uint16_t input_index;
+    uint32_t uses_here = 0u;
+    if (tensor_use_count(model, tensor) != 1u) {
+        return 0;
+    }
+    if (consumer >= model->info.node_count) {
+        return 0;
+    }
+    consumer_bytes = node_bytes(model, consumer);
+    input_count = lwm_read_u16(consumer_bytes + 2u);
+    for (input_index = 0u; input_index < input_count; ++input_index) {
+        if (lwm_read_u32(consumer_bytes + 8u + (size_t)input_index * sizeof(uint32_t)) == tensor) {
+            ++uses_here;
+        }
+    }
+    return uses_here == 1u;
+}
+
+/* True when every consumer of `tensor` lies inside the node range
+ * [first, first + span) and the tensor is not a model output. The GELU chain
+ * reads its input twice (Div and the second Mul), so a plain single-consumer
+ * test would reject it. */
+static int tensor_consumed_within(const lw_model* model, uint32_t tensor,
+                                  uint32_t first, uint32_t span) {
+    uint32_t node;
+    uint32_t output;
+    int used = 0;
+    for (node = 0u; node < model->info.node_count; ++node) {
+        const uint8_t* current = node_bytes(model, node);
+        uint16_t input_count = lwm_read_u16(current + 2u);
+        uint16_t input_index;
+        for (input_index = 0u; input_index < input_count; ++input_index) {
+            if (lwm_read_u32(current + 8u + (size_t)input_index * sizeof(uint32_t)) == tensor) {
+                if (node < first || node >= first + span) {
+                    return 0;
+                }
+                used = 1;
+            }
+        }
+    }
+    for (output = 0u; output < model->info.output_count; ++output) {
+        if (lwm_read_u32(model->bytes + (size_t)model->output_offset +
+                         (size_t)output * sizeof(uint32_t)) == tensor) {
+            return 0;
+        }
+    }
+    return used;
+}
+
+/* Conv epilogue folding: after a successfully lowered NHWC conv at semantic
+ * node `node_index`, greedily absorb a trailing channel-bias Add, a residual
+ * Add, and a five-node GELU chain into the conv's fused epilogue. Returns the
+ * number of semantic nodes consumed (1 = nothing folded). Folded operations
+ * are applied by the conv kernels in exactly the original
+ * accumulator -> +bias -> +residual -> activation order, so results stay
+ * bit-identical to the unfused op sequence. On a successful fold this also
+ * performs the lower_ops bookkeeping for the whole span: producer on the
+ * final output and last_use bumps for every consumed input. */
+static uint32_t fold_conv_epilogue(const lw_model* model, const lw_session* session,
+                                   lw_x64_rec_program* program, uint32_t limit,
+                                   uint32_t node_index, lw_x64_rec_op* op,
+                                   uint32_t physical) {
+    uint32_t current = lwm_read_u32(node_bytes(model, node_index) + 40u);
+    uint64_t current_bytes = program->values[current].bytes;
+    uint32_t span = 1u;
+    uint32_t next = node_index + 1u;
+    uint32_t residual_tensor = UINT32_MAX;
+    uint32_t final_out = current;
+    const float* post_bias = NULL;
+    uint16_t activation = LW_NHWC_ACT_NONE;
+    int allow_residual_gelu = op->kind != LW_X64_REC_OP_DEPTHWISE;
+    if (op->kind == LW_X64_REC_OP_DENSE) return 1u;
+
+    /* 1. Channel-bias Add: conv_out + constant[channels]. */
+    if (next < limit) {
+        const uint8_t* add = node_bytes(model, next);
+        if (lwm_read_u16(add) == LW_OP_ADD && lwm_read_u16(add + 2u) == 2u) {
+            uint32_t left = lwm_read_u32(add + 8u);
+            uint32_t right = lwm_read_u32(add + 12u);
+            uint32_t other = left == current ? right : right == current ? left : UINT32_MAX;
+            uint32_t add_out = lwm_read_u32(add + 40u);
+            if (other != UINT32_MAX &&
+                program->values[other].constant_data != NULL &&
+                program->values[other].bytes ==
+                    (uint64_t)op->data.conv.output_channels * sizeof(float) &&
+                program->values[add_out].bytes == current_bytes &&
+                tensor_single_consumer(model, current, next)) {
+                post_bias = program->values[other].constant_data;
+                current = add_out;
+                final_out = add_out;
+                ++span;
+                ++next;
+            }
+        }
+    }
+    /* 2. Residual Add: chain_out + non-constant tensor of the same size. */
+    if (allow_residual_gelu && next < limit) {
+        const uint8_t* add = node_bytes(model, next);
+        if (lwm_read_u16(add) == LW_OP_ADD && lwm_read_u16(add + 2u) == 2u) {
+            uint32_t left = lwm_read_u32(add + 8u);
+            uint32_t right = lwm_read_u32(add + 12u);
+            uint32_t other = left == current ? right : right == current ? left : UINT32_MAX;
+            uint32_t add_out = lwm_read_u32(add + 40u);
+            if (other != UINT32_MAX &&
+                program->values[other].constant_data == NULL &&
+                program->values[other].bytes == current_bytes &&
+                program->values[add_out].bytes == current_bytes &&
+                tensor_single_consumer(model, current, next)) {
+                residual_tensor = other;
+                current = add_out;
+                final_out = add_out;
+                ++span;
+                ++next;
+            }
+        }
+    }
+    /* 3. Five-node GELU chain (Div -> Erf -> Add -> Mul -> Mul). */
+    if (allow_residual_gelu && next + 5u <= limit) {
+        lw_fused_gelu_match match;
+        if (lw_match_fused_gelu(session, next, &match) &&
+            match.inputs[0][0] == current &&
+            fused_gelu_temporaries_private(model, next, &match) &&
+            tensor_consumed_within(model, current, next, 5u)) {
+            activation = LW_NHWC_ACT_GELU;
+            final_out = match.outputs[4];
+            span += 5u;
+        }
+    }
+    if (span == 1u) {
+        return 1u;
+    }
+
+    op->data.conv.post_bias = post_bias;
+    if (residual_tensor != UINT32_MAX) {
+        op->data.conv.has_residual = 1u;
+        op->data.conv.residual_offset = program->values[residual_tensor].offset;
+    }
+    op->data.conv.activation = activation;
+    op->data.conv.output_offset = program->values[final_out].offset;
+    program->values[final_out].producer = (int32_t)physical;
+    {
+        uint32_t node;
+        for (node = node_index; node < node_index + span; ++node) {
+            const uint8_t* fused_bytes = node_bytes(model, node);
+            uint16_t fused_inputs = lwm_read_u16(fused_bytes + 2u);
+            uint16_t input_index;
+            for (input_index = 0u; input_index < fused_inputs; ++input_index) {
+                uint32_t input = lwm_read_u32(
+                    fused_bytes + 8u + (size_t)input_index * sizeof(uint32_t));
+                if (program->values[input].last_use < (int32_t)physical) {
+                    program->values[input].last_use = (int32_t)physical;
+                }
+            }
+        }
+    }
+    return span;
 }
 
 static lw_status compile_conv(const lw_model* model, const lw_session* session,
@@ -402,6 +590,7 @@ static lw_status compile_node(const lw_model* model, const lw_session* session,
         op->data.pool.output_dimensions[3]=program->backend_layout == LW_X64_REC_BACKEND_NCHW ? output->dimensions[3] : output->dimensions[1]; op->data.pool.kernel[0]=lwm_read_i32(params+8u); op->data.pool.kernel[1]=lwm_read_i32(params+12u); op->data.pool.strides[0]=lwm_read_i32(params+16u); op->data.pool.strides[1]=lwm_read_i32(params+20u); op->data.pool.pads[0]=lwm_read_i32(params+24u); op->data.pool.pads[1]=lwm_read_i32(params+28u); op->data.pool.pads[2]=lwm_read_i32(params+32u); op->data.pool.pads[3]=lwm_read_i32(params+36u); op->data.pool.count_include_pad=(uint8_t)lwm_read_u32(params+44u); op->data.pool.is_max=(uint8_t)(semantic==LW_OP_MAX_POOL); break;
     case LW_OP_MATMUL: { const lw_runtime_tensor* w=&session->tensors[lwm_read_u32(node+12u)]; uint64_t count; op->kind=LW_X64_REC_OP_MATMUL; op->data.matmul.input_offset=in_value->offset; op->data.matmul.output_offset=out_value->offset; op->data.matmul.weights=constant_f32(model,lwm_read_u32(node+12u)); op->data.matmul.batch=1u; op->data.matmul.rows=(uint32_t)input->dimensions[input->rank-2u]; op->data.matmul.inner=(uint32_t)input->dimensions[input->rank-1u]; op->data.matmul.columns=(uint32_t)w->dimensions[1]; if(lw_packed_matmul_weight_count(op->data.matmul.inner,op->data.matmul.columns,&count)){op->data.matmul.packed_weights=(float*)alloc_constant(program,count*sizeof(float)); if(op->data.matmul.packed_weights==NULL)return LW_STATUS_OUT_OF_MEMORY; lw_pack_matmul_weights_f32(op->data.matmul.weights,op->data.matmul.inner,op->data.matmul.columns,op->data.matmul.packed_weights);} break; }
     case LW_OP_TRANSPOSE: op->kind=LW_X64_REC_OP_TRANSPOSE; op->data.transpose.input_offset=in_value->offset; op->data.transpose.output_offset=out_value->offset; op->data.transpose.rank=input->rank; op->data.transpose.input_dimensions[0]=input->dimensions[0]; op->data.transpose.input_dimensions[1]=input->dimensions[1]; op->data.transpose.input_dimensions[2]=input->dimensions[2]; op->data.transpose.input_dimensions[3]=input->dimensions[3]; op->data.transpose.output_dimensions[0]=output->dimensions[0]; op->data.transpose.output_dimensions[1]=output->dimensions[1]; op->data.transpose.output_dimensions[2]=output->dimensions[2]; op->data.transpose.output_dimensions[3]=output->dimensions[3]; for(uint32_t j=0;j<input->rank;++j)op->data.transpose.permutation[j]=lwm_read_i32(params+4u+j*4u); break;
+    case LW_OP_SOFTMAX: op->kind=LW_X64_REC_OP_SOFTMAX; op->data.softmax.input_offset=in_value->offset; op->data.softmax.output_offset=out_value->offset; op->data.softmax.axis=lwm_read_i32(params+4u); op->data.softmax.rank=input->rank; memcpy(op->data.softmax.dimensions,input->dimensions,sizeof(op->data.softmax.dimensions)); break;
     case LW_OP_CONCAT: case LW_OP_RESIZE: op->kind=LW_X64_REC_OP_GENERIC_UNSUPPORTED; break;
     default: op->kind=LW_X64_REC_OP_GENERIC_UNSUPPORTED; break;
     }
@@ -559,11 +748,13 @@ static lw_x64_rec_compile_result lower_ops(const lw_model* model, const lw_sessi
                                            lw_x64_rec_program* program, uint32_t limit,
                                            lw_error* error);
 
-lw_x64_rec_compile_result lw_x64_rec_backend_compile_ex(const lw_model* model, uint32_t target_width,
-                                                      lw_x64_rec_compile_strategy strategy,
-                                                      lw_x64_rec_program** out_program, lw_error* error) {
+lw_x64_rec_compile_result lw_x64_rec_backend_compile_input(const lw_model* model, uint32_t input_height,
+                                                          uint32_t target_width,
+                                                          lw_x64_rec_compile_strategy strategy,
+                                                          uint32_t allow_ctc_tail,
+                                                          lw_x64_rec_program** out_program, lw_error* error) {
     lw_session* session=NULL; lw_x64_rec_program* program=NULL; lw_model_info info; lw_status status; uint32_t i, limit; lw_x64_rec_compile_result lowered;
-    if(out_program==NULL||model==NULL||target_width==0u||target_width>INT32_MAX){lw_set_error(error,LW_STATUS_INVALID_ARGUMENT,"REC backend arguments are invalid");return LW_X64_REC_COMPILE_INVALID_GRAPH;} *out_program=NULL; lw_model_info_init(&info); status=lw_model_get_info(model,&info); if(status!=LW_STATUS_OK)return LW_X64_REC_COMPILE_INVALID_GRAPH; status=make_shape_session(model,target_width,&session,error); if(status!=LW_STATUS_OK)return status==LW_STATUS_OUT_OF_MEMORY?LW_X64_REC_COMPILE_OUT_OF_MEMORY:LW_X64_REC_COMPILE_INVALID_GRAPH; program=(lw_x64_rec_program*)calloc(1u,sizeof(*program)); if(program==NULL){lw_session_free(session);lw_set_error(error,LW_STATUS_OUT_OF_MEMORY,"REC program allocation failed");return LW_X64_REC_COMPILE_OUT_OF_MEMORY;} program->model=model;program->cpu=lw_get_cpu_capabilities();program->model_signature=info.content_checksum;program->target_width=target_width;program->backend_layout=(uint8_t)strategy;program->value_count=info.tensor_count;program->direct_nhwc=(uint8_t)(strategy == LW_X64_REC_COMPILE_NHWC); if(!lw_simd_level_is_avx2(program->cpu.simd)||!program->cpu.has_avx2_fma){lw_session_free(session);lw_x64_rec_program_free(program);lw_set_error(error,LW_STATUS_UNSUPPORTED,"standalone x64 REC backend requires AVX2 and FMA");return LW_X64_REC_COMPILE_UNSUPPORTED;} program->ctc_fused=detect_ctc(model,session,&program->ctc)?1u:0u; limit=program->ctc_fused?info.node_count-3u:info.node_count; program->ops=(lw_x64_rec_op*)calloc(limit,sizeof(*program->ops));program->values=(lw_x64_rec_value*)calloc(program->value_count,sizeof(*program->values));if(program->ops==NULL||program->values==NULL){lw_session_free(session);lw_x64_rec_program_free(program);lw_set_error(error,LW_STATUS_OUT_OF_MEMORY,"REC program tables allocation failed");return LW_X64_REC_COMPILE_OUT_OF_MEMORY;}
+    if(out_program==NULL||model==NULL||target_width==0u||target_width>INT32_MAX||input_height==0u||input_height>INT32_MAX){lw_set_error(error,LW_STATUS_INVALID_ARGUMENT,"REC backend arguments are invalid");return LW_X64_REC_COMPILE_INVALID_GRAPH;} *out_program=NULL; lw_model_info_init(&info); status=lw_model_get_info(model,&info); if(status!=LW_STATUS_OK)return LW_X64_REC_COMPILE_INVALID_GRAPH; status=make_shape_session(model,input_height,target_width,&session,error); if(status!=LW_STATUS_OK)return status==LW_STATUS_OUT_OF_MEMORY?LW_X64_REC_COMPILE_OUT_OF_MEMORY:LW_X64_REC_COMPILE_INVALID_GRAPH; program=(lw_x64_rec_program*)calloc(1u,sizeof(*program)); if(program==NULL){lw_session_free(session);lw_set_error(error,LW_STATUS_OUT_OF_MEMORY,"REC program allocation failed");return LW_X64_REC_COMPILE_OUT_OF_MEMORY;} program->model=model;program->cpu=lw_get_cpu_capabilities();program->model_signature=info.content_checksum;program->target_width=target_width;program->backend_layout=(uint8_t)strategy;program->value_count=info.tensor_count;program->direct_nhwc=(uint8_t)(strategy == LW_X64_REC_COMPILE_NHWC); if(!lw_simd_level_is_avx2(program->cpu.simd)||!program->cpu.has_avx2_fma){lw_session_free(session);lw_x64_rec_program_free(program);lw_set_error(error,LW_STATUS_UNSUPPORTED,"standalone x64 REC backend requires AVX2 and FMA");return LW_X64_REC_COMPILE_UNSUPPORTED;} program->ctc_fused=(allow_ctc_tail!=0u&&detect_ctc(model,session,&program->ctc))?1u:0u; limit=program->ctc_fused?info.node_count-3u:info.node_count; program->ops=(lw_x64_rec_op*)calloc(limit,sizeof(*program->ops));program->values=(lw_x64_rec_value*)calloc(program->value_count,sizeof(*program->values));if(program->ops==NULL||program->values==NULL){lw_session_free(session);lw_x64_rec_program_free(program);lw_set_error(error,LW_STATUS_OUT_OF_MEMORY,"REC program tables allocation failed");return LW_X64_REC_COMPILE_OUT_OF_MEMORY;}
     for(i=0u;i<program->value_count;++i){fill_value(session,i,&program->values[i],strategy);if((session->tensors[i].flags&LWM_V0_TENSOR_FLAG_INPUT)!=0u)program->input_value=i;}
     lowered=lower_ops(model,session,program,limit,error);
     if(lowered!=LW_X64_REC_COMPILE_OK){lw_session_free(session);lw_x64_rec_program_free(program);return lowered;}
@@ -633,16 +824,24 @@ static lw_x64_rec_compile_result lower_ops(const lw_model* model, const lw_sessi
         program->values[out].producer = (int32_t)i;
         continue;
     }
-    if(semantic==LW_OP_RESHAPE||semantic==LW_OP_SQUEEZE||semantic==LW_OP_UNSQUEEZE){uint32_t in=lwm_read_u32(node+8u),out=lwm_read_u32(node+40u); const lw_runtime_tensor* in_tensor=&session->tensors[in]; const lw_runtime_tensor* out_tensor=&session->tensors[out]; if(in_tensor->rank==3u && out_tensor->rank==4u && physical<limit){ lw_x64_rec_op* repack=&program->ops[physical++]; memset(repack,0,sizeof(*repack)); repack->kind=LW_X64_REC_OP_TRANSPOSE; repack->semantic_begin=i; repack->semantic_count=1u; repack->data.transpose.input_offset=program->values[in].offset; repack->data.transpose.output_offset=program->values[out].offset; repack->data.transpose.rank=4u; repack->data.transpose.input_dimensions[0]=in_tensor->dimensions[0]; repack->data.transpose.input_dimensions[1]=in_tensor->dimensions[1]; repack->data.transpose.input_dimensions[2]=out_tensor->dimensions[2]; repack->data.transpose.input_dimensions[3]=out_tensor->dimensions[3]; repack->data.transpose.output_dimensions[0]=out_tensor->dimensions[0]; repack->data.transpose.output_dimensions[1]=out_tensor->dimensions[2]; repack->data.transpose.output_dimensions[2]=out_tensor->dimensions[3]; repack->data.transpose.output_dimensions[3]=out_tensor->dimensions[1]; repack->data.transpose.permutation[0]=0; repack->data.transpose.permutation[1]=2; repack->data.transpose.permutation[2]=3; repack->data.transpose.permutation[3]=1; program->values[out].producer=(int32_t)(physical-1u); if(program->values[in].last_use<(int32_t)(physical-1u))program->values[in].last_use=(int32_t)(physical-1u); program->semantic_consumed++; continue; } if(in_tensor->rank==4u && out_tensor->rank==3u && physical<limit){ lw_x64_rec_op* repack=&program->ops[physical++]; memset(repack,0,sizeof(*repack)); repack->kind=LW_X64_REC_OP_TRANSPOSE; repack->semantic_begin=i; repack->semantic_count=1u; repack->data.transpose.input_offset=program->values[in].offset; repack->data.transpose.output_offset=program->values[out].offset; repack->data.transpose.rank=4u; repack->data.transpose.input_dimensions[0]=in_tensor->dimensions[0]; repack->data.transpose.input_dimensions[1]=in_tensor->dimensions[2]; repack->data.transpose.input_dimensions[2]=in_tensor->dimensions[3]; repack->data.transpose.input_dimensions[3]=in_tensor->dimensions[1]; repack->data.transpose.output_dimensions[0]=out_tensor->dimensions[0]; repack->data.transpose.output_dimensions[1]=in_tensor->dimensions[1]; repack->data.transpose.output_dimensions[2]=in_tensor->dimensions[2]; repack->data.transpose.output_dimensions[3]=in_tensor->dimensions[3]; repack->data.transpose.permutation[0]=0; repack->data.transpose.permutation[1]=3; repack->data.transpose.permutation[2]=1; repack->data.transpose.permutation[3]=2; program->values[out].producer=(int32_t)(physical-1u); if(program->values[in].last_use<(int32_t)(physical-1u))program->values[in].last_use=(int32_t)(physical-1u); program->semantic_consumed++; continue; } program->values[out].alias=1u;program->values[out].alias_of=in;program->values[out].offset=program->values[in].offset;++program->semantic_elided;program->values[out].producer=(int32_t)i;continue;} if(physical>=limit)return LW_X64_REC_COMPILE_INVALID_GRAPH; {lw_x64_rec_op* op=&program->ops[physical];memset(op,0,sizeof(*op));status=compile_node(model,session,program,i,op,error);if(status!=LW_STATUS_OK||op->kind==LW_X64_REC_OP_GENERIC_UNSUPPORTED){++program->unsupported_nodes;if (status == LW_STATUS_OK || error == NULL || error->message[0] == 0) { char message[128]; (void)snprintf(message,sizeof(message),"REC node %u (op %u) lowering failed (status %d, kind %u)",(unsigned)i,(unsigned)semantic,(int)status,(unsigned)op->kind); lw_set_error(error,status!=LW_STATUS_OK?status:LW_STATUS_UNSUPPORTED,message); }return LW_X64_REC_COMPILE_UNSUPPORTED;}op->semantic_begin=i;op->semantic_count=1u;program->semantic_consumed++;program->values[lwm_read_u32(node+40u)].producer=(int32_t)physical;for(uint32_t j=0u;j<lwm_read_u16(node+2u);++j){uint32_t in=lwm_read_u32(node+8u+j*4u);if(program->values[in].last_use<(int32_t)physical)program->values[in].last_use=(int32_t)physical;}++physical;}}
+    if(semantic==LW_OP_RESHAPE||semantic==LW_OP_SQUEEZE||semantic==LW_OP_UNSQUEEZE){uint32_t in=lwm_read_u32(node+8u),out=lwm_read_u32(node+40u); const lw_runtime_tensor* in_tensor=&session->tensors[in]; const lw_runtime_tensor* out_tensor=&session->tensors[out]; if(in_tensor->rank==3u && out_tensor->rank==4u && physical<limit){ lw_x64_rec_op* repack=&program->ops[physical++]; memset(repack,0,sizeof(*repack)); repack->kind=LW_X64_REC_OP_TRANSPOSE; repack->semantic_begin=i; repack->semantic_count=1u; repack->data.transpose.input_offset=program->values[in].offset; repack->data.transpose.output_offset=program->values[out].offset; repack->data.transpose.rank=4u; repack->data.transpose.input_dimensions[0]=in_tensor->dimensions[0]; repack->data.transpose.input_dimensions[1]=in_tensor->dimensions[1]; repack->data.transpose.input_dimensions[2]=out_tensor->dimensions[2]; repack->data.transpose.input_dimensions[3]=out_tensor->dimensions[3]; repack->data.transpose.output_dimensions[0]=out_tensor->dimensions[0]; repack->data.transpose.output_dimensions[1]=out_tensor->dimensions[2]; repack->data.transpose.output_dimensions[2]=out_tensor->dimensions[3]; repack->data.transpose.output_dimensions[3]=out_tensor->dimensions[1]; repack->data.transpose.permutation[0]=0; repack->data.transpose.permutation[1]=2; repack->data.transpose.permutation[2]=3; repack->data.transpose.permutation[3]=1; program->values[out].producer=(int32_t)(physical-1u); if(program->values[in].last_use<(int32_t)(physical-1u))program->values[in].last_use=(int32_t)(physical-1u); program->semantic_consumed++; continue; } if(in_tensor->rank==4u && out_tensor->rank==3u && physical<limit){ lw_x64_rec_op* repack=&program->ops[physical++]; memset(repack,0,sizeof(*repack)); repack->kind=LW_X64_REC_OP_TRANSPOSE; repack->semantic_begin=i; repack->semantic_count=1u; repack->data.transpose.input_offset=program->values[in].offset; repack->data.transpose.output_offset=program->values[out].offset; repack->data.transpose.rank=4u; repack->data.transpose.input_dimensions[0]=in_tensor->dimensions[0]; repack->data.transpose.input_dimensions[1]=in_tensor->dimensions[2]; repack->data.transpose.input_dimensions[2]=in_tensor->dimensions[3]; repack->data.transpose.input_dimensions[3]=in_tensor->dimensions[1]; repack->data.transpose.output_dimensions[0]=out_tensor->dimensions[0]; repack->data.transpose.output_dimensions[1]=in_tensor->dimensions[1]; repack->data.transpose.output_dimensions[2]=in_tensor->dimensions[2]; repack->data.transpose.output_dimensions[3]=in_tensor->dimensions[3]; repack->data.transpose.permutation[0]=0; repack->data.transpose.permutation[1]=3; repack->data.transpose.permutation[2]=1; repack->data.transpose.permutation[3]=2; program->values[out].producer=(int32_t)(physical-1u); if(program->values[in].last_use<(int32_t)(physical-1u))program->values[in].last_use=(int32_t)(physical-1u); program->semantic_consumed++; continue; } program->values[out].alias=1u;program->values[out].alias_of=in;program->values[out].offset=program->values[in].offset;++program->semantic_elided;program->values[out].producer=(int32_t)i;continue;} if(physical>=limit)return LW_X64_REC_COMPILE_INVALID_GRAPH; {lw_x64_rec_op* op=&program->ops[physical];memset(op,0,sizeof(*op));status=compile_node(model,session,program,i,op,error);if(status!=LW_STATUS_OK||op->kind==LW_X64_REC_OP_GENERIC_UNSUPPORTED){++program->unsupported_nodes;if (status == LW_STATUS_OK || error == NULL || error->message[0] == 0) { char message[128]; (void)snprintf(message,sizeof(message),"REC node %u (op %u) lowering failed (status %d, kind %u)",(unsigned)i,(unsigned)semantic,(int)status,(unsigned)op->kind); lw_set_error(error,status!=LW_STATUS_OK?status:LW_STATUS_UNSUPPORTED,message); }return LW_X64_REC_COMPILE_UNSUPPORTED;}op->semantic_begin=i;op->semantic_count=1u;if(program->backend_layout==LW_X64_REC_BACKEND_NHWC&&op->data.conv.scalar_fallback==0u&&(op->kind==LW_X64_REC_OP_POINTWISE||op->kind==LW_X64_REC_OP_DENSE||op->kind==LW_X64_REC_OP_DEPTHWISE)){uint32_t fold_span=fold_conv_epilogue(model,session,program,limit,i,op,physical);if(fold_span>1u){op->semantic_count=(uint16_t)fold_span;program->semantic_consumed+=fold_span;++physical;i+=fold_span-1u;continue;}}program->semantic_consumed++;program->values[lwm_read_u32(node+40u)].producer=(int32_t)physical;for(uint32_t j=0u;j<lwm_read_u16(node+2u);++j){uint32_t in=lwm_read_u32(node+8u+j*4u);if(program->values[in].last_use<(int32_t)physical)program->values[in].last_use=(int32_t)physical;}++physical;}}
     program->op_count=physical;
     return LW_X64_REC_COMPILE_OK;
+}
+
+lw_x64_rec_compile_result lw_x64_rec_backend_compile_ex(
+    const lw_model* model, uint32_t target_width,
+    lw_x64_rec_compile_strategy strategy,
+    lw_x64_rec_program** out_program, lw_error* error) {
+    return lw_x64_rec_backend_compile_input(model, 48u, target_width, strategy, 1u,
+                                            out_program, error);
 }
 
 lw_x64_rec_compile_result lw_x64_rec_backend_compile(
     const lw_model* model, uint32_t target_width,
     lw_x64_rec_program** out_program, lw_error* error) {
-    return lw_x64_rec_backend_compile_ex(model, target_width, LW_X64_REC_COMPILE_NHWC,
-                                         out_program, error);
+    return lw_x64_rec_backend_compile_input(model, 48u, target_width,
+                                            LW_X64_REC_COMPILE_NHWC, 1u, out_program, error);
 }
 
 void lw_x64_rec_program_retain(lw_x64_rec_program* program) {

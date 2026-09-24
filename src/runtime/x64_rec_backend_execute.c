@@ -146,11 +146,16 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         return LW_STATUS_OK;
     }
     case LW_X64_REC_OP_POINTWISE: {
-        lw_nhwc_epilogue ep = { NULL, NULL, op->data.conv.activation, 0u, 0.0f, 0.0f };
+        lw_nhwc_epilogue ep = { NULL, NULL, op->data.conv.activation, 0u, 0.0f, 0.0f, NULL };
         input = offset_ptr(instance, op->data.conv.input_offset);
         output = offset_ptr(instance, op->data.conv.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
         ep.bias = op->data.conv.bias;
+        ep.post_bias = op->data.conv.post_bias;
+        if (op->data.conv.has_residual != 0u) {
+            ep.residual = offset_ptr(instance, op->data.conv.residual_offset);
+            if (ep.residual == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        }
         {
             uint32_t pixels = op->data.conv.input_height * op->data.conv.input_width;
             switch (op->data.conv.pointwise_kernel) {
@@ -202,13 +207,23 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         memset(&ep, 0, sizeof(ep));
         ep.bias = op->data.conv.bias;
         ep.activation = op->data.conv.activation;
+        ep.post_bias = op->data.conv.post_bias;
         input = offset_ptr(instance, op->data.conv.input_offset);
         output = offset_ptr(instance, op->data.conv.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        if (op->data.conv.has_residual != 0u) {
+            ep.residual = offset_ptr(instance, op->data.conv.residual_offset);
+            if (ep.residual == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        }
         status = lw_avx2_fma_nhwc_dense_f32(
             input, op->data.conv.packed_weights, &ep, output, &desc,
             instance->scratch, op->data.conv.scratch_bytes);
         if (status == LW_STATUS_OK) return LW_STATUS_OK;
+        if (ep.post_bias != NULL || ep.residual != NULL ||
+            ep.activation != LW_NHWC_ACT_NONE) {
+            /* The scalar fallback cannot reproduce the fused epilogue. */
+            return status;
+        }
         scalar_nhwc_conv(&op->data.conv, input, output);
         return LW_STATUS_OK;
     }
@@ -230,12 +245,17 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         desc.pad_left = op->data.conv.pad_left;
         desc.pad_bottom = op->data.conv.pad_bottom;
         desc.pad_right = op->data.conv.pad_right;
+        desc.post_bias = op->data.conv.post_bias;
         input = offset_ptr(instance, op->data.conv.input_offset);
         output = offset_ptr(instance, op->data.conv.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
         status = lw_avx2_fma_nhwc_depthwise_f32(input, op->data.conv.packed_weights,
                                                  op->data.conv.bias, output, &desc);
         if (status == LW_STATUS_OK) return LW_STATUS_OK;
+        if (desc.post_bias != NULL) {
+            /* The scalar fallback cannot reproduce the fused epilogue. */
+            return status;
+        }
         scalar_nhwc_conv(&op->data.conv, input, output);
         return LW_STATUS_OK;
     }
@@ -323,6 +343,11 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         else if (op->kind == LW_X64_REC_OP_GELU) lw_avx2_gelu_f32(input, output, op->data.unary.element_count);
         else lw_avx2_hard_sigmoid_contiguous_f32(input, output, op->data.unary.element_count, op->data.unary.alpha, op->data.unary.beta);
         return LW_STATUS_OK;
+    case LW_X64_REC_OP_SOFTMAX:
+        input = offset_ptr(instance, op->data.softmax.input_offset); output = offset_ptr(instance, op->data.softmax.output_offset);
+        if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        return lw_scalar_softmax_f32(input, output, op->data.softmax.rank,
+                                     op->data.softmax.dimensions, op->data.softmax.axis);
     case LW_X64_REC_OP_REDUCE_MEAN:
         input = offset_ptr(instance, op->data.reduce.input_offset); output = offset_ptr(instance, op->data.reduce.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
@@ -357,10 +382,67 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
                                                op->data.pool.count_include_pad);
         }
         lw_avx2_nhwc_pool_f32(input, output, (uint32_t)op->data.pool.input_dimensions[0], (uint32_t)op->data.pool.input_dimensions[1], (uint32_t)op->data.pool.input_dimensions[2], (uint32_t)op->data.pool.output_dimensions[1], (uint32_t)op->data.pool.output_dimensions[2], (uint32_t)op->data.pool.input_dimensions[3], (uint32_t)op->data.pool.kernel[0], (uint32_t)op->data.pool.kernel[1], (uint32_t)op->data.pool.strides[0], (uint32_t)op->data.pool.strides[1], (uint32_t)op->data.pool.pads[0], (uint32_t)op->data.pool.pads[1], op->data.pool.count_include_pad, op->data.pool.is_max); return LW_STATUS_OK;
-    case LW_X64_REC_OP_TRANSPOSE:
+    case LW_X64_REC_OP_TRANSPOSE: {
+        uint32_t rank = op->data.transpose.rank;
+        uint32_t axis;
+        uint32_t nontrivial[2] = { 0u, 0u };
+        uint32_t nontrivial_count = 0u;
+        uint64_t strides[4];
+        uint64_t stride = 1u;
+        int handled = 0;
         input = offset_ptr(instance, op->data.transpose.input_offset); output = offset_ptr(instance, op->data.transpose.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        /* Effective-2D detection: when at most two output axes have extent > 1
+         * the transpose degenerates to a matrix transpose (or a plain copy),
+         * which the blocked AVX2 kernel handles far faster than the generic
+         * per-element scalar walk. Pure data movement, bit-identical. */
+        if (rank <= 4u) {
+            for (axis = rank; axis > 0u; --axis) {
+                strides[axis - 1u] = stride;
+                stride *= (uint64_t)(uint32_t)op->data.transpose.input_dimensions[axis - 1u];
+            }
+            for (axis = 0u; axis < rank; ++axis) {
+                int32_t source_axis = op->data.transpose.permutation[axis];
+                if (source_axis < 0 || (uint32_t)source_axis >= rank ||
+                    op->data.transpose.output_dimensions[axis] !=
+                        op->data.transpose.input_dimensions[source_axis]) {
+                    nontrivial_count = UINT32_MAX;
+                    break;
+                }
+                if (op->data.transpose.output_dimensions[axis] > 1) {
+                    if (nontrivial_count >= 2u) {
+                        nontrivial_count = UINT32_MAX;
+                        break;
+                    }
+                    nontrivial[nontrivial_count++] = axis;
+                }
+            }
+            if (nontrivial_count == 2u) {
+                uint32_t a = nontrivial[0];
+                uint32_t b = nontrivial[1];
+                uint64_t rows = (uint64_t)(uint32_t)op->data.transpose.output_dimensions[a];
+                uint64_t cols = (uint64_t)(uint32_t)op->data.transpose.output_dimensions[b];
+                uint64_t stride_a = strides[(uint32_t)op->data.transpose.permutation[a]];
+                uint64_t stride_b = strides[(uint32_t)op->data.transpose.permutation[b]];
+                if (stride_a == 1u && stride_b == rows && rows <= UINT32_MAX &&
+                    cols <= UINT32_MAX) {
+                    /* out[i][j] = in[j][i]: true matrix transpose. */
+                    lw_avx2_transpose_2d_f32(input, output, (uint32_t)cols,
+                                             (uint32_t)rows);
+                    handled = 1;
+                } else if (stride_a == cols && stride_b == 1u) {
+                    memcpy(output, input, (size_t)(rows * cols) * sizeof(float));
+                    handled = 1;
+                }
+            } else if (nontrivial_count <= 1u) {
+                uint64_t elements = stride;
+                memcpy(output, input, (size_t)elements * sizeof(float));
+                handled = 1;
+            }
+        }
+        if (handled != 0) return LW_STATUS_OK;
         return lw_scalar_transpose_f32(input, output, op->data.transpose.rank, op->data.transpose.input_dimensions, op->data.transpose.rank, op->data.transpose.permutation, op->data.transpose.output_dimensions);
+    }
     case LW_X64_REC_OP_MATMUL:
         input = offset_ptr(instance, op->data.matmul.input_offset); output = offset_ptr(instance, op->data.matmul.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
@@ -377,6 +459,7 @@ lw_status lw_x64_rec_instance_create(const lw_x64_rec_program* program, lw_x64_r
     *out = NULL; instance = (lw_x64_rec_instance*)calloc(1u, sizeof(*instance));
     if (instance == NULL) { lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "REC instance allocation failed"); return LW_STATUS_OUT_OF_MEMORY; }
     instance->program = program;
+    instance->owns_workspace = 1u;
     if (program->arena_bytes > 0u) instance->arena = (uint8_t*)rec_aligned_alloc(64u, (size_t)program->arena_bytes);
     if (program->scratch_bytes > 0u) instance->scratch = (uint8_t*)rec_aligned_alloc(64u, (size_t)program->scratch_bytes);
     if ((program->arena_bytes > 0u && instance->arena == NULL) || (program->scratch_bytes > 0u && instance->scratch == NULL)) { lw_x64_rec_instance_free(instance); lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "REC instance workspace allocation failed"); return LW_STATUS_OUT_OF_MEMORY; }
@@ -384,7 +467,34 @@ lw_status lw_x64_rec_instance_create(const lw_x64_rec_program* program, lw_x64_r
     *out = instance; lw_set_error(error, LW_STATUS_OK, ""); return LW_STATUS_OK;
 }
 
-void lw_x64_rec_instance_free(lw_x64_rec_instance* instance) { if (instance == NULL) return; rec_aligned_free(instance->ctc_scores); rec_aligned_free(instance->best_indices); rec_aligned_free(instance->best_probabilities); rec_aligned_free(instance->scratch); rec_aligned_free(instance->arena); free(instance); }
+lw_status lw_x64_rec_instance_create_borrowed(
+    const lw_x64_rec_program* program,
+    uint8_t* arena, uint64_t arena_bytes,
+    uint8_t* scratch, uint64_t scratch_bytes,
+    float* ctc_scores, uint32_t* best_indices, float* best_probabilities,
+    uint64_t ctc_rows, lw_x64_rec_instance** out, lw_error* error) {
+    lw_x64_rec_instance* instance;
+    if (out == NULL || program == NULL) { lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "REC instance requires a compiled program"); return LW_STATUS_INVALID_ARGUMENT; }
+    if ((program->arena_bytes > 0u && (arena == NULL || arena_bytes < program->arena_bytes)) ||
+        (program->scratch_bytes > 0u && (scratch == NULL || scratch_bytes < program->scratch_bytes)) ||
+        (program->ctc.enabled && (ctc_rows < program->ctc.rows || ctc_scores == NULL ||
+                                  best_indices == NULL || best_probabilities == NULL))) {
+        lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "REC borrowed workspace is smaller than the program requires");
+        return LW_STATUS_INVALID_ARGUMENT;
+    }
+    *out = NULL; instance = (lw_x64_rec_instance*)calloc(1u, sizeof(*instance));
+    if (instance == NULL) { lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "REC instance allocation failed"); return LW_STATUS_OUT_OF_MEMORY; }
+    instance->program = program;
+    instance->arena = arena;
+    instance->scratch = scratch;
+    instance->ctc_scores = ctc_scores;
+    instance->best_indices = best_indices;
+    instance->best_probabilities = best_probabilities;
+    instance->owns_workspace = 0u;
+    *out = instance; lw_set_error(error, LW_STATUS_OK, ""); return LW_STATUS_OK;
+}
+
+void lw_x64_rec_instance_free(lw_x64_rec_instance* instance) { if (instance == NULL) return; if (instance->owns_workspace != 0u) { rec_aligned_free(instance->ctc_scores); rec_aligned_free(instance->best_indices); rec_aligned_free(instance->best_probabilities); rec_aligned_free(instance->scratch); rec_aligned_free(instance->arena); } free(instance); }
 
 float* lw_x64_rec_instance_input(lw_x64_rec_instance* instance, uint64_t* element_count) { const lw_x64_rec_value* value; if (element_count != NULL) *element_count = 0u; if (instance == NULL || instance->program == NULL || instance->program->input_value >= instance->program->value_count) return NULL; value=&instance->program->values[instance->program->input_value]; if (element_count != NULL) *element_count=value->bytes/sizeof(float); return offset_ptr(instance,value->offset); }
 

@@ -1,4 +1,5 @@
 #include "simd_kernels.h"
+#include "nhwc_internal.h"
 
 /* AVX2 Erf approximation used by GELU-shaped model graphs. */
 
@@ -136,6 +137,36 @@ void lw_avx2_erf_f32(const float* input, float* output, uint64_t element_count) 
 #endif
 }
 
+/* Exact per-element GELU helpers for the fused convolution epilogues. They
+ * share erf_approximation_f32 with lw_avx2_gelu_f32 below, so the fused path
+ * stays bit-identical to running the standalone pass on the stored tensor.
+ * The vector helper must not be inlined into FMA-enabled callers: the
+ * polynomial relies on separate mul/add rounding, so it carries a noinline
+ * attribute in addition to the no-fma target. */
+float lw_nhwc_gelu_scalar_exact_f32(float value) {
+    float scaled = value / 1.4142135381698608f;
+    float activated = erff(scaled) + 1.0f;
+    activated = value * activated;
+    return activated * 0.5f;
+}
+
+#if LW_COMPILES_AVX2_ERF
+#  if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2,no-fma"), noinline))
+#  elif defined(_MSC_VER)
+__declspec(noinline)
+#  endif
+__m256 lw_nhwc_avx2_gelu_vector_exact_f32(__m256 value) {
+    const __m256 square_root_two = _mm256_set1_ps(1.4142135381698608f);
+    const __m256 one = _mm256_set1_ps(1.0f);
+    const __m256 half = _mm256_set1_ps(0.5f);
+    __m256 scaled = _mm256_div_ps(value, square_root_two);
+    __m256 activated = _mm256_add_ps(erf_approximation_f32(scaled), one);
+    activated = _mm256_mul_ps(value, activated);
+    return _mm256_mul_ps(activated, half);
+}
+#endif
+
 #if LW_COMPILES_AVX2_ERF && (defined(__GNUC__) || defined(__clang__))
 __attribute__((target("avx2,no-fma")))
 #endif
@@ -153,20 +184,12 @@ void lw_avx2_gelu_f32(const float* input, float* output, uint64_t element_count)
         _mm256_storeu_ps(output + (size_t)index, _mm256_mul_ps(activated, half));
     }
     for (; index < element_count; ++index) {
-        float value = input[(size_t)index];
-        float scaled = value / 1.4142135381698608f;
-        float activated = erff(scaled) + 1.0f;
-        activated = value * activated;
-        output[(size_t)index] = activated * 0.5f;
+        output[(size_t)index] = lw_nhwc_gelu_scalar_exact_f32(input[(size_t)index]);
     }
 #else
     uint64_t index;
     for (index = 0u; index < element_count; ++index) {
-        float value = input[(size_t)index];
-        float scaled = value / 1.4142135381698608f;
-        float activated = erff(scaled) + 1.0f;
-        activated = value * activated;
-        output[(size_t)index] = activated * 0.5f;
+        output[(size_t)index] = lw_nhwc_gelu_scalar_exact_f32(input[(size_t)index]);
     }
 #endif
 }

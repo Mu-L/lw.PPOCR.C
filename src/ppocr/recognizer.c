@@ -18,6 +18,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#if defined(_MSC_VER)
+#include <malloc.h>
+#endif
 #include <string.h>
 
 #define LW_REC_DEFAULT_TARGET_WIDTH 960u
@@ -95,6 +98,15 @@ struct lw_recognizer {
     lw_recognizer_info info;
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
     lw_x64_rec_backend_slot x64_slots[LW_REC_RESIDENT_WIDTH_COUNT];
+    /* One shared workspace borrowed by every x64 slot instance: slots of a
+     * recognizer never run concurrently (one line at a time; other threads
+     * use clones with their own block), so the arena/scratch/CTC buffers are
+     * sized to the largest compiled width instead of summed over all five. */
+    uint8_t* x64_shared_arena;
+    uint8_t* x64_shared_scratch;
+    float* x64_shared_ctc_scores;
+    uint32_t* x64_shared_best_indices;
+    float* x64_shared_best_probabilities;
 #endif
 };
 
@@ -755,6 +767,94 @@ fail:
 }
 
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+#if defined(_MSC_VER)
+static void* rec_ws_aligned_alloc(size_t size) { return _aligned_malloc(size, 64u); }
+static void rec_ws_aligned_free(void* p) { _aligned_free(p); }
+#else
+static void* rec_ws_aligned_alloc(size_t size) {
+    void* p = NULL;
+    return posix_memalign(&p, 64u, size) == 0 ? p : NULL;
+}
+static void rec_ws_aligned_free(void* p) { free(p); }
+#endif
+
+static void recognizer_release_shared_workspace(lw_recognizer* recognizer) {
+    rec_ws_aligned_free(recognizer->x64_shared_ctc_scores);
+    rec_ws_aligned_free(recognizer->x64_shared_best_indices);
+    rec_ws_aligned_free(recognizer->x64_shared_best_probabilities);
+    rec_ws_aligned_free(recognizer->x64_shared_arena);
+    rec_ws_aligned_free(recognizer->x64_shared_scratch);
+    recognizer->x64_shared_ctc_scores = NULL;
+    recognizer->x64_shared_best_indices = NULL;
+    recognizer->x64_shared_best_probabilities = NULL;
+    recognizer->x64_shared_arena = NULL;
+    recognizer->x64_shared_scratch = NULL;
+}
+
+/* Create one instance per compiled slot, borrowing the shared workspace when
+ * it allocated cleanly; otherwise fall back to per-slot owned workspaces. */
+static void recognizer_create_slot_instances(lw_recognizer* recognizer) {
+    uint64_t arena_bytes = 0u;
+    uint64_t scratch_bytes = 0u;
+    uint64_t ctc_rows = 0u;
+    uint32_t index;
+    int ctc_needed = 0;
+    for (index = 0u; index < LW_REC_RESIDENT_WIDTH_COUNT; ++index) {
+        const lw_x64_rec_program* program = recognizer->x64_slots[index].program;
+        if (program == NULL) continue;
+        if (program->arena_bytes > arena_bytes) arena_bytes = program->arena_bytes;
+        if (program->scratch_bytes > scratch_bytes) scratch_bytes = program->scratch_bytes;
+        if (program->ctc.enabled != 0u) {
+            ctc_needed = 1;
+            if (program->ctc.rows > ctc_rows) ctc_rows = program->ctc.rows;
+        }
+    }
+    if (arena_bytes == 0u || arena_bytes > SIZE_MAX || scratch_bytes > SIZE_MAX ||
+        ctc_rows > SIZE_MAX / sizeof(float)) {
+        return;
+    }
+    recognizer->x64_shared_arena = (uint8_t*)rec_ws_aligned_alloc((size_t)arena_bytes);
+    if (scratch_bytes > 0u) {
+        recognizer->x64_shared_scratch = (uint8_t*)rec_ws_aligned_alloc((size_t)scratch_bytes);
+    }
+    if (ctc_needed != 0) {
+        recognizer->x64_shared_ctc_scores = (float*)rec_ws_aligned_alloc((size_t)(ctc_rows * sizeof(float)));
+        recognizer->x64_shared_best_indices = (uint32_t*)rec_ws_aligned_alloc((size_t)(ctc_rows * sizeof(uint32_t)));
+        recognizer->x64_shared_best_probabilities = (float*)rec_ws_aligned_alloc((size_t)(ctc_rows * sizeof(float)));
+    }
+    if (recognizer->x64_shared_arena == NULL ||
+        (scratch_bytes > 0u && recognizer->x64_shared_scratch == NULL) ||
+        (ctc_needed != 0 && (recognizer->x64_shared_ctc_scores == NULL ||
+                             recognizer->x64_shared_best_indices == NULL ||
+                             recognizer->x64_shared_best_probabilities == NULL))) {
+        /* Shared allocation failed: per-slot owned workspaces below. */
+        recognizer_release_shared_workspace(recognizer);
+    }
+    for (index = 0u; index < LW_REC_RESIDENT_WIDTH_COUNT; ++index) {
+        lw_x64_rec_backend_slot* slot = &recognizer->x64_slots[index];
+        lw_error backend_error;
+        lw_status status;
+        if (slot->program == NULL) continue;
+        lw_error_init(&backend_error);
+        if (recognizer->x64_shared_arena != NULL) {
+            status = lw_x64_rec_instance_create_borrowed(slot->program,
+                recognizer->x64_shared_arena, arena_bytes,
+                recognizer->x64_shared_scratch, scratch_bytes,
+                recognizer->x64_shared_ctc_scores, recognizer->x64_shared_best_indices,
+                recognizer->x64_shared_best_probabilities, ctc_rows,
+                &slot->instance, &backend_error);
+        } else {
+            status = lw_x64_rec_instance_create(slot->program, &slot->instance,
+                                                &backend_error);
+        }
+        if (status != LW_STATUS_OK) {
+            lw_x64_rec_program_free(slot->program);
+            slot->program = NULL;
+            slot->instance = NULL;
+        }
+    }
+}
+
 static lw_x64_rec_backend_slot* recognizer_backend_slot(lw_recognizer* recognizer,
                                                         uint32_t width) {
     uint32_t index;
@@ -782,14 +882,13 @@ static void recognizer_try_backends(lw_recognizer* recognizer) {
                                        &backend_error) != LW_X64_REC_COMPILE_OK ||
             slot->program == NULL || slot->program->ctc.enabled == 0u ||
             slot->program->time_steps == 0u ||
-            slot->program->class_count != recognizer->info.class_count ||
-            lw_x64_rec_instance_create(slot->program, &slot->instance,
-                                       &backend_error) != LW_STATUS_OK) {
+            slot->program->class_count != recognizer->info.class_count) {
             lw_x64_rec_program_free(slot->program);
             slot->program = NULL;
             slot->instance = NULL;
         }
     }
+    recognizer_create_slot_instances(recognizer);
 }
 
 static void recognizer_release_backends(lw_recognizer* recognizer) {
@@ -800,6 +899,7 @@ static void recognizer_release_backends(lw_recognizer* recognizer) {
         lw_x64_rec_program_free(slot->program);
         memset(slot, 0, sizeof(*slot));
     }
+    recognizer_release_shared_workspace(recognizer);
 }
 
 /* The hybrid plan supports this exact Medium LWM graph across the five
@@ -909,18 +1009,12 @@ lw_status lw_recognizer_clone(const lw_recognizer* source, lw_recognizer** out_r
         for (index = 0u; index < LW_REC_RESIDENT_WIDTH_COUNT; ++index) {
             const lw_x64_rec_backend_slot* source_slot = &source->x64_slots[index];
             lw_x64_rec_backend_slot* clone_slot = &clone->x64_slots[index];
-            lw_error backend_error;
             if (source_slot->instance == NULL) continue;
             clone_slot->target_width = source_slot->target_width;
             clone_slot->program = source_slot->program;
             lw_x64_rec_program_retain(clone_slot->program);
-            lw_error_init(&backend_error);
-            if (lw_x64_rec_instance_create(clone_slot->program, &clone_slot->instance,
-                                           &backend_error) != LW_STATUS_OK) {
-                lw_x64_rec_program_free(clone_slot->program);
-                memset(clone_slot, 0, sizeof(*clone_slot));
-            }
         }
+        recognizer_create_slot_instances(clone);
     }
 #endif
     *out_recognizer = clone;

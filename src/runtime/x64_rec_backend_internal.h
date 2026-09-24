@@ -61,6 +61,7 @@ typedef enum lw_x64_rec_op_kind {
     LW_X64_REC_OP_MATMUL = 16,
     LW_X64_REC_OP_CONCAT = 17,
     LW_X64_REC_OP_RESIZE = 18,
+    LW_X64_REC_OP_SOFTMAX = 22,
     LW_X64_REC_OP_GENERIC_UNSUPPORTED = 0xffff
 } lw_x64_rec_op_kind;
 
@@ -136,6 +137,14 @@ typedef struct lw_x64_rec_conv_op {
     uint64_t scratch_bytes;
     uint16_t kernel_kind;
     uint16_t activation;
+    /* Fused epilogue state filled by the compiler's conv -> add -> gelu
+     * matcher. post_bias is a folded channel bias applied after accumulation;
+     * residual_offset/has_residual describe a fused elementwise residual add
+     * that reads from the arena. All zero when nothing was folded in. */
+    const float* post_bias;
+    uint64_t residual_offset;
+    uint8_t has_residual;
+    uint8_t fusion_reserved[7];
 } lw_x64_rec_conv_op;
 
 typedef struct lw_x64_rec_binary_op {
@@ -219,6 +228,14 @@ typedef struct lw_x64_rec_matmul_op {
     uint32_t columns;
 } lw_x64_rec_matmul_op;
 
+typedef struct lw_x64_rec_softmax_op {
+    uint64_t input_offset;
+    uint64_t output_offset;
+    int32_t axis;
+    uint32_t rank;
+    int32_t dimensions[4];
+} lw_x64_rec_softmax_op;
+
 typedef struct lw_x64_rec_op {
     uint16_t kind;
     uint16_t reserved;
@@ -234,6 +251,7 @@ typedef struct lw_x64_rec_op {
         lw_x64_rec_pool_op pool;
         lw_x64_rec_transpose_op transpose;
         lw_x64_rec_matmul_op matmul;
+        lw_x64_rec_softmax_op softmax;
     } data;
 } lw_x64_rec_op;
 
@@ -309,11 +327,20 @@ typedef struct lw_x64_rec_instance {
     uint32_t* best_indices;
     float* best_probabilities;
     lw_x64_rec_profile profile;
+    /* 0 when arena/scratch/CTC buffers are borrowed from a shared
+     * cross-width workspace owned by the recognizer. */
+    uint8_t owns_workspace;
 } lw_x64_rec_instance;
 
 uint64_t lw_x64_rec_arena_align(uint64_t value, uint64_t alignment);
 lw_status lw_x64_rec_arena_alloc(uint64_t* cursor, uint64_t bytes, uint64_t alignment,
                                  uint64_t* out_offset, lw_error* error);
+/* Generalized entry: explicit input height (REC callers pass 48; the CLS
+ * backbone reuses this lowering with its own fixed input shape). */
+lw_x64_rec_compile_result lw_x64_rec_backend_compile_input(
+    const lw_model* model, uint32_t input_height, uint32_t target_width,
+    lw_x64_rec_compile_strategy strategy, uint32_t allow_ctc_tail,
+    lw_x64_rec_program** out_program, lw_error* error);
 lw_x64_rec_compile_result lw_x64_rec_backend_compile_ex(
     const lw_model* model, uint32_t target_width,
     lw_x64_rec_compile_strategy strategy,
@@ -325,6 +352,15 @@ void lw_x64_rec_program_free(lw_x64_rec_program* program);
 void lw_x64_rec_program_retain(lw_x64_rec_program* program);
 lw_status lw_x64_rec_instance_create(const lw_x64_rec_program* program,
                                      lw_x64_rec_instance** out, lw_error* error);
+/* Borrowed-workspace variant: the instance uses the caller's buffers
+ * (sized at least to the program's requirements) and never frees
+ * them. ctc_rows is the capacity of the three CTC arrays. */
+lw_status lw_x64_rec_instance_create_borrowed(
+    const lw_x64_rec_program* program,
+    uint8_t* arena, uint64_t arena_bytes,
+    uint8_t* scratch, uint64_t scratch_bytes,
+    float* ctc_scores, uint32_t* best_indices, float* best_probabilities,
+    uint64_t ctc_rows, lw_x64_rec_instance** out, lw_error* error);
 void lw_x64_rec_instance_free(lw_x64_rec_instance* instance);
 float* lw_x64_rec_instance_input(lw_x64_rec_instance* instance, uint64_t* element_count);
 lw_status lw_x64_rec_instance_run(lw_x64_rec_instance* instance, lw_error* error);

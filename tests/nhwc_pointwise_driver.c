@@ -214,6 +214,7 @@ static void run_nhwc_group(const float* input, const float* weights, const float
     lw_nhwc_epilogue epilogue;
     epilogue.bias = bias;
     epilogue.residual = NULL;
+    epilogue.post_bias = NULL;
     epilogue.activation = LW_NHWC_ACT_NONE;
     epilogue.reserved = 0u;
     epilogue.alpha = 0.0f;
@@ -332,6 +333,7 @@ static int run_epilogue_parity(void) {
         epilogue.bias = bias;
         epilogue.residual = test >= 2u ? residual : NULL;
         epilogue.activation = activations[test];
+        epilogue.post_bias = NULL;
         epilogue.reserved = 0u;
         epilogue.alpha = 0.0f;
         epilogue.beta = 0.0f;

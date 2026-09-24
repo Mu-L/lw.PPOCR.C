@@ -23,6 +23,10 @@ void lw_avx2_hard_sigmoid_exact_f32(const float* input, float* output, uint64_t 
 void lw_avx2_relu_f32(const float* input, float* output, uint64_t element_count);
 void lw_avx2_erf_f32(const float* input, float* output, uint64_t element_count);
 void lw_avx2_gelu_f32(const float* input, float* output, uint64_t element_count);
+/* Transpose a rows x cols row-major float matrix into cols x rows row-major.
+ * Pure data movement, bit-identical to the scalar transpose. */
+void lw_avx2_transpose_2d_f32(const float* input, float* output,
+                              uint32_t rows, uint32_t cols);
 void lw_avx2_softmax_contiguous_f32(const float* input, float* output, uint64_t row_count,
                                     uint64_t axis_count);
 void lw_avx2_ctc_emitted_softmax_contiguous_f32(const float* input,
