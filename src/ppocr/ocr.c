@@ -335,6 +335,18 @@ lw_status lw_ocr_create(const char* detector_model_path_utf8,
             }
             if (status != LW_STATUS_OK)
                 goto fail;
+            {
+                /* CTC 头 matmul 扇出到 recognizer 自有池：每个 recognizer 同时只服务一行，
+                 * 不会竞争；额度按行 worker 数均分。 */
+                uint32_t rec_intra = ocr->det_intra_op_thread_cap;
+                if (ocr->worker_count > 1u) {
+                    rec_intra = rec_intra / ocr->worker_count;
+                    if (rec_intra == 0u)
+                        rec_intra = 1u;
+                }
+                lw_recognizer_set_intra_op_thread_count(ocr->recognizers[worker_index],
+                                                        rec_intra);
+            }
             if (worker_index == 0u && values.recognizer.target_width > 320u) {
                 status =
                     lw_recognizer_enable_adaptive_width(ocr->recognizers[worker_index], 1u, error);

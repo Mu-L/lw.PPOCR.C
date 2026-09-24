@@ -209,92 +209,115 @@ static void lw_nhwc_tile_rows16(const float* input,
     }
 }
 
-/* Fully unrolled 6-row x 16-channel tile: named YMM accumulators instead of
- * arrays so the compiler keeps them in registers (the array form spills).
- * Same bias initialisation and ascending input-channel FMA order as
- * lw_nhwc_tile_rows16, so results are bit-identical. Partial tiles and
- * partial channel blocks delegate to lw_nhwc_tile_rows16. */
+/* Grouped-path worker: one noinline call covers a whole pixel range of a
+ * single full 16-channel output block, paying the call and stack-frame
+ * prologue once per (pixel group, channel block) instead of once per 6-row
+ * tile. Bit-identical to repeated lw_nhwc_tile_rows16 calls: same bias
+ * initialisation, same ascending input-channel FMA order, same store_row16
+ * epilogue. Tail tiles (rows < 6) delegate to lw_nhwc_tile_rows16. */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((noinline))
 #elif defined(_MSC_VER)
 __declspec(noinline)
 #endif
 LW_NHWC_AVX2_FMA
-static void lw_nhwc_tile_rows16_unrolled(const float* input,
+static void lw_nhwc_ocblock16_tile_range(const float* input,
                                          const float* packed_weights,
                                          const float* bias,
                                          const float* residual,
                                          const float* post_bias,
                                          float* output,
-                                         uint32_t rows,
+                                         uint32_t pixel_begin,
+                                         uint32_t pixel_end,
                                          uint32_t input_channels,
                                          uint32_t output_stride,
-                                         uint16_t activation,
-                                         uint32_t output_channels) {
-    __m256 lo0, lo1, lo2, lo3, lo4, lo5;
-    __m256 hi0, hi1, hi2, hi3, hi4, hi5;
-    uint32_t input_channel;
-    if (rows < LW_NHWC_PIXEL_TILE || output_channels < LW_NHWC_OC_BLOCK) {
-        lw_nhwc_tile_rows16(input, packed_weights, bias, residual, post_bias,
-                            output, rows, input_channels, output_stride,
-                            activation, output_channels);
-        return;
+                                         uint16_t activation) {
+    uint32_t pixel;
+    for (pixel = pixel_begin; pixel < pixel_end; pixel += LW_NHWC_PIXEL_TILE) {
+        uint32_t rows = pixel_end - pixel;
+        const float* tile_input = input + (size_t)pixel * input_channels;
+        float* tile_output = output + (size_t)pixel * output_stride;
+        const float* tile_residual = residual == NULL ? NULL :
+            residual + (size_t)pixel * output_stride;
+        __m256 lo0, lo1, lo2, lo3, lo4, lo5;
+        __m256 hi0, hi1, hi2, hi3, hi4, hi5;
+        uint32_t input_channel;
+        if (rows > LW_NHWC_PIXEL_TILE) {
+            rows = LW_NHWC_PIXEL_TILE;
+        }
+        if (rows < LW_NHWC_PIXEL_TILE) {
+            lw_nhwc_tile_rows16(tile_input, packed_weights, bias, tile_residual,
+                                post_bias, tile_output, rows, input_channels,
+                                output_stride, activation, LW_NHWC_OC_BLOCK);
+            continue;
+        }
+        if (bias != NULL) {
+            __m256 bias_lo = _mm256_loadu_ps(bias);
+            __m256 bias_hi = _mm256_loadu_ps(bias + 8u);
+            lo0 = bias_lo; lo1 = bias_lo; lo2 = bias_lo;
+            lo3 = bias_lo; lo4 = bias_lo; lo5 = bias_lo;
+            hi0 = bias_hi; hi1 = bias_hi; hi2 = bias_hi;
+            hi3 = bias_hi; hi4 = bias_hi; hi5 = bias_hi;
+        } else {
+            __m256 zero = _mm256_setzero_ps();
+            lo0 = zero; lo1 = zero; lo2 = zero;
+            lo3 = zero; lo4 = zero; lo5 = zero;
+            hi0 = zero; hi1 = zero; hi2 = zero;
+            hi3 = zero; hi4 = zero; hi5 = zero;
+        }
+        for (input_channel = 0u; input_channel < input_channels;
+             ++input_channel) {
+            const float* weights = packed_weights + (size_t)input_channel * 16u;
+            __m256 w0 = _mm256_loadu_ps(weights);
+            __m256 w1 = _mm256_loadu_ps(weights + 8u);
+            __m256 value;
+            value = _mm256_set1_ps(tile_input[input_channel]);
+            lo0 = _mm256_fmadd_ps(value, w0, lo0);
+            hi0 = _mm256_fmadd_ps(value, w1, hi0);
+            value = _mm256_set1_ps(
+                tile_input[(size_t)input_channels + input_channel]);
+            lo1 = _mm256_fmadd_ps(value, w0, lo1);
+            hi1 = _mm256_fmadd_ps(value, w1, hi1);
+            value = _mm256_set1_ps(
+                tile_input[(size_t)2u * input_channels + input_channel]);
+            lo2 = _mm256_fmadd_ps(value, w0, lo2);
+            hi2 = _mm256_fmadd_ps(value, w1, hi2);
+            value = _mm256_set1_ps(
+                tile_input[(size_t)3u * input_channels + input_channel]);
+            lo3 = _mm256_fmadd_ps(value, w0, lo3);
+            hi3 = _mm256_fmadd_ps(value, w1, hi3);
+            value = _mm256_set1_ps(
+                tile_input[(size_t)4u * input_channels + input_channel]);
+            lo4 = _mm256_fmadd_ps(value, w0, lo4);
+            hi4 = _mm256_fmadd_ps(value, w1, hi4);
+            value = _mm256_set1_ps(
+                tile_input[(size_t)5u * input_channels + input_channel]);
+            lo5 = _mm256_fmadd_ps(value, w0, lo5);
+            hi5 = _mm256_fmadd_ps(value, w1, hi5);
+        }
+        lw_nhwc_store_row16(lo0, hi0, tile_output, tile_residual, post_bias,
+                            activation, LW_NHWC_OC_BLOCK);
+        lw_nhwc_store_row16(lo1, hi1, tile_output + output_stride,
+                            tile_residual == NULL ? NULL :
+                                tile_residual + output_stride,
+                            post_bias, activation, LW_NHWC_OC_BLOCK);
+        lw_nhwc_store_row16(lo2, hi2, tile_output + (size_t)2u * output_stride,
+                            tile_residual == NULL ? NULL :
+                                tile_residual + (size_t)2u * output_stride,
+                            post_bias, activation, LW_NHWC_OC_BLOCK);
+        lw_nhwc_store_row16(lo3, hi3, tile_output + (size_t)3u * output_stride,
+                            tile_residual == NULL ? NULL :
+                                tile_residual + (size_t)3u * output_stride,
+                            post_bias, activation, LW_NHWC_OC_BLOCK);
+        lw_nhwc_store_row16(lo4, hi4, tile_output + (size_t)4u * output_stride,
+                            tile_residual == NULL ? NULL :
+                                tile_residual + (size_t)4u * output_stride,
+                            post_bias, activation, LW_NHWC_OC_BLOCK);
+        lw_nhwc_store_row16(lo5, hi5, tile_output + (size_t)5u * output_stride,
+                            tile_residual == NULL ? NULL :
+                                tile_residual + (size_t)5u * output_stride,
+                            post_bias, activation, LW_NHWC_OC_BLOCK);
     }
-    if (bias != NULL) {
-        __m256 bias_lo = _mm256_loadu_ps(bias);
-        __m256 bias_hi = _mm256_loadu_ps(bias + 8u);
-        lo0 = bias_lo; lo1 = bias_lo; lo2 = bias_lo;
-        lo3 = bias_lo; lo4 = bias_lo; lo5 = bias_lo;
-        hi0 = bias_hi; hi1 = bias_hi; hi2 = bias_hi;
-        hi3 = bias_hi; hi4 = bias_hi; hi5 = bias_hi;
-    } else {
-        __m256 zero = _mm256_setzero_ps();
-        lo0 = zero; lo1 = zero; lo2 = zero;
-        lo3 = zero; lo4 = zero; lo5 = zero;
-        hi0 = zero; hi1 = zero; hi2 = zero;
-        hi3 = zero; hi4 = zero; hi5 = zero;
-    }
-    for (input_channel = 0u; input_channel < input_channels; ++input_channel) {
-        const float* weights = packed_weights + (size_t)input_channel * 16u;
-        __m256 w0 = _mm256_loadu_ps(weights);
-        __m256 w1 = _mm256_loadu_ps(weights + 8u);
-        __m256 value;
-        value = _mm256_set1_ps(input[input_channel]);
-        lo0 = _mm256_fmadd_ps(value, w0, lo0);
-        hi0 = _mm256_fmadd_ps(value, w1, hi0);
-        value = _mm256_set1_ps(input[(size_t)input_channels + input_channel]);
-        lo1 = _mm256_fmadd_ps(value, w0, lo1);
-        hi1 = _mm256_fmadd_ps(value, w1, hi1);
-        value = _mm256_set1_ps(input[(size_t)2u * input_channels + input_channel]);
-        lo2 = _mm256_fmadd_ps(value, w0, lo2);
-        hi2 = _mm256_fmadd_ps(value, w1, hi2);
-        value = _mm256_set1_ps(input[(size_t)3u * input_channels + input_channel]);
-        lo3 = _mm256_fmadd_ps(value, w0, lo3);
-        hi3 = _mm256_fmadd_ps(value, w1, hi3);
-        value = _mm256_set1_ps(input[(size_t)4u * input_channels + input_channel]);
-        lo4 = _mm256_fmadd_ps(value, w0, lo4);
-        hi4 = _mm256_fmadd_ps(value, w1, hi4);
-        value = _mm256_set1_ps(input[(size_t)5u * input_channels + input_channel]);
-        lo5 = _mm256_fmadd_ps(value, w0, lo5);
-        hi5 = _mm256_fmadd_ps(value, w1, hi5);
-    }
-    lw_nhwc_store_row16(lo0, hi0, output, residual, post_bias, activation,
-                        output_channels);
-    lw_nhwc_store_row16(lo1, hi1, output + output_stride,
-                        residual == NULL ? NULL : residual + output_stride,
-                        post_bias, activation, output_channels);
-    lw_nhwc_store_row16(lo2, hi2, output + (size_t)2u * output_stride,
-                        residual == NULL ? NULL : residual + (size_t)2u * output_stride,
-                        post_bias, activation, output_channels);
-    lw_nhwc_store_row16(lo3, hi3, output + (size_t)3u * output_stride,
-                        residual == NULL ? NULL : residual + (size_t)3u * output_stride,
-                        post_bias, activation, output_channels);
-    lw_nhwc_store_row16(lo4, hi4, output + (size_t)4u * output_stride,
-                        residual == NULL ? NULL : residual + (size_t)4u * output_stride,
-                        post_bias, activation, output_channels);
-    lw_nhwc_store_row16(lo5, hi5, output + (size_t)5u * output_stride,
-                        residual == NULL ? NULL : residual + (size_t)5u * output_stride,
-                        post_bias, activation, output_channels);
 }
 
 /* Whole-tensor fast path: one call per conv, tile-outer/oc-inner loops with
@@ -470,6 +493,28 @@ void lw_avx2_fma_nhwc_pointwise_grouped_f32(const float* input,
                 const float* packed = packed_weights +
                     (size_t)(output_channel / LW_NHWC_OC_BLOCK) * input_channels *
                     LW_NHWC_OC_BLOCK;
+                uint32_t block_channels = output_channels - output_channel;
+                if (block_channels > LW_NHWC_OC_BLOCK) {
+                    block_channels = LW_NHWC_OC_BLOCK;
+                }
+                if (block_channels == LW_NHWC_OC_BLOCK) {
+                    /* Full channel block: one worker call covers the whole
+                     * pixel group, paying the stack-frame prologue once. */
+                    uint32_t pixel_begin = group_begin * LW_NHWC_PIXEL_TILE;
+                    uint32_t pixel_end = group_end * LW_NHWC_PIXEL_TILE;
+                    if (pixel_end > pixels) {
+                        pixel_end = pixels;
+                    }
+                    lw_nhwc_ocblock16_tile_range(
+                        input, packed,
+                        bias == NULL ? NULL : bias + output_channel,
+                        residual == NULL ? NULL : residual + output_channel,
+                        post_bias == NULL ? NULL : post_bias + output_channel,
+                        output + output_channel,
+                        pixel_begin, pixel_end,
+                        input_channels, output_channels, activation);
+                    continue;
+                }
                 for (uint32_t tile = group_begin; tile < group_end; ++tile) {
                     uint32_t pixel = tile * LW_NHWC_PIXEL_TILE;
                     uint32_t rows = pixels - pixel;
@@ -481,11 +526,7 @@ void lw_avx2_fma_nhwc_pointwise_grouped_f32(const float* input,
                     if (rows > LW_NHWC_PIXEL_TILE) {
                         rows = LW_NHWC_PIXEL_TILE;
                     }
-                    uint32_t block_channels = output_channels - output_channel;
-                    if (block_channels > LW_NHWC_OC_BLOCK) {
-                        block_channels = LW_NHWC_OC_BLOCK;
-                    }
-                    lw_nhwc_tile_rows16_unrolled(tile_input, packed,
+                    lw_nhwc_tile_rows16(tile_input, packed,
                                         bias == NULL ? NULL : bias + output_channel,
                                         tile_residual,
                                         post_bias == NULL ? NULL :

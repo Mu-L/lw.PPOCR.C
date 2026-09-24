@@ -134,12 +134,26 @@ struct lw_session {
     uint64_t ctc_logits_scratch_elements;
     lw_thread_pool* thread_pool;
     uint32_t intra_op_thread_count;
+    /* Borrowed pool used only by the CTC head projection: lets the recognizer
+     * share one intra-op pool across its width-slot sessions instead of each
+     * session owning a full pool.  Never owned by the session. */
+    lw_thread_pool* external_thread_pool;
+    uint32_t external_worker_count;
     lw_session_info info;
 };
 
 lw_status lw_resolve_shapes(lw_session* session, uint64_t max_tensor_size, lw_error* error);
 lw_status lw_plan_workspace(lw_session* session, uint64_t max_workspace_size, lw_error* error);
 void lw_session_set_intra_op_thread_count(lw_session* session, uint32_t thread_count);
+/* Borrow an external pool for the CTC head projection (worker_count <= 1 or
+ * NULL pool detaches).  The pool must outlive the session and is never freed
+ * by the session. */
+void lw_session_set_external_thread_pool(lw_session* session, lw_thread_pool* pool,
+                                         uint32_t worker_count);
+/* Pool the CTC head projection may fan out to: the borrowed pool when
+ * attached, else the session's own intra-op pool.  *out_workers receives the
+ * usable worker count (1 when serial). */
+lw_thread_pool* lw_session_ctc_head_pool(const lw_session* session, uint32_t* out_workers);
 lw_status lw_session_share_prepared_constants(lw_session* destination,
                                                const lw_session* source,
                                                lw_error* error);

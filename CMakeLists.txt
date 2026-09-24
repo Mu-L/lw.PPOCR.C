@@ -271,6 +271,7 @@ set(LW_PPOCR_C_SOURCES
     src/runtime/memory.c
     src/runtime/model.c
     src/runtime/parallel.c
+    src/runtime/ctc_head_parallel_internal.c
     src/runtime/prepared_execution.c
     src/runtime/session.c
     src/runtime/shape.c

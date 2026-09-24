@@ -511,3 +511,57 @@ lw_nhwc_pointwise_unrolled_all()ï¼Œæ•´ä¸ªå·ç§¯ä¸€æ¬¡è°ƒç”¨ï¼Œtile-outer/oc-inne
 | 1w | 256.8 ms | 224.4 ms | -12.6% |
 | 4w | 103.1 ms | 87.4 ms | -15.2% |
 | 8w | 77.7 ms | 65.4 ms | -15.8% |
+
+
+## Round 7: grouped pointwise oc-block tile-range worker (2026-09-24)
+
+`lw_nhwc_tile_rows16_unrolled` (per-tile noinline call) replaced by
+`lw_nhwc_ocblock16_tile_range`: one noinline call covers a whole pixel group
+of a full 16-channel output block, so the stack-frame prologue is paid once
+per (group, block) instead of once per 6-row tile. Partial channel blocks
+fall back to per-tile `lw_nhwc_tile_rows16`. Same bias init, ascending ic
+FMA order and store_row16 epilogue => bit-identical.
+
+Verification:
+- pw-microbench bit-identical YES; ctest 88/88 green.
+- det-op-timer 960x960 tiny DET: pointwise total 23ms -> 15.2ms (-34%).
+
+End-to-end (interleaved A/B vs HEAD build, 3 rounds, mean ocr_ms;
+checksums identical on both sides):
+
+| model  | workers | HEAD ms | opt ms | delta |
+|--------|---------|---------|--------|-------|
+| tiny   | 1       | 232.4   | 200.1  | -13.9% |
+| tiny   | 4       | 81.8    | 70.0   | -14.4% |
+| small  | 1       | 1169.6  | 1141.9 | -2.4%  |
+| small  | 4       | 414.6   | 401.7  | -3.1%  |
+| medium | 1       | 4548.1  | 4348.7 | -4.4%  |
+| medium | 4       | 2208.5  | 2147.1 | -2.8%  |
+
+checksums: tiny 46d99468540b5eb7, small 2ee4a78f9306c18b,
+medium 3bdfd6741f2ffab7 (unchanged).
+
+small/medium gains are smaller because small REC stays on the canonical
+interpreter (known argmax mismatch) and medium REC runs through
+lw_x64_rec_fast_plan; the grouped path mainly serves their DET stages.
+
+## 2026-09-24 CTC 4 matmul L§vL,]n	
+
+- ° src/runtime/ctc_head_parallel_internal.{c,h}CTC 4 argmax matmul 	 4 LW0¿`
+  Ï*“úC / z2L8Œh ôMØ8	 4 LWYØ"^ 4 p>è
+  E¹LÅ{ 4 LùP
+- recognizer 	ê	 intra `lw_recognizer_set_intra_op_thread_count	0 session 
+  x64 ıM‹ocr.c 	 worker pG¦1w=8 ¿4w=2 ¿/recognizer	
+- ¥e¹executor.c $* CTC (¹tiled/^ tiled	ctc_projection_internal.cÑï	
+  ctc_row_probabilities 	èL»ÍVİ2L
+- ŞRîbinary }w° channel_major_nchw ×NCHW gL/êù rank-4 NCHW i
+   Ï/(rank-3 Ä [.., .., C]  Ïİ channel-last ï„şô x64_rec_backend_nchw
+  I 5 yKÕ1%semantic 155 Add max_abs=3.42	
+- A/Bhead-build ú¿ vs ,n3 n¤ÿG<checksum hÑ	
+  tiny    1w 232.3->196.1ms (-15.6%)  4w 86.5->75.3ms (-13.0%)
+  small   1w 1265.9->889.9ms (-29.7%) 4w 473.0->327.0ms (-30.9%)
+  medium  1w 4791.6->4458.4ms (-7.0%) 4w 1885.2->1673.5ms (-11.2%)
+- ctest 88/88 hÿ
+
+ízô48SMÏ* 4 LWÍA 14.4MB(medium)/9MB(small) CÍpanel-outer ª¯Í’ï
+äCÍU!ÇXb’øìËÍ’MØ		bvLZ%<'v

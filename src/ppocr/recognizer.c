@@ -95,6 +95,11 @@ struct lw_recognizer {
     uint32_t adaptive_width_enabled;
     uint8_t resident_widths_enabled;
     lw_rec_resident_slot resident_slots[LW_REC_RESIDENT_WIDTH_COUNT];
+    /* Optional intra-op pool shared by every width slot/session of this
+     * recognizer.  A recognizer serves one line at a time (line workers hold
+     * clones), so the pool is never run concurrently. */
+    lw_thread_pool* intra_pool;
+    uint32_t intra_workers;
     lw_recognizer_info info;
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
     lw_x64_rec_backend_slot x64_slots[LW_REC_RESIDENT_WIDTH_COUNT];
@@ -509,6 +514,8 @@ static lw_status configure_session(lw_recognizer* recognizer, uint32_t target_wi
     recognizer->cached_target_width = recognizer->current_target_width;
     recognizer->cached_time_steps = recognizer->current_time_steps;
     recognizer->session = session;
+    lw_session_set_external_thread_pool(session, recognizer->intra_pool,
+                                        recognizer->intra_workers);
     recognizer->input = input;
     recognizer->probabilities = probabilities;
     recognizer->best_indices = best_indices;
@@ -852,6 +859,10 @@ static void recognizer_create_slot_instances(lw_recognizer* recognizer) {
             slot->program = NULL;
             slot->instance = NULL;
         }
+        if (slot->instance != NULL) {
+            lw_x64_rec_instance_set_thread_pool(slot->instance, recognizer->intra_pool,
+                                                recognizer->intra_workers);
+        }
     }
 }
 
@@ -1017,6 +1028,7 @@ lw_status lw_recognizer_clone(const lw_recognizer* source, lw_recognizer** out_r
         recognizer_create_slot_instances(clone);
     }
 #endif
+    lw_recognizer_set_intra_op_thread_count(clone, source->intra_workers);
     *out_recognizer = clone;
     lw_set_error(error, LW_STATUS_OK, "");
     return LW_STATUS_OK;
@@ -1070,9 +1082,47 @@ void lw_recognizer_free(lw_recognizer* recognizer) {
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
     medium_fast_shared_release(recognizer->fast_shared);
 #endif
+    lw_thread_pool_free(recognizer->intra_pool);
+    recognizer->intra_pool = NULL;
     lw_rec_dictionary_free(recognizer->dictionary);
     lw_model_free(recognizer->model);
     free(recognizer);
+}
+
+static void recognizer_attach_intra_pool(lw_recognizer* recognizer) {
+    uint32_t index;
+    if (recognizer->session != NULL) {
+        lw_session_set_external_thread_pool(recognizer->session, recognizer->intra_pool,
+                                            recognizer->intra_workers);
+    }
+    if (recognizer->cached_session != NULL) {
+        lw_session_set_external_thread_pool(recognizer->cached_session, recognizer->intra_pool,
+                                            recognizer->intra_workers);
+    }
+    for (index = 0u; index < LW_REC_RESIDENT_WIDTH_COUNT; ++index) {
+        if (recognizer->resident_slots[index].session != NULL) {
+            lw_session_set_external_thread_pool(recognizer->resident_slots[index].session,
+                                                recognizer->intra_pool, recognizer->intra_workers);
+        }
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+        if (recognizer->x64_slots[index].instance != NULL) {
+            lw_x64_rec_instance_set_thread_pool(recognizer->x64_slots[index].instance,
+                                                recognizer->intra_pool, recognizer->intra_workers);
+        }
+#endif
+    }
+}
+
+void lw_recognizer_set_intra_op_thread_count(lw_recognizer* recognizer, uint32_t thread_count) {
+    if (recognizer == NULL) return;
+    if (thread_count == 0u) thread_count = 1u;
+    if (thread_count > LW_PARALLEL_MAX_WORKERS) thread_count = LW_PARALLEL_MAX_WORKERS;
+    lw_thread_pool_free(recognizer->intra_pool);
+    recognizer->intra_pool =
+        thread_count > 1u ? lw_thread_pool_create(thread_count) : NULL;
+    recognizer->intra_workers =
+        thread_count > 1u ? lw_thread_pool_worker_count(recognizer->intra_pool) : 1u;
+    recognizer_attach_intra_pool(recognizer);
 }
 
 lw_status lw_recognizer_get_info(const lw_recognizer* recognizer, lw_recognizer_info* info) {

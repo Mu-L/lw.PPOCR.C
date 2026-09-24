@@ -1,4 +1,5 @@
 #include "ctc_projection_internal.h"
+#include "ctc_head_parallel_internal.h"
 #include "packed_matmul_internal.h"
 #include "../simd/simd_kernels.h"
 #include "lwm_read.h"
@@ -53,11 +54,17 @@ lw_status lw_x64_rec_ctc_execute(const lw_x64_rec_program* program,
     memset(instance->best_probabilities, 0, (size_t)program->ctc.rows * sizeof(*instance->best_probabilities));
     /* The logit tensor is never materialized: the argmax pass keeps only the
      * per-row maximum and index, and the probability pass recomputes one row
-     * of logits per emitted step. */
-    lw_avx2_fma_packed_matmul_argmax_scores_f32(
-        activation, program->ctc.packed_weights, program->ctc.bias,
-        instance->best_indices, instance->ctc_scores, 1u, program->ctc.rows,
-        program->ctc.inner, program->ctc.classes);
+     * of logits per emitted step.  Rows are independent, so the argmax pass
+     * may fan out over the borrowed intra-op pool bit-identically. */
+    {
+        uint32_t head_workers = lw_ctc_head_parallel_worker_count(
+            instance->thread_pool, instance->intra_op_workers, program->ctc.rows,
+            program->ctc.inner, program->ctc.classes);
+        lw_ctc_head_argmax_scores_parallel_f32(
+            instance->thread_pool, head_workers, activation, program->ctc.packed_weights,
+            program->ctc.bias, instance->best_indices, instance->ctc_scores, program->ctc.rows,
+            program->ctc.inner, program->ctc.classes);
+    }
     lw_avx2_ctc_row_probabilities_f32(
         activation, program->ctc.packed_weights, program->ctc.bias,
         instance->best_indices, instance->ctc_scores, instance->best_probabilities,

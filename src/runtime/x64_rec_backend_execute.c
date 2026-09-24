@@ -273,9 +273,11 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         }
         return LW_STATUS_OK;
     case LW_X64_REC_OP_ADD: case LW_X64_REC_OP_MUL: case LW_X64_REC_OP_DIV:
+    case LW_X64_REC_OP_SUB: case LW_X64_REC_OP_POW:
         input = op->data.binary.left_constant != NULL ? (float*)(uintptr_t)op->data.binary.left_constant : offset_ptr(instance, op->data.binary.left_offset);
         output = offset_ptr(instance, op->data.binary.output_offset);
-        if (instance->program->backend_layout == LW_X64_REC_BACKEND_NCHW &&
+        if (op->data.binary.channel_major_nchw != 0u &&
+            instance->program->backend_layout == LW_X64_REC_BACKEND_NCHW &&
             (op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_LEFT_CHANNEL ||
              op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_RIGHT_CHANNEL)) {
             float* full = op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_LEFT_CHANNEL
@@ -310,6 +312,36 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         if (op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_SAME) {
             float* right = op->data.binary.right_constant != NULL ? (float*)(uintptr_t)op->data.binary.right_constant : offset_ptr(instance, op->data.binary.right_offset);
             if (right == NULL) return LW_STATUS_INVALID_ARGUMENT;
+            if (op->data.binary.mixed_nhwc != 0u) {
+                /* Cross-layout SAME: one side is canonical [N,C,H,W] order,
+                 * the other physical NHWC.  Gather the NHWC side through the
+                 * index map so both operands align semantically. */
+                uint32_t dn = (uint32_t)op->data.binary.dimensions[0];
+                uint32_t dc = (uint32_t)op->data.binary.dimensions[1];
+                uint32_t dh = (uint32_t)op->data.binary.dimensions[2];
+                uint32_t dw = (uint32_t)op->data.binary.dimensions[3];
+                uint32_t n, c, y, x;
+                for (n = 0u; n < dn; ++n) {
+                    for (c = 0u; c < dc; ++c) {
+                        for (y = 0u; y < dh; ++y) {
+                            for (x = 0u; x < dw; ++x) {
+                                uint64_t canonical_flat = ((uint64_t)(n * dc + c) * dh + y) * dw + x;
+                                uint64_t nhwc_flat = ((uint64_t)(n * dh + y) * dw + x) * dc + c;
+                                float lhs = op->data.binary.mixed_nhwc == 2u ? input[nhwc_flat] : input[canonical_flat];
+                                float rhs = op->data.binary.mixed_nhwc == 1u ? right[nhwc_flat] : right[canonical_flat];
+                                switch (op->data.binary.operation) {
+                                case LW_OP_ADD: output[canonical_flat] = lhs + rhs; break;
+                                case LW_OP_MUL: output[canonical_flat] = lhs * rhs; break;
+                                case LW_OP_DIV: output[canonical_flat] = lhs / rhs; break;
+                                case LW_OP_SUB: output[canonical_flat] = lhs - rhs; break;
+                                default: output[canonical_flat] = powf(lhs, rhs); break;
+                                }
+                            }
+                        }
+                    }
+                }
+                return LW_STATUS_OK;
+            }
             lw_avx2_binary_contiguous_f32(binary_operation(op->data.binary.operation), input, right, output, op->data.binary.element_count);
             return LW_STATUS_OK;
         }
@@ -317,6 +349,19 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
             float* channel = op->data.binary.right_constant != NULL ? (float*)(uintptr_t)op->data.binary.right_constant : offset_ptr(instance, op->data.binary.right_offset);
             if (channel == NULL) return LW_STATUS_INVALID_ARGUMENT;
             lw_avx2_binary_channel_f32(binary_operation(op->data.binary.operation), input, channel, output, op->data.binary.pixels, op->data.binary.channels, 0);
+            return LW_STATUS_OK;
+        }
+        if (op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_RIGHT_PIXEL_SCALAR) {
+            const float* pixel_scalars = op->data.binary.right_constant != NULL
+                ? op->data.binary.right_constant
+                : offset_ptr(instance, op->data.binary.right_offset);
+            uint32_t pixel;
+            if (input == NULL || output == NULL || pixel_scalars == NULL) return LW_STATUS_INVALID_ARGUMENT;
+            for (pixel = 0u; pixel < op->data.binary.pixels; ++pixel) {
+                lw_avx2_binary_right_scalar_f32(binary_operation(op->data.binary.operation),
+                    input + (size_t)pixel * op->data.binary.channels, pixel_scalars[pixel],
+                    output + (size_t)pixel * op->data.binary.channels, op->data.binary.channels);
+            }
             return LW_STATUS_OK;
         }
         if (op->data.binary.right_constant != NULL && op->data.binary.channels > 1u) {
@@ -329,7 +374,8 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
                 case LW_OP_ADD: output[index] = lhs + rhs; break;
                 case LW_OP_MUL: output[index] = lhs * rhs; break;
                 case LW_OP_DIV: output[index] = lhs / rhs; break;
-                default: output[index] = lhs - rhs; break;
+                case LW_OP_SUB: output[index] = lhs - rhs; break;
+                default: output[index] = powf(lhs, rhs); break;
                 }
             }
             return LW_STATUS_OK;
@@ -343,6 +389,46 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         else if (op->kind == LW_X64_REC_OP_GELU) lw_avx2_gelu_f32(input, output, op->data.unary.element_count);
         else lw_avx2_hard_sigmoid_contiguous_f32(input, output, op->data.unary.element_count, op->data.unary.alpha, op->data.unary.beta);
         return LW_STATUS_OK;
+    case LW_X64_REC_OP_SIGMOID:
+        /* Canonical scalar sigmoid: identical expf evaluation order, so
+         * results match the interpreter bit for bit. */
+        input = offset_ptr(instance, op->data.unary.input_offset); output = offset_ptr(instance, op->data.unary.output_offset);
+        if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        return lw_scalar_sigmoid_f32(input, output, op->data.unary.element_count);
+    case LW_X64_REC_OP_SQRT:
+        input = offset_ptr(instance, op->data.unary.input_offset); output = offset_ptr(instance, op->data.unary.output_offset);
+        if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        return lw_scalar_sqrt_f32(input, output, op->data.unary.element_count);
+    case LW_X64_REC_OP_SLICE:
+        input = offset_ptr(instance, op->data.slice.input_offset); output = offset_ptr(instance, op->data.slice.output_offset);
+        if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        return lw_scalar_slice_f32(input, output, op->data.slice.rank,
+            op->data.slice.input_dimensions, op->data.slice.output_dimensions,
+            op->data.slice.slice_count, op->data.slice.starts, op->data.slice.ends,
+            op->data.slice.axes, op->data.slice.steps);
+    case LW_X64_REC_OP_CONCAT: {
+        /* Channel-axis concat over NHWC rank-4 maps: per-pixel
+         * concatenated channel copies (pure data movement). */
+        const float* concat_inputs[LWM_V0_MAX_NODE_INPUTS];
+        uint32_t concat_slot;
+        uint64_t concat_pixel;
+        output = offset_ptr(instance, op->data.concat.output_offset);
+        if (output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        for (concat_slot = 0u; concat_slot < op->data.concat.input_count; ++concat_slot) {
+            concat_inputs[concat_slot] = offset_ptr(instance, op->data.concat.input_offsets[concat_slot]);
+            if (concat_inputs[concat_slot] == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        }
+        for (concat_pixel = 0u; concat_pixel < op->data.concat.pixels; ++concat_pixel) {
+            float* destination = output + (size_t)concat_pixel * op->data.concat.output_channels;
+            for (concat_slot = 0u; concat_slot < op->data.concat.input_count; ++concat_slot) {
+                uint32_t concat_channels = op->data.concat.input_channels[concat_slot];
+                memcpy(destination, concat_inputs[concat_slot] + (size_t)concat_pixel * concat_channels,
+                       (size_t)concat_channels * sizeof(float));
+                destination += concat_channels;
+            }
+        }
+        return LW_STATUS_OK;
+    }
     case LW_X64_REC_OP_SOFTMAX:
         input = offset_ptr(instance, op->data.softmax.input_offset); output = offset_ptr(instance, op->data.softmax.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
@@ -351,6 +437,16 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
     case LW_X64_REC_OP_REDUCE_MEAN:
         input = offset_ptr(instance, op->data.reduce.input_offset); output = offset_ptr(instance, op->data.reduce.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        if (op->data.reduce.general != 0u) {
+            /* Not the global-pool pattern: run the canonical scalar
+             * reduce with the original axes, bit-identical to the
+             * interpreter (e.g. Small's rank-3 last-axis mean). */
+            return lw_scalar_reduce_mean_f32(input, output, op->data.reduce.input_rank,
+                op->data.reduce.input_dimensions, op->data.reduce.axes_count,
+                op->data.reduce.axes, op->data.reduce.keep_dimensions,
+                op->data.reduce.no_op_with_empty_axes, op->data.reduce.output_rank,
+                op->data.reduce.output_dimensions);
+        }
         if (instance->program->backend_layout == LW_X64_REC_BACKEND_NCHW) {
             for (uint32_t channel = 0u; channel < op->data.reduce.channels; ++channel) {
                 const float* source = input + (size_t)channel * op->data.reduce.height *
@@ -443,14 +539,30 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         if (handled != 0) return LW_STATUS_OK;
         return lw_scalar_transpose_f32(input, output, op->data.transpose.rank, op->data.transpose.input_dimensions, op->data.transpose.rank, op->data.transpose.permutation, op->data.transpose.output_dimensions);
     }
-    case LW_X64_REC_OP_MATMUL:
+    case LW_X64_REC_OP_MATMUL: {
+        const float* right;
         input = offset_ptr(instance, op->data.matmul.input_offset); output = offset_ptr(instance, op->data.matmul.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
-        if (op->data.matmul.packed_weights != NULL) lw_avx2_packed_matmul_shared_f32(input, op->data.matmul.packed_weights, output, op->data.matmul.batch, op->data.matmul.rows, op->data.matmul.inner, op->data.matmul.columns);
-        else return lw_scalar_matmul_shared_f32(input, op->data.matmul.weights, output, op->data.matmul.batch, op->data.matmul.rows, op->data.matmul.inner, op->data.matmul.columns);
-        return LW_STATUS_OK;
+        if (op->data.matmul.packed_weights != NULL) {
+            lw_avx2_packed_matmul_shared_f32(input, op->data.matmul.packed_weights, output, op->data.matmul.batch, op->data.matmul.rows, op->data.matmul.inner, op->data.matmul.columns);
+            return LW_STATUS_OK;
+        }
+        right = op->data.matmul.weights != NULL ? op->data.matmul.weights : (const float*)offset_ptr(instance, op->data.matmul.weights_offset);
+        if (right == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        if (op->data.matmul.weights_rank == 2u) {
+            return lw_matmul_shared_f32(input, right, output, op->data.matmul.batch, op->data.matmul.rows, op->data.matmul.inner, op->data.matmul.columns);
+        }
+        return lw_scalar_matmul_f32(input, right, output, op->data.matmul.input_rank, op->data.matmul.input_dimensions, op->data.matmul.weights_rank, op->data.matmul.weights_dimensions, op->data.matmul.output_rank, op->data.matmul.output_dimensions); }
     default: return LW_STATUS_UNSUPPORTED;
     }
+}
+
+void lw_x64_rec_instance_set_thread_pool(lw_x64_rec_instance* instance,
+                                         lw_thread_pool* pool, uint32_t workers) {
+    if (instance == NULL) return;
+    if (pool == NULL || workers <= 1u) { pool = NULL; workers = 0u; }
+    instance->thread_pool = pool;
+    instance->intra_op_workers = workers;
 }
 
 lw_status lw_x64_rec_instance_create(const lw_x64_rec_program* program, lw_x64_rec_instance** out, lw_error* error) {

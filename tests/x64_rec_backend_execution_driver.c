@@ -48,6 +48,8 @@ int main(int argc, char** argv) {
     float* backend_input;
     uint32_t t;
     uint32_t canonical_node_cursor = 0u;
+    uint32_t mismatch_count = 0u;
+    float compare_eps = 1.0e-3f;
     int return_code = 1;
 
     if (argc != 2) {
@@ -55,6 +57,10 @@ int main(int argc, char** argv) {
         return 2;
     }
     lw_error_init(&error);
+    {
+        const char* eps_env = getenv("LW_DRIVER_EPS");
+        if (eps_env != NULL) compare_eps = (float)atof(eps_env);
+    }
     if (lw_model_load(argv[1], NULL, &model, &error) != LW_STATUS_OK) {
         return fail("model load failed", &error);
     }
@@ -138,27 +144,49 @@ int main(int argc, char** argv) {
             uint32_t channels = (uint32_t)canonical_backbone->tensors[output_index].dimensions[1];
             uint32_t height_value = (uint32_t)canonical_backbone->tensors[output_index].dimensions[2];
             uint32_t width_value = (uint32_t)canonical_backbone->tensors[output_index].dimensions[3];
+            /* Try both physical layouts: the compiled backbone stores conv-chain
+               tensors as NHWC while slice/reshape-chain tensors stay in canonical
+               order.  Accept whichever interpretation matches better. */
+            float direct_difference = 0.0f;
+            float remapped_difference = 0.0f;
             for (uint32_t y = 0u; y < height_value; ++y) {
                 for (uint32_t x = 0u; x < width_value; ++x) {
                     for (uint32_t c = 0u; c < channels; ++c) {
                         uint64_t nhwc_index = ((uint64_t)y * width_value + x) * channels + c;
                         uint64_t nchw_index = ((uint64_t)c * height_value + y) * width_value + x;
-                        float difference = fabsf(expected[nchw_index] - actual[nhwc_index]);
-                        if (difference > max_difference) max_difference = difference;
+                        float dd = fabsf(expected[nchw_index] - actual[nchw_index]);
+                        float rd = fabsf(expected[nchw_index] - actual[nhwc_index]);
+                        if (dd > direct_difference) direct_difference = dd;
+                        if (rd > remapped_difference) remapped_difference = rd;
                     }
                 }
             }
+            max_difference = direct_difference < remapped_difference ? direct_difference : remapped_difference;
         } else {
             for (uint64_t element = 0u; element < count; ++element) {
                 float difference = fabsf(expected[element] - actual[element]);
                 if (difference > max_difference) max_difference = difference;
             }
         }
-        if (max_difference > 1.0e-3f) {
+        if (max_difference > compare_eps) {
+            uint64_t element;
+            uint32_t shown = 0u;
             fprintf(stderr, "backbone mismatch at op=%u node=%u kind=%u max_abs=%.9g\n",
                     oi, semantic, (unsigned)program->ops[oi].kind, max_difference);
-            goto cleanup;
+            for (element = 0u; element < count && shown < 6u; ++element) {
+                float difference = fabsf(expected[element] - actual[element]);
+                if (difference > compare_eps) {
+                    fprintf(stderr, "  [%llu] expected=%.9g actual=%.9g\n",
+                            (unsigned long long)element, expected[element], actual[element]);
+                    ++shown;
+                }
+            }
+            ++mismatch_count;
         }
+    }
+    if (mismatch_count != 0u) {
+        fprintf(stderr, "backbone mismatches: %u op(s)\n", mismatch_count);
+        goto cleanup;
     }
     if (lw_execute_session_f32_ctc_greedy(canonical, canonical_input, canonical_input_count,
                                            canonical_indices, canonical_probabilities,

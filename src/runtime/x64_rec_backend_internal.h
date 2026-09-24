@@ -62,6 +62,11 @@ typedef enum lw_x64_rec_op_kind {
     LW_X64_REC_OP_CONCAT = 17,
     LW_X64_REC_OP_RESIZE = 18,
     LW_X64_REC_OP_SOFTMAX = 22,
+    LW_X64_REC_OP_SUB = 23,
+    LW_X64_REC_OP_POW = 24,
+    LW_X64_REC_OP_SIGMOID = 25,
+    LW_X64_REC_OP_SQRT = 26,
+    LW_X64_REC_OP_SLICE = 27,
     LW_X64_REC_OP_GENERIC_UNSUPPORTED = 0xffff
 } lw_x64_rec_op_kind;
 
@@ -89,7 +94,11 @@ typedef enum lw_x64_rec_broadcast_kind {
     LW_X64_REC_BROADCAST_LEFT_SCALAR = 2,
     LW_X64_REC_BROADCAST_RIGHT_CHANNEL = 3,
     LW_X64_REC_BROADCAST_LEFT_CHANNEL = 4,
-    LW_X64_REC_BROADCAST_GENERAL = 5
+    LW_X64_REC_BROADCAST_GENERAL = 5,
+    /* Right operand holds one scalar per output pixel (element_count /
+     * channels floats), broadcast over the channel axis. Bit-identical
+     * to the canonical scalar broadcast for every operation. */
+    LW_X64_REC_BROADCAST_RIGHT_PIXEL_SCALAR = 6
 } lw_x64_rec_broadcast_kind;
 
 typedef struct lw_x64_rec_value {
@@ -158,7 +167,12 @@ typedef struct lw_x64_rec_binary_op {
     uint32_t channels;
     uint16_t operation;
     uint8_t broadcast_kind;
-    uint8_t reserved;
+    uint8_t mixed_nhwc; /* 0=uniform layout, 1=right operand physical NHWC, 2=left */
+    /* 1 = channel broadcast over an NCHW-physical rank-4 tensor (channel axis
+     * is dims[1]); 0 = channel-last or non-channel broadcast.  The NCHW
+     * executor branch keys on this flag so canonical rank-3 [.., .., C]
+     * tensors keep the channel-last path. */
+    uint8_t channel_major_nchw;
     int32_t dimensions[4];
 } lw_x64_rec_binary_op;
 
@@ -194,6 +208,17 @@ typedef struct lw_x64_rec_reduce_op {
     uint32_t height;
     uint32_t width;
     uint32_t channels;
+    /* general != 0: not the NCHW/NHWC global-pool pattern; run the
+     * canonical scalar reduce with the original axes for bit-identity. */
+    uint32_t general;
+    uint32_t input_rank;
+    uint32_t output_rank;
+    uint32_t axes_count;
+    uint32_t keep_dimensions;
+    uint32_t no_op_with_empty_axes;
+    int32_t axes[LW_MAX_DIMS];
+    int32_t input_dimensions[LW_MAX_DIMS];
+    int32_t output_dimensions[LW_MAX_DIMS];
 } lw_x64_rec_reduce_op;
 
 typedef struct lw_x64_rec_pool_op {
@@ -212,20 +237,28 @@ typedef struct lw_x64_rec_transpose_op {
     uint64_t input_offset;
     uint64_t output_offset;
     uint32_t rank;
-    int32_t input_dimensions[4];
-    int32_t output_dimensions[4];
-    int32_t permutation[4];
+    int32_t input_dimensions[LW_MAX_DIMS];
+    int32_t output_dimensions[LW_MAX_DIMS];
+    int32_t permutation[LW_MAX_DIMS];
 } lw_x64_rec_transpose_op;
 
 typedef struct lw_x64_rec_matmul_op {
     uint64_t input_offset;
     uint64_t output_offset;
+    uint64_t weights_offset;
     const float* weights;
     float* packed_weights;
     uint32_t batch;
     uint32_t rows;
     uint32_t inner;
     uint32_t columns;
+    uint32_t general;
+    uint32_t input_rank;
+    uint32_t weights_rank;
+    uint32_t output_rank;
+    int32_t input_dimensions[LW_MAX_DIMS];
+    int32_t weights_dimensions[LW_MAX_DIMS];
+    int32_t output_dimensions[LW_MAX_DIMS];
 } lw_x64_rec_matmul_op;
 
 typedef struct lw_x64_rec_softmax_op {
@@ -235,6 +268,34 @@ typedef struct lw_x64_rec_softmax_op {
     uint32_t rank;
     int32_t dimensions[4];
 } lw_x64_rec_softmax_op;
+
+/* Channel-axis (NCHW axis 1) concat over rank-4 feature maps stored NHWC:
+ * per-pixel concatenated channel copies, pure data movement. */
+typedef struct lw_x64_rec_concat_op {
+    uint64_t input_offsets[LWM_V0_MAX_NODE_INPUTS];
+    uint64_t output_offset;
+    uint32_t input_channels[LWM_V0_MAX_NODE_INPUTS];
+    uint32_t input_count;
+    uint32_t output_channels;
+    uint32_t pixels;
+    int32_t axis;
+} lw_x64_rec_concat_op;
+
+/* Generic slice over a canonical-layout (non-NHWC) tensor; executed by
+ * the shared scalar slice kernel so results match the interpreter. */
+typedef struct lw_x64_rec_slice_op {
+    uint64_t input_offset;
+    uint64_t output_offset;
+    uint32_t rank;
+    uint32_t output_rank;
+    uint32_t slice_count;
+    int32_t input_dimensions[LW_MAX_DIMS];
+    int32_t output_dimensions[LW_MAX_DIMS];
+    int32_t starts[LW_MAX_DIMS];
+    int32_t ends[LW_MAX_DIMS];
+    int32_t axes[LW_MAX_DIMS];
+    int32_t steps[LW_MAX_DIMS];
+} lw_x64_rec_slice_op;
 
 typedef struct lw_x64_rec_op {
     uint16_t kind;
@@ -252,6 +313,8 @@ typedef struct lw_x64_rec_op {
         lw_x64_rec_transpose_op transpose;
         lw_x64_rec_matmul_op matmul;
         lw_x64_rec_softmax_op softmax;
+        lw_x64_rec_concat_op concat;
+        lw_x64_rec_slice_op slice;
     } data;
 } lw_x64_rec_op;
 
@@ -327,6 +390,11 @@ typedef struct lw_x64_rec_instance {
     uint32_t* best_indices;
     float* best_probabilities;
     lw_x64_rec_profile profile;
+    /* Borrowed intra-op pool for the CTC head matmul (NULL = serial).
+     * Owned by the recognizer; every slot instance of one recognizer
+     * shares it, and slots never run concurrently. */
+    lw_thread_pool* thread_pool;
+    uint32_t intra_op_workers;
     /* 0 when arena/scratch/CTC buffers are borrowed from a shared
      * cross-width workspace owned by the recognizer. */
     uint8_t owns_workspace;
@@ -362,6 +430,10 @@ lw_status lw_x64_rec_instance_create_borrowed(
     float* ctc_scores, uint32_t* best_indices, float* best_probabilities,
     uint64_t ctc_rows, lw_x64_rec_instance** out, lw_error* error);
 void lw_x64_rec_instance_free(lw_x64_rec_instance* instance);
+/* Attach a borrowed intra-op pool for the CTC head projection
+ * (workers <= 1 or NULL pool detaches; serial fallback). */
+void lw_x64_rec_instance_set_thread_pool(lw_x64_rec_instance* instance,
+                                         lw_thread_pool* pool, uint32_t workers);
 float* lw_x64_rec_instance_input(lw_x64_rec_instance* instance, uint64_t* element_count);
 lw_status lw_x64_rec_instance_run(lw_x64_rec_instance* instance, lw_error* error);
 lw_status lw_x64_rec_instance_run_backbone(lw_x64_rec_instance* instance, lw_error* error);

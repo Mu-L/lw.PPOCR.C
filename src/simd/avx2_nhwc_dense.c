@@ -461,6 +461,151 @@ static void dense_tile_avx2(const float* const* row_ptrs, uint32_t rows,
         _mm256_storeu_ps(destination + 8u, hi[row]);
     }
 }
+
+/* Fully unrolled variant of dense_tile_avx2 for full tiles (6 rows, 16
+ * channels): named YMM accumulators instead of arrays so the compiler keeps
+ * them in registers (the array form spills). Same bias/partial
+ * initialisation, same ascending k FMA order, same epilogue, so results are
+ * bit-identical. Partial tiles or partial channel blocks delegate to
+ * dense_tile_avx2. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#elif defined(_MSC_VER)
+__declspec(noinline)
+#endif
+LW_NHWC_DENSE_AVX2
+static void dense_tile_avx2_unrolled(const float* const* row_ptrs, uint32_t rows,
+                            const int32_t* offsets, const int32_t* direct_offsets, uint32_t taps,
+                            const float* packed, uint32_t k0, uint32_t k_end,
+                            uint32_t k_total, const lw_nhwc_epilogue* epilogue,
+                            float* output, uint32_t output_stride,
+                            uint32_t block_channels, float* partial) {
+    __m256 lo0, lo1, lo2, lo3, lo4, lo5;
+    __m256 hi0, hi1, hi2, hi3, hi4, hi5;
+    __m256 zero = _mm256_setzero_ps();
+    uint32_t k;
+    if (rows < LW_NHWC_PIXEL_TILE || block_channels < LW_NHWC_OC_BLOCK) {
+        dense_tile_avx2(row_ptrs, rows, offsets, direct_offsets, taps, packed,
+                        k0, k_end, k_total, epilogue, output, output_stride,
+                        block_channels, partial);
+        return;
+    }
+    if (k0 == 0u) {
+        __m256 bias_lo = zero;
+        __m256 bias_hi = zero;
+        if (epilogue != NULL && epilogue->bias != NULL) {
+            bias_lo = _mm256_loadu_ps(epilogue->bias);
+            bias_hi = _mm256_loadu_ps(epilogue->bias + 8u);
+        }
+        lo0 = bias_lo; lo1 = bias_lo; lo2 = bias_lo;
+        lo3 = bias_lo; lo4 = bias_lo; lo5 = bias_lo;
+        hi0 = bias_hi; hi1 = bias_hi; hi2 = bias_hi;
+        hi3 = bias_hi; hi4 = bias_hi; hi5 = bias_hi;
+    } else {
+        lo0 = _mm256_loadu_ps(partial);
+        hi0 = _mm256_loadu_ps(partial + 8u);
+        lo1 = _mm256_loadu_ps(partial + 16u);
+        hi1 = _mm256_loadu_ps(partial + 24u);
+        lo2 = _mm256_loadu_ps(partial + 32u);
+        hi2 = _mm256_loadu_ps(partial + 40u);
+        lo3 = _mm256_loadu_ps(partial + 48u);
+        hi3 = _mm256_loadu_ps(partial + 56u);
+        lo4 = _mm256_loadu_ps(partial + 64u);
+        hi4 = _mm256_loadu_ps(partial + 72u);
+        lo5 = _mm256_loadu_ps(partial + 80u);
+        hi5 = _mm256_loadu_ps(partial + 88u);
+    }
+    for (k = k0; k < k_end; ++k) {
+        int32_t input_offset;
+        const float* weights;
+        __m256 w0;
+        __m256 w1;
+        __m256 value;
+        if (direct_offsets != NULL) input_offset = direct_offsets[k];
+        else {
+            uint32_t ic = k / taps;
+            uint32_t tap = k - ic * taps;
+            input_offset = offsets[tap] + (int32_t)ic;
+        }
+        weights = packed + (size_t)(k - k0) * 16u;
+        w0 = _mm256_loadu_ps(weights);
+        w1 = _mm256_loadu_ps(weights + 8u);
+        value = _mm256_set1_ps(row_ptrs[0][input_offset]);
+        lo0 = _mm256_fmadd_ps(value, w0, lo0);
+        hi0 = _mm256_fmadd_ps(value, w1, hi0);
+        value = _mm256_set1_ps(row_ptrs[1][input_offset]);
+        lo1 = _mm256_fmadd_ps(value, w0, lo1);
+        hi1 = _mm256_fmadd_ps(value, w1, hi1);
+        value = _mm256_set1_ps(row_ptrs[2][input_offset]);
+        lo2 = _mm256_fmadd_ps(value, w0, lo2);
+        hi2 = _mm256_fmadd_ps(value, w1, hi2);
+        value = _mm256_set1_ps(row_ptrs[3][input_offset]);
+        lo3 = _mm256_fmadd_ps(value, w0, lo3);
+        hi3 = _mm256_fmadd_ps(value, w1, hi3);
+        value = _mm256_set1_ps(row_ptrs[4][input_offset]);
+        lo4 = _mm256_fmadd_ps(value, w0, lo4);
+        hi4 = _mm256_fmadd_ps(value, w1, hi4);
+        value = _mm256_set1_ps(row_ptrs[5][input_offset]);
+        lo5 = _mm256_fmadd_ps(value, w0, lo5);
+        hi5 = _mm256_fmadd_ps(value, w1, hi5);
+    }
+    if (k_end < k_total) {
+        _mm256_storeu_ps(partial, lo0);
+        _mm256_storeu_ps(partial + 8u, hi0);
+        _mm256_storeu_ps(partial + 16u, lo1);
+        _mm256_storeu_ps(partial + 24u, hi1);
+        _mm256_storeu_ps(partial + 32u, lo2);
+        _mm256_storeu_ps(partial + 40u, hi2);
+        _mm256_storeu_ps(partial + 48u, lo3);
+        _mm256_storeu_ps(partial + 56u, hi3);
+        _mm256_storeu_ps(partial + 64u, lo4);
+        _mm256_storeu_ps(partial + 72u, hi4);
+        _mm256_storeu_ps(partial + 80u, lo5);
+        _mm256_storeu_ps(partial + 88u, hi5);
+        return;
+    }
+    /* Full tile, full 16-channel block: reuse the exact vector epilogue of
+     * dense_tile_avx2 (runs once per tile, so array indexing is harmless). */
+    {
+        __m256 lo[LW_NHWC_PIXEL_TILE];
+        __m256 hi[LW_NHWC_PIXEL_TILE];
+        uint32_t row;
+        lo[0] = lo0; lo[1] = lo1; lo[2] = lo2;
+        lo[3] = lo3; lo[4] = lo4; lo[5] = lo5;
+        hi[0] = hi0; hi[1] = hi1; hi[2] = hi2;
+        hi[3] = hi3; hi[4] = hi4; hi[5] = hi5;
+        for (row = 0u; row < LW_NHWC_PIXEL_TILE; ++row) {
+            float* destination = output + (size_t)row * output_stride;
+            if (epilogue != NULL && epilogue->post_bias != NULL) {
+                lo[row] = _mm256_add_ps(lo[row], _mm256_loadu_ps(epilogue->post_bias));
+                hi[row] = _mm256_add_ps(hi[row], _mm256_loadu_ps(epilogue->post_bias + 8u));
+            }
+            if (epilogue != NULL && epilogue->residual != NULL) {
+                __m256 residual_lo = _mm256_loadu_ps(epilogue->residual + row * output_stride);
+                __m256 residual_hi = _mm256_loadu_ps(epilogue->residual + row * output_stride + 8u);
+                lo[row] = _mm256_add_ps(lo[row], residual_lo);
+                hi[row] = _mm256_add_ps(hi[row], residual_hi);
+            }
+            if (epilogue != NULL && epilogue->activation == LW_NHWC_ACT_RELU) {
+                lo[row] = _mm256_max_ps(lo[row], zero);
+                hi[row] = _mm256_max_ps(hi[row], zero);
+            } else if (epilogue != NULL && epilogue->activation == LW_NHWC_ACT_HARDSWISH) {
+                const __m256 three = _mm256_set1_ps(3.0f);
+                const __m256 six = _mm256_set1_ps(6.0f);
+                const __m256 inverse_six = _mm256_set1_ps(1.0f / 6.0f);
+                __m256 gate_lo = _mm256_min_ps(_mm256_max_ps(_mm256_add_ps(lo[row], three), zero), six);
+                __m256 gate_hi = _mm256_min_ps(_mm256_max_ps(_mm256_add_ps(hi[row], three), zero), six);
+                lo[row] = _mm256_mul_ps(_mm256_mul_ps(lo[row], gate_lo), inverse_six);
+                hi[row] = _mm256_mul_ps(_mm256_mul_ps(hi[row], gate_hi), inverse_six);
+            } else if (epilogue != NULL && epilogue->activation == LW_NHWC_ACT_GELU) {
+                lo[row] = lw_nhwc_avx2_gelu_vector_exact_f32(lo[row]);
+                hi[row] = lw_nhwc_avx2_gelu_vector_exact_f32(hi[row]);
+            }
+            _mm256_storeu_ps(destination, lo[row]);
+            _mm256_storeu_ps(destination + 8u, hi[row]);
+        }
+    }
+}
 #endif
 
 
@@ -534,7 +679,7 @@ lw_status lw_avx2_fma_nhwc_dense_f32(const float* input, const float* packed_wei
                         uint32_t k_end = k0 + kc;
                         if (k_end > (uint32_t)k_total64) k_end = (uint32_t)k_total64;
 #if defined(LW_NHWC_X86)
-                        dense_tile_avx2(row_ptrs, rows,
+                        dense_tile_avx2_unrolled(row_ptrs, rows,
                             interior ? tap_offsets : patch_offsets, NULL, (uint32_t)taps64,
                             packed_block + (size_t)k0 * LW_NHWC_OC_BLOCK, k0, k_end,
                             (uint32_t)k_total64, &local_epilogue, destination,
@@ -629,7 +774,7 @@ lw_status lw_avx2_fma_nhwc_dense_prepared_f32(const float* input,
                         uint32_t k_end = k0 + kc;
                         if (k_end > (uint32_t)k_total64) k_end = (uint32_t)k_total64;
 #if defined(LW_NHWC_X86)
-                        dense_tile_avx2(row_ptrs, rows, NULL, direct_offsets,
+                        dense_tile_avx2_unrolled(row_ptrs, rows, NULL, direct_offsets,
                             (uint32_t)taps64,
                             packed_block + (size_t)k0 * LW_NHWC_OC_BLOCK, k0, k_end,
                             (uint32_t)k_total64, &local_epilogue, destination,

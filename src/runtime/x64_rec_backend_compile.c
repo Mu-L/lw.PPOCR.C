@@ -34,6 +34,23 @@ static const float* constant_f32(const lw_model* model, uint32_t index) {
     return (const float*)(const void*)(model->bytes + (size_t)lwm_read_u64(tensor + 48u));
 }
 
+static int rec_value_is_nhwc_physical(const lw_model* model, const lw_session* session,
+                                      uint32_t tensor);
+
+/* Physical extent of the fastest-varying (channel) axis for a broadcast
+ * against this output value: NHWC-stored rank-4 values keep C last,
+ * canonical-order rank-4 values (attention chain) keep W last, and
+ * lower ranks use the canonical trailing axis directly. */
+static uint32_t rec_binary_channel_extent(const lw_model* model, const lw_session* session,
+                                          const lw_x64_rec_value* out_value,
+                                          uint32_t out_index) {
+    if (out_value->rank == 0u) return 1u;
+    if (out_value->rank == 4u &&
+        !rec_value_is_nhwc_physical(model, session, out_index)) {
+        return (uint32_t)out_value->dimensions[2];
+    }
+    return (uint32_t)out_value->dimensions[out_value->rank - 1u];
+}
 static float read_f32(const uint8_t* p) {
     uint32_t bits = lwm_read_u32(p);
     float value;
@@ -553,8 +570,8 @@ static lw_status compile_node(const lw_model* model, const lw_session* session,
     case LW_OP_RELU: op->kind = LW_X64_REC_OP_RELU; break;
     case LW_OP_ERF: op->kind = LW_X64_REC_OP_ERF; break;
     case LW_OP_HARD_SIGMOID: op->kind = LW_X64_REC_OP_HARD_SIGMOID; op->data.unary.alpha = read_f32(params + 4u); op->data.unary.beta = read_f32(params + 8u); break;
-    case LW_OP_SIGMOID: op->kind = LW_X64_REC_OP_GENERIC_UNSUPPORTED; break;
-    case LW_OP_SQRT: op->kind = LW_X64_REC_OP_GENERIC_UNSUPPORTED; break;
+    case LW_OP_SIGMOID: op->kind = LW_X64_REC_OP_SIGMOID; break;
+    case LW_OP_SQRT: op->kind = LW_X64_REC_OP_SQRT; break;
     case LW_OP_BATCH_NORMALIZATION: {
         uint32_t c = (uint32_t)input->dimensions[1];
         float* mul = (float*)alloc_constant(program, (uint64_t)c * sizeof(float));
@@ -565,7 +582,7 @@ static lw_status compile_node(const lw_model* model, const lw_session* session,
         op->kind = LW_X64_REC_OP_AFFINE; op->data.affine.input_offset=in_value->offset; op->data.affine.output_offset=out_value->offset; op->data.affine.mul=mul; op->data.affine.add=add; op->data.affine.scale=constant_f32(model,lwm_read_u32(node+12u)); op->data.affine.bias=constant_f32(model,lwm_read_u32(node+16u)); op->data.affine.mean=constant_f32(model,lwm_read_u32(node+20u)); op->data.affine.variance=constant_f32(model,lwm_read_u32(node+24u)); op->data.affine.epsilon=read_f32(params+4u); op->data.affine.channel_major=(uint8_t)(program->backend_layout == LW_X64_REC_BACKEND_NCHW || input->rank != 4u); op->data.affine.pixels=(uint32_t)(value_elements(in_value)/c); op->data.affine.channels=c; break;
     }
     case LW_OP_ADD: case LW_OP_MUL: case LW_OP_DIV: case LW_OP_SUB: case LW_OP_POW:
-        op->kind = semantic == LW_OP_ADD ? LW_X64_REC_OP_ADD : semantic == LW_OP_MUL ? LW_X64_REC_OP_MUL : semantic == LW_OP_DIV ? LW_X64_REC_OP_DIV : LW_X64_REC_OP_GENERIC_UNSUPPORTED; op->data.binary.operation=semantic; op->data.binary.element_count=elements; op->data.binary.output_offset=out_value->offset; op->data.binary.left_offset=program->values[input_index].offset; op->data.binary.left_constant=program->values[input_index].constant_data; op->data.binary.right_offset=program->values[lwm_read_u32(node+12u)].offset; op->data.binary.right_constant=program->values[lwm_read_u32(node+12u)].constant_data; op->data.binary.broadcast_kind=(program->values[lwm_read_u32(node+12u)].bytes==sizeof(float))?LW_X64_REC_BROADCAST_RIGHT_SCALAR:program->values[lwm_read_u32(node+12u)].bytes==out_value->bytes?LW_X64_REC_BROADCAST_SAME:((program->values[lwm_read_u32(node+12u)].bytes == (uint64_t)out_value->dimensions[3] * sizeof(float))?LW_X64_REC_BROADCAST_RIGHT_CHANNEL:((program->values[input_index].bytes == (uint64_t)out_value->dimensions[3] * sizeof(float))?LW_X64_REC_BROADCAST_LEFT_CHANNEL:LW_X64_REC_BROADCAST_GENERAL)); memcpy(op->data.binary.dimensions, out_value->dimensions, sizeof(op->data.binary.dimensions)); op->data.binary.channels = out_value->rank > 0u ? (uint32_t)out_value->dimensions[out_value->rank - 1u] : 1u; op->data.binary.pixels = op->data.binary.channels != 0u ? (uint32_t)(elements / op->data.binary.channels) : 0u;
+        op->kind = semantic == LW_OP_ADD ? LW_X64_REC_OP_ADD : semantic == LW_OP_MUL ? LW_X64_REC_OP_MUL : semantic == LW_OP_DIV ? LW_X64_REC_OP_DIV : semantic == LW_OP_SUB ? LW_X64_REC_OP_SUB : semantic == LW_OP_POW ? LW_X64_REC_OP_POW : LW_X64_REC_OP_GENERIC_UNSUPPORTED; op->data.binary.operation=semantic; op->data.binary.element_count=elements; op->data.binary.output_offset=out_value->offset; op->data.binary.left_offset=program->values[input_index].offset; op->data.binary.left_constant=program->values[input_index].constant_data; op->data.binary.right_offset=program->values[lwm_read_u32(node+12u)].offset; op->data.binary.right_constant=program->values[lwm_read_u32(node+12u)].constant_data; op->data.binary.broadcast_kind=(program->values[lwm_read_u32(node+12u)].bytes==sizeof(float))?LW_X64_REC_BROADCAST_RIGHT_SCALAR:program->values[lwm_read_u32(node+12u)].bytes==out_value->bytes?LW_X64_REC_BROADCAST_SAME:((program->values[lwm_read_u32(node+12u)].bytes == (uint64_t)rec_binary_channel_extent(model, session, out_value, lwm_read_u32(node + 40u)) * sizeof(float))?LW_X64_REC_BROADCAST_RIGHT_CHANNEL:((program->values[input_index].bytes == (uint64_t)rec_binary_channel_extent(model, session, out_value, lwm_read_u32(node + 40u)) * sizeof(float))?LW_X64_REC_BROADCAST_LEFT_CHANNEL:LW_X64_REC_BROADCAST_GENERAL)); memcpy(op->data.binary.dimensions, out_value->dimensions, sizeof(op->data.binary.dimensions)); op->data.binary.channels = rec_binary_channel_extent(model, session, out_value, lwm_read_u32(node + 40u)); op->data.binary.pixels = op->data.binary.channels != 0u ? (uint32_t)(elements / op->data.binary.channels) : 0u;
         if (program->backend_layout == LW_X64_REC_BACKEND_NCHW && out_value->rank == 4u) {
             op->data.binary.channels = (uint32_t)out_value->dimensions[1];
             op->data.binary.pixels = op->data.binary.channels != 0u ?
@@ -573,13 +590,79 @@ static lw_status compile_node(const lw_model* model, const lw_session* session,
             if (program->values[lwm_read_u32(node + 12u)].bytes ==
                 (uint64_t)op->data.binary.channels * sizeof(float)) {
                 op->data.binary.broadcast_kind = LW_X64_REC_BROADCAST_RIGHT_CHANNEL;
+                op->data.binary.channel_major_nchw = 1u;
             } else if (program->values[input_index].bytes ==
                        (uint64_t)op->data.binary.channels * sizeof(float)) {
                 op->data.binary.broadcast_kind = LW_X64_REC_BROADCAST_LEFT_CHANNEL;
+                op->data.binary.channel_major_nchw = 1u;
+            }
+        }
+        /* Shape-exact pixel-scalar broadcast ([1,W,C] op [1,W,1]).  Must be
+         * evaluated before trusting the byte-based channel detection: when
+         * W == channels the byte counts collide. */
+        if (out_value->rank >= 2u) {
+            /* One scalar per pixel broadcast over the last axis (e.g.
+             * [1,W,C] op [1,W,1]). Byte counts alone are ambiguous when
+             * pixels == channels, so compare the dimension tuples: same
+             * rank, equal leading dims, trailing right dim of 1. The
+             * general executor path only handles constant right
+             * operands, so route computed ones here. */
+            const lw_runtime_tensor* right_tensor =
+                &session->tensors[lwm_read_u32(node + 12u)];
+            uint32_t out_rank = out_value->rank;
+            int pixel_scalar = right_tensor->rank == out_rank &&
+                right_tensor->dimensions[out_rank - 1u] == 1 &&
+                out_value->dimensions[out_rank - 1u] > 1;
+            uint32_t axis;
+            for (axis = 0u; axis + 1u < out_rank && pixel_scalar; ++axis) {
+                if (right_tensor->dimensions[axis] != out_value->dimensions[axis]) {
+                    pixel_scalar = 0;
+                }
+            }
+            if (pixel_scalar) {
+                op->data.binary.broadcast_kind = LW_X64_REC_BROADCAST_RIGHT_PIXEL_SCALAR;
+            }
+        }
+        if (program->backend_layout != LW_X64_REC_BACKEND_NCHW && out_value->rank == 4u &&
+            op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_SAME) {
+            /* SAME assumes both operands share one physical layout.  The
+             * attention chain holds canonical-order rank-4 tensors while
+             * the conv chain is NHWC, so a cross-chain elementwise op
+             * (e.g. positional-gate add) must remap the NHWC side. */
+            const lw_runtime_tensor* out_tensor4 = &session->tensors[lwm_read_u32(node + 40u)];
+            int left_nhwc = rec_value_is_nhwc_physical(model, session, input_index);
+            int right_nhwc = rec_value_is_nhwc_physical(model, session, lwm_read_u32(node + 12u));
+            if (left_nhwc != right_nhwc) {
+                op->data.binary.mixed_nhwc = (uint8_t)(right_nhwc != 0 ? 1u : 2u);
+                memcpy(op->data.binary.dimensions, out_tensor4->dimensions,
+                       sizeof(op->data.binary.dimensions));
             }
         }
         break;
-    case LW_OP_REDUCE_MEAN: op->kind=LW_X64_REC_OP_REDUCE_MEAN; op->data.reduce.input_offset=in_value->offset; op->data.reduce.output_offset=out_value->offset; op->data.reduce.batch=(uint32_t)input->dimensions[0]; op->data.reduce.height=(uint32_t)input->dimensions[2]; op->data.reduce.width=(uint32_t)input->dimensions[3]; op->data.reduce.channels=(uint32_t)input->dimensions[1]; break;
+    case LW_OP_REDUCE_MEAN: {
+        uint32_t axes_count = params != NULL ? (uint32_t)lwm_read_u16(params + 2u) : 0u;
+        int32_t axis0 = axes_count > 0u ? lwm_read_i32(params + 12u) : 0;
+        int32_t axis1 = axes_count > 1u ? lwm_read_i32(params + 16u) : 0;
+        op->kind=LW_X64_REC_OP_REDUCE_MEAN; op->data.reduce.input_offset=in_value->offset; op->data.reduce.output_offset=out_value->offset; op->data.reduce.batch=(uint32_t)input->dimensions[0]; op->data.reduce.height=(uint32_t)input->dimensions[2]; op->data.reduce.width=(uint32_t)input->dimensions[3]; op->data.reduce.channels=(uint32_t)input->dimensions[1];
+        if (input->rank == 4u && axes_count == 2u && axis0 == 2 && axis1 == 3) {
+            op->data.reduce.general = 0u;
+        } else {
+            uint32_t axis_index;
+            op->data.reduce.general = 1u;
+            op->data.reduce.input_rank = input->rank;
+            op->data.reduce.output_rank = output->rank;
+            op->data.reduce.axes_count = axes_count;
+            op->data.reduce.keep_dimensions = params != NULL ? lwm_read_u32(params + 4u) : 1u;
+            op->data.reduce.no_op_with_empty_axes = params != NULL ? lwm_read_u32(params + 8u) : 0u;
+            for (axis_index = 0u; axis_index < LW_MAX_DIMS; ++axis_index) {
+                op->data.reduce.axes[axis_index] = axis_index < axes_count ?
+                    lwm_read_i32(params + 12u + axis_index * 4u) : 0;
+            }
+            memcpy(op->data.reduce.input_dimensions, input->dimensions, sizeof(op->data.reduce.input_dimensions));
+            memcpy(op->data.reduce.output_dimensions, output->dimensions, sizeof(op->data.reduce.output_dimensions));
+        }
+        break;
+    }
     case LW_OP_AVERAGE_POOL: case LW_OP_MAX_POOL: op->kind=semantic==LW_OP_MAX_POOL?LW_X64_REC_OP_MAX_POOL:LW_X64_REC_OP_AVG_POOL; op->data.pool.input_offset=in_value->offset; op->data.pool.output_offset=out_value->offset; op->data.pool.input_dimensions[0]=input->dimensions[0];
         op->data.pool.input_dimensions[1]=program->backend_layout == LW_X64_REC_BACKEND_NCHW ? input->dimensions[1] : input->dimensions[2];
         op->data.pool.input_dimensions[2]=program->backend_layout == LW_X64_REC_BACKEND_NCHW ? input->dimensions[2] : input->dimensions[3];
@@ -588,13 +671,111 @@ static lw_status compile_node(const lw_model* model, const lw_session* session,
         op->data.pool.output_dimensions[1]=program->backend_layout == LW_X64_REC_BACKEND_NCHW ? output->dimensions[1] : output->dimensions[2];
         op->data.pool.output_dimensions[2]=program->backend_layout == LW_X64_REC_BACKEND_NCHW ? output->dimensions[2] : output->dimensions[3];
         op->data.pool.output_dimensions[3]=program->backend_layout == LW_X64_REC_BACKEND_NCHW ? output->dimensions[3] : output->dimensions[1]; op->data.pool.kernel[0]=lwm_read_i32(params+8u); op->data.pool.kernel[1]=lwm_read_i32(params+12u); op->data.pool.strides[0]=lwm_read_i32(params+16u); op->data.pool.strides[1]=lwm_read_i32(params+20u); op->data.pool.pads[0]=lwm_read_i32(params+24u); op->data.pool.pads[1]=lwm_read_i32(params+28u); op->data.pool.pads[2]=lwm_read_i32(params+32u); op->data.pool.pads[3]=lwm_read_i32(params+36u); op->data.pool.count_include_pad=(uint8_t)lwm_read_u32(params+44u); op->data.pool.is_max=(uint8_t)(semantic==LW_OP_MAX_POOL); break;
-    case LW_OP_MATMUL: { const lw_runtime_tensor* w=&session->tensors[lwm_read_u32(node+12u)]; uint64_t count; op->kind=LW_X64_REC_OP_MATMUL; op->data.matmul.input_offset=in_value->offset; op->data.matmul.output_offset=out_value->offset; op->data.matmul.weights=constant_f32(model,lwm_read_u32(node+12u)); op->data.matmul.batch=1u; op->data.matmul.rows=(uint32_t)input->dimensions[input->rank-2u]; op->data.matmul.inner=(uint32_t)input->dimensions[input->rank-1u]; op->data.matmul.columns=(uint32_t)w->dimensions[1]; if(lw_packed_matmul_weight_count(op->data.matmul.inner,op->data.matmul.columns,&count)){op->data.matmul.packed_weights=(float*)alloc_constant(program,count*sizeof(float)); if(op->data.matmul.packed_weights==NULL)return LW_STATUS_OUT_OF_MEMORY; lw_pack_matmul_weights_f32(op->data.matmul.weights,op->data.matmul.inner,op->data.matmul.columns,op->data.matmul.packed_weights);} break; }
-    case LW_OP_TRANSPOSE: op->kind=LW_X64_REC_OP_TRANSPOSE; op->data.transpose.input_offset=in_value->offset; op->data.transpose.output_offset=out_value->offset; op->data.transpose.rank=input->rank; op->data.transpose.input_dimensions[0]=input->dimensions[0]; op->data.transpose.input_dimensions[1]=input->dimensions[1]; op->data.transpose.input_dimensions[2]=input->dimensions[2]; op->data.transpose.input_dimensions[3]=input->dimensions[3]; op->data.transpose.output_dimensions[0]=output->dimensions[0]; op->data.transpose.output_dimensions[1]=output->dimensions[1]; op->data.transpose.output_dimensions[2]=output->dimensions[2]; op->data.transpose.output_dimensions[3]=output->dimensions[3]; for(uint32_t j=0;j<input->rank;++j)op->data.transpose.permutation[j]=lwm_read_i32(params+4u+j*4u); break;
+    case LW_OP_MATMUL: {
+        const lw_runtime_tensor* w = &session->tensors[lwm_read_u32(node + 12u)];
+        const lw_runtime_tensor* out_tensor = &session->tensors[lwm_read_u32(node + 40u)];
+        uint64_t count = 0u;
+        uint32_t batch = 1u;
+        uint32_t bi;
+        int packable;
+        for (bi = 0u; bi + 2u < input->rank; ++bi) {
+            batch *= (uint32_t)input->dimensions[bi];
+        }
+        op->kind = LW_X64_REC_OP_MATMUL;
+        op->data.matmul.input_offset = in_value->offset;
+        op->data.matmul.output_offset = out_value->offset;
+        op->data.matmul.weights_offset = program->values[lwm_read_u32(node + 12u)].offset;
+        op->data.matmul.weights = program->values[lwm_read_u32(node + 12u)].constant_data;
+        op->data.matmul.batch = batch;
+        op->data.matmul.rows = (uint32_t)input->dimensions[input->rank - 2u];
+        op->data.matmul.inner = (uint32_t)input->dimensions[input->rank - 1u];
+        op->data.matmul.columns = w->rank >= 2u ? (uint32_t)w->dimensions[w->rank - 1u] : 0u;
+        op->data.matmul.general = 0u;
+        op->data.matmul.input_rank = input->rank;
+        op->data.matmul.weights_rank = w->rank;
+        op->data.matmul.output_rank = out_tensor->rank;
+        memcpy(op->data.matmul.input_dimensions, input->dimensions, sizeof(op->data.matmul.input_dimensions));
+        memcpy(op->data.matmul.weights_dimensions, w->dimensions, sizeof(op->data.matmul.weights_dimensions));
+        memcpy(op->data.matmul.output_dimensions, out_tensor->dimensions, sizeof(op->data.matmul.output_dimensions));
+        /* Mirror the canonical session's packed-matmul eligibility exactly
+         * so both paths accumulate in the same order (bit-identical). */
+        packable = op->data.matmul.weights != NULL && w->rank == 2u &&
+            out_tensor->rank == input->rank &&
+            op->data.matmul.rows >= 4u && op->data.matmul.rows % 4u == 0u &&
+            op->data.matmul.inner >= 64u && op->data.matmul.columns >= 1024u &&
+            w->dimensions[0] == (int32_t)op->data.matmul.inner &&
+            out_tensor->dimensions[out_tensor->rank - 2u] == (int32_t)op->data.matmul.rows &&
+            out_tensor->dimensions[out_tensor->rank - 1u] == (int32_t)op->data.matmul.columns &&
+            lw_packed_matmul_weight_count(op->data.matmul.inner, op->data.matmul.columns, &count);
+        if (packable) {
+            op->data.matmul.packed_weights = (float*)alloc_constant(program, count * sizeof(float));
+            if (op->data.matmul.packed_weights == NULL) return LW_STATUS_OUT_OF_MEMORY;
+            lw_pack_matmul_weights_f32(op->data.matmul.weights, op->data.matmul.inner,
+                                       op->data.matmul.columns, op->data.matmul.packed_weights);
+        } else {
+            op->data.matmul.general = 1u;
+        }
+        break; }
+    case LW_OP_TRANSPOSE: op->kind=LW_X64_REC_OP_TRANSPOSE; op->data.transpose.input_offset=in_value->offset; op->data.transpose.output_offset=out_value->offset; op->data.transpose.rank=input->rank; memcpy(op->data.transpose.input_dimensions,input->dimensions,sizeof(op->data.transpose.input_dimensions)); memcpy(op->data.transpose.output_dimensions,output->dimensions,sizeof(op->data.transpose.output_dimensions)); for(uint32_t j=0;j<input->rank && j<LW_MAX_DIMS;++j)op->data.transpose.permutation[j]=lwm_read_i32(params+4u+j*4u); break;
     case LW_OP_SOFTMAX: op->kind=LW_X64_REC_OP_SOFTMAX; op->data.softmax.input_offset=in_value->offset; op->data.softmax.output_offset=out_value->offset; op->data.softmax.axis=lwm_read_i32(params+4u); op->data.softmax.rank=input->rank; memcpy(op->data.softmax.dimensions,input->dimensions,sizeof(op->data.softmax.dimensions)); break;
-    case LW_OP_CONCAT: case LW_OP_RESIZE: op->kind=LW_X64_REC_OP_GENERIC_UNSUPPORTED; break;
+    case LW_OP_CONCAT: {
+        uint16_t concat_input_count = lwm_read_u16(node + 2u);
+        int32_t concat_axis = params != NULL ? lwm_read_i32(params + 4u) : 0;
+        uint16_t concat_slot;
+        /* Only the channel axis (NCHW axis 1) of rank-4 feature maps is
+         * supported: stored NHWC, it is a per-pixel channel copy. Other
+         * shapes keep the model on the canonical executor. */
+        if (params == NULL || concat_input_count < 2u ||
+            concat_input_count > LWM_V0_MAX_NODE_INPUTS || output->rank != 4u ||
+            concat_axis != 1 || program->backend_layout != LW_X64_REC_BACKEND_NHWC) {
+            op->kind = LW_X64_REC_OP_GENERIC_UNSUPPORTED;
+            break;
+        }
+        op->kind = LW_X64_REC_OP_CONCAT;
+        op->data.concat.input_count = concat_input_count;
+        op->data.concat.output_offset = out_value->offset;
+        op->data.concat.axis = concat_axis;
+        op->data.concat.output_channels = (uint32_t)output->dimensions[1];
+        op->data.concat.pixels = (uint32_t)((uint64_t)output->dimensions[2] *
+                                          (uint64_t)output->dimensions[3]);
+        for (concat_slot = 0u; concat_slot < concat_input_count; ++concat_slot) {
+            uint32_t concat_input = lwm_read_u32(node + 8u + (size_t)concat_slot * 4u);
+            op->data.concat.input_offsets[concat_slot] = program->values[concat_input].offset;
+            op->data.concat.input_channels[concat_slot] =
+                (uint32_t)session->tensors[concat_input].dimensions[1];
+        }
+        break;
+    }
+    case LW_OP_SLICE: {
+        uint32_t slice_count = params != NULL ? (uint32_t)lwm_read_u16(params + 2u) : 0u;
+        uint32_t slice_index;
+        /* Rank-4 values are physically NHWC here, so only slice
+         * canonical-layout tensors (rank != 4) via the scalar kernel. */
+        if (params == NULL || slice_count == 0u || slice_count > LW_MAX_DIMS ||
+            input->rank > LW_MAX_DIMS || input->rank == 4u) {
+            op->kind = LW_X64_REC_OP_GENERIC_UNSUPPORTED;
+            break;
+        }
+        op->kind = LW_X64_REC_OP_SLICE;
+        op->data.slice.input_offset = in_value->offset;
+        op->data.slice.output_offset = out_value->offset;
+        op->data.slice.rank = input->rank;
+        op->data.slice.output_rank = output->rank;
+        op->data.slice.slice_count = slice_count;
+        memcpy(op->data.slice.input_dimensions, input->dimensions, sizeof(op->data.slice.input_dimensions));
+        memcpy(op->data.slice.output_dimensions, output->dimensions, sizeof(op->data.slice.output_dimensions));
+        for (slice_index = 0u; slice_index < LW_MAX_DIMS; ++slice_index) {
+            op->data.slice.starts[slice_index] = slice_index < slice_count ? lwm_read_i32(params + 4u + slice_index * 4u) : 0;
+            op->data.slice.ends[slice_index] = slice_index < slice_count ? lwm_read_i32(params + 36u + slice_index * 4u) : 0;
+            op->data.slice.axes[slice_index] = slice_index < slice_count ? lwm_read_i32(params + 68u + slice_index * 4u) : 0;
+            op->data.slice.steps[slice_index] = slice_index < slice_count ? lwm_read_i32(params + 100u + slice_index * 4u) : 0;
+        }
+        break;
+    }
+    case LW_OP_RESIZE: op->kind=LW_X64_REC_OP_GENERIC_UNSUPPORTED; break;
     default: op->kind=LW_X64_REC_OP_GENERIC_UNSUPPORTED; break;
     }
-    if (op->kind == LW_X64_REC_OP_RELU || op->kind == LW_X64_REC_OP_ERF || op->kind == LW_X64_REC_OP_HARD_SIGMOID) { op->data.unary.input_offset=in_value->offset; op->data.unary.output_offset=out_value->offset; op->data.unary.element_count=elements; op->data.unary.rank=out_value->rank; memcpy(op->data.unary.dimensions,out_value->dimensions,sizeof(op->data.unary.dimensions)); }
+    if (op->kind == LW_X64_REC_OP_RELU || op->kind == LW_X64_REC_OP_ERF || op->kind == LW_X64_REC_OP_HARD_SIGMOID || op->kind == LW_X64_REC_OP_SIGMOID || op->kind == LW_X64_REC_OP_SQRT) { op->data.unary.input_offset=in_value->offset; op->data.unary.output_offset=out_value->offset; op->data.unary.element_count=elements; op->data.unary.rank=out_value->rank; memcpy(op->data.unary.dimensions,out_value->dimensions,sizeof(op->data.unary.dimensions)); }
     return LW_STATUS_OK;
 }
 
@@ -770,6 +951,51 @@ lw_x64_rec_compile_result lw_x64_rec_backend_compile_input(const lw_model* model
 /* Lower semantic nodes into the physical op table. Runs twice: the first pass
  * discovers value lifetimes (producer/last_use/fusions/aliases) before arena
  * offsets are planned; the second pass embeds the final offsets. */
+/* Walk the semantic producer chain of a tensor to determine the physical
+ * layout of its memory in the compiled program: conv-family ops produce
+ * physical NHWC, layout-transparent elementwise/unary ops inherit from
+ * their (non-constant) input, and everything else (transpose/matmul/
+ * slice/reshape chains) produces canonical-order memory. */
+static int rec_value_is_nhwc_physical(const lw_model* model, const lw_session* session,
+                                      uint32_t tensor) {
+    uint32_t current = tensor;
+    uint32_t hops;
+    for (hops = 0u; hops < 4096u; ++hops) {
+        const uint8_t* node = NULL;
+        uint16_t semantic;
+        uint32_t j;
+        for (j = 0u; j < model->info.node_count; ++j) {
+            const uint8_t* n = node_bytes(model, j);
+            if (lwm_read_u32(n + 40u) == current) { node = n; break; }
+        }
+        if (node == NULL) return 1; /* graph input: preprocessing emits NHWC */
+        semantic = lwm_read_u16(node);
+        switch (semantic) {
+        case LW_OP_ADD: case LW_OP_MUL: case LW_OP_DIV: case LW_OP_SUB:
+        case LW_OP_POW: case LW_OP_ERF: case LW_OP_HARD_SIGMOID:
+        case LW_OP_RELU: case LW_OP_SIGMOID: case LW_OP_SQRT:
+        case LW_OP_SOFTMAX: {
+            /* layout-transparent: inherit from the non-constant input */
+            uint32_t next = lwm_read_u32(node + 8u);
+            if (lwm_read_u16(node + 2u) == 2u &&
+                (session->tensors[next].flags & LWM_V0_TENSOR_FLAG_CONSTANT) != 0u) {
+                next = lwm_read_u32(node + 12u);
+            }
+            current = next;
+            break;
+        }
+        case LW_OP_CONV: case LW_OP_CONV_TRANSPOSE:
+        case LW_OP_BATCH_NORMALIZATION: case LW_OP_REDUCE_MEAN:
+        case LW_OP_AVERAGE_POOL: case LW_OP_MAX_POOL:
+        case LW_OP_CONCAT: case LW_OP_RESIZE:
+            return 1;
+        default:
+            return 0;
+        }
+    }
+    return 0;
+}
+
 static lw_x64_rec_compile_result lower_ops(const lw_model* model, const lw_session* session,
                                            lw_x64_rec_program* program, uint32_t limit,
                                            lw_error* error) {
@@ -824,7 +1050,7 @@ static lw_x64_rec_compile_result lower_ops(const lw_model* model, const lw_sessi
         program->values[out].producer = (int32_t)i;
         continue;
     }
-    if(semantic==LW_OP_RESHAPE||semantic==LW_OP_SQUEEZE||semantic==LW_OP_UNSQUEEZE){uint32_t in=lwm_read_u32(node+8u),out=lwm_read_u32(node+40u); const lw_runtime_tensor* in_tensor=&session->tensors[in]; const lw_runtime_tensor* out_tensor=&session->tensors[out]; if(in_tensor->rank==3u && out_tensor->rank==4u && physical<limit){ lw_x64_rec_op* repack=&program->ops[physical++]; memset(repack,0,sizeof(*repack)); repack->kind=LW_X64_REC_OP_TRANSPOSE; repack->semantic_begin=i; repack->semantic_count=1u; repack->data.transpose.input_offset=program->values[in].offset; repack->data.transpose.output_offset=program->values[out].offset; repack->data.transpose.rank=4u; repack->data.transpose.input_dimensions[0]=in_tensor->dimensions[0]; repack->data.transpose.input_dimensions[1]=in_tensor->dimensions[1]; repack->data.transpose.input_dimensions[2]=out_tensor->dimensions[2]; repack->data.transpose.input_dimensions[3]=out_tensor->dimensions[3]; repack->data.transpose.output_dimensions[0]=out_tensor->dimensions[0]; repack->data.transpose.output_dimensions[1]=out_tensor->dimensions[2]; repack->data.transpose.output_dimensions[2]=out_tensor->dimensions[3]; repack->data.transpose.output_dimensions[3]=out_tensor->dimensions[1]; repack->data.transpose.permutation[0]=0; repack->data.transpose.permutation[1]=2; repack->data.transpose.permutation[2]=3; repack->data.transpose.permutation[3]=1; program->values[out].producer=(int32_t)(physical-1u); if(program->values[in].last_use<(int32_t)(physical-1u))program->values[in].last_use=(int32_t)(physical-1u); program->semantic_consumed++; continue; } if(in_tensor->rank==4u && out_tensor->rank==3u && physical<limit){ lw_x64_rec_op* repack=&program->ops[physical++]; memset(repack,0,sizeof(*repack)); repack->kind=LW_X64_REC_OP_TRANSPOSE; repack->semantic_begin=i; repack->semantic_count=1u; repack->data.transpose.input_offset=program->values[in].offset; repack->data.transpose.output_offset=program->values[out].offset; repack->data.transpose.rank=4u; repack->data.transpose.input_dimensions[0]=in_tensor->dimensions[0]; repack->data.transpose.input_dimensions[1]=in_tensor->dimensions[2]; repack->data.transpose.input_dimensions[2]=in_tensor->dimensions[3]; repack->data.transpose.input_dimensions[3]=in_tensor->dimensions[1]; repack->data.transpose.output_dimensions[0]=out_tensor->dimensions[0]; repack->data.transpose.output_dimensions[1]=in_tensor->dimensions[1]; repack->data.transpose.output_dimensions[2]=in_tensor->dimensions[2]; repack->data.transpose.output_dimensions[3]=in_tensor->dimensions[3]; repack->data.transpose.permutation[0]=0; repack->data.transpose.permutation[1]=3; repack->data.transpose.permutation[2]=1; repack->data.transpose.permutation[3]=2; program->values[out].producer=(int32_t)(physical-1u); if(program->values[in].last_use<(int32_t)(physical-1u))program->values[in].last_use=(int32_t)(physical-1u); program->semantic_consumed++; continue; } program->values[out].alias=1u;program->values[out].alias_of=in;program->values[out].offset=program->values[in].offset;++program->semantic_elided;program->values[out].producer=(int32_t)i;continue;} if(physical>=limit)return LW_X64_REC_COMPILE_INVALID_GRAPH; {lw_x64_rec_op* op=&program->ops[physical];memset(op,0,sizeof(*op));status=compile_node(model,session,program,i,op,error);if(status!=LW_STATUS_OK||op->kind==LW_X64_REC_OP_GENERIC_UNSUPPORTED){++program->unsupported_nodes;if (status == LW_STATUS_OK || error == NULL || error->message[0] == 0) { char message[128]; (void)snprintf(message,sizeof(message),"REC node %u (op %u) lowering failed (status %d, kind %u)",(unsigned)i,(unsigned)semantic,(int)status,(unsigned)op->kind); lw_set_error(error,status!=LW_STATUS_OK?status:LW_STATUS_UNSUPPORTED,message); }return LW_X64_REC_COMPILE_UNSUPPORTED;}op->semantic_begin=i;op->semantic_count=1u;if(program->backend_layout==LW_X64_REC_BACKEND_NHWC&&op->data.conv.scalar_fallback==0u&&(op->kind==LW_X64_REC_OP_POINTWISE||op->kind==LW_X64_REC_OP_DENSE||op->kind==LW_X64_REC_OP_DEPTHWISE)){uint32_t fold_span=fold_conv_epilogue(model,session,program,limit,i,op,physical);if(fold_span>1u){op->semantic_count=(uint16_t)fold_span;program->semantic_consumed+=fold_span;++physical;i+=fold_span-1u;continue;}}program->semantic_consumed++;program->values[lwm_read_u32(node+40u)].producer=(int32_t)physical;for(uint32_t j=0u;j<lwm_read_u16(node+2u);++j){uint32_t in=lwm_read_u32(node+8u+j*4u);if(program->values[in].last_use<(int32_t)physical)program->values[in].last_use=(int32_t)physical;}++physical;}}
+    if(semantic==LW_OP_RESHAPE||semantic==LW_OP_SQUEEZE||semantic==LW_OP_UNSQUEEZE){uint32_t in=lwm_read_u32(node+8u),out=lwm_read_u32(node+40u); const lw_runtime_tensor* in_tensor=&session->tensors[in]; const lw_runtime_tensor* out_tensor=&session->tensors[out]; if(in_tensor->rank==3u && out_tensor->rank==4u && physical<limit){ lw_x64_rec_op* repack=&program->ops[physical++]; memset(repack,0,sizeof(*repack)); repack->kind=LW_X64_REC_OP_TRANSPOSE; repack->semantic_begin=i; repack->semantic_count=1u; repack->data.transpose.input_offset=program->values[in].offset; repack->data.transpose.output_offset=program->values[out].offset; repack->data.transpose.rank=4u; if(out_tensor->dimensions[1]==in_tensor->dimensions[1]){ repack->data.transpose.input_dimensions[0]=in_tensor->dimensions[0]; repack->data.transpose.input_dimensions[1]=in_tensor->dimensions[1]; repack->data.transpose.input_dimensions[2]=out_tensor->dimensions[2]; repack->data.transpose.input_dimensions[3]=out_tensor->dimensions[3]; repack->data.transpose.output_dimensions[0]=out_tensor->dimensions[0]; repack->data.transpose.output_dimensions[1]=out_tensor->dimensions[2]; repack->data.transpose.output_dimensions[2]=out_tensor->dimensions[3]; repack->data.transpose.output_dimensions[3]=out_tensor->dimensions[1]; repack->data.transpose.permutation[0]=0; repack->data.transpose.permutation[1]=2; repack->data.transpose.permutation[2]=3; repack->data.transpose.permutation[3]=1; }else{ /* Contiguous sequence-to-map repack whose permuted encoding is not  * self-consistent (e.g. [1,W,C] -> [1,1,W,C]); both layouts hold the  * same bytes, so emit the identity view and let the executor  * degenerate to a plain copy. */ repack->data.transpose.input_dimensions[0]=out_tensor->dimensions[0]; repack->data.transpose.input_dimensions[1]=out_tensor->dimensions[1]; repack->data.transpose.input_dimensions[2]=out_tensor->dimensions[2]; repack->data.transpose.input_dimensions[3]=out_tensor->dimensions[3]; repack->data.transpose.output_dimensions[0]=out_tensor->dimensions[0]; repack->data.transpose.output_dimensions[1]=out_tensor->dimensions[1]; repack->data.transpose.output_dimensions[2]=out_tensor->dimensions[2]; repack->data.transpose.output_dimensions[3]=out_tensor->dimensions[3]; repack->data.transpose.permutation[0]=0; repack->data.transpose.permutation[1]=1; repack->data.transpose.permutation[2]=2; repack->data.transpose.permutation[3]=3; } program->values[out].producer=(int32_t)(physical-1u); if(program->values[in].last_use<(int32_t)(physical-1u))program->values[in].last_use=(int32_t)(physical-1u); program->semantic_consumed++; continue; } if(in_tensor->rank==4u && out_tensor->rank==3u && !rec_value_is_nhwc_physical(model,session,in)){ /* Canonical-order rank-4 input (attention chain): the reshape is a pure reinterpretation, elide it. */ program->values[out].alias=1u;program->values[out].alias_of=in;program->values[out].offset=program->values[in].offset;++program->semantic_elided;program->values[out].producer=(int32_t)i;continue; } if(in_tensor->rank==4u && out_tensor->rank==3u && physical<limit){ lw_x64_rec_op* repack=&program->ops[physical++]; memset(repack,0,sizeof(*repack)); repack->kind=LW_X64_REC_OP_TRANSPOSE; repack->semantic_begin=i; repack->semantic_count=1u; repack->data.transpose.input_offset=program->values[in].offset; repack->data.transpose.output_offset=program->values[out].offset; repack->data.transpose.rank=4u; repack->data.transpose.input_dimensions[0]=in_tensor->dimensions[0]; repack->data.transpose.input_dimensions[1]=in_tensor->dimensions[2]; repack->data.transpose.input_dimensions[2]=in_tensor->dimensions[3]; repack->data.transpose.input_dimensions[3]=in_tensor->dimensions[1]; repack->data.transpose.output_dimensions[0]=out_tensor->dimensions[0]; repack->data.transpose.output_dimensions[1]=in_tensor->dimensions[1]; repack->data.transpose.output_dimensions[2]=in_tensor->dimensions[2]; repack->data.transpose.output_dimensions[3]=in_tensor->dimensions[3]; repack->data.transpose.permutation[0]=0; repack->data.transpose.permutation[1]=3; repack->data.transpose.permutation[2]=1; repack->data.transpose.permutation[3]=2; program->values[out].producer=(int32_t)(physical-1u); if(program->values[in].last_use<(int32_t)(physical-1u))program->values[in].last_use=(int32_t)(physical-1u); program->semantic_consumed++; continue; } program->values[out].alias=1u;program->values[out].alias_of=in;program->values[out].offset=program->values[in].offset;++program->semantic_elided;program->values[out].producer=(int32_t)i;continue;} if(physical>=limit)return LW_X64_REC_COMPILE_INVALID_GRAPH; {lw_x64_rec_op* op=&program->ops[physical];memset(op,0,sizeof(*op));status=compile_node(model,session,program,i,op,error);if(status!=LW_STATUS_OK||op->kind==LW_X64_REC_OP_GENERIC_UNSUPPORTED){++program->unsupported_nodes;if (status == LW_STATUS_OK || error == NULL || error->message[0] == 0) { char message[128]; (void)snprintf(message,sizeof(message),"REC node %u (op %u) lowering failed (status %d, kind %u)",(unsigned)i,(unsigned)semantic,(int)status,(unsigned)op->kind); lw_set_error(error,status!=LW_STATUS_OK?status:LW_STATUS_UNSUPPORTED,message); }return LW_X64_REC_COMPILE_UNSUPPORTED;}op->semantic_begin=i;op->semantic_count=1u;if(program->backend_layout==LW_X64_REC_BACKEND_NHWC&&op->data.conv.scalar_fallback==0u&&(op->kind==LW_X64_REC_OP_POINTWISE||op->kind==LW_X64_REC_OP_DENSE||op->kind==LW_X64_REC_OP_DEPTHWISE)){uint32_t fold_span=fold_conv_epilogue(model,session,program,limit,i,op,physical);if(fold_span>1u){op->semantic_count=(uint16_t)fold_span;program->semantic_consumed+=fold_span;++physical;i+=fold_span-1u;continue;}}program->semantic_consumed++;program->values[lwm_read_u32(node+40u)].producer=(int32_t)physical;for(uint32_t j=0u;j<lwm_read_u16(node+2u);++j){uint32_t in=lwm_read_u32(node+8u+j*4u);if(program->values[in].last_use<(int32_t)physical)program->values[in].last_use=(int32_t)physical;}++physical;}}
     program->op_count=physical;
     return LW_X64_REC_COMPILE_OK;
 }

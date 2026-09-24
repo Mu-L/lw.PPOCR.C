@@ -706,6 +706,41 @@ void lw_session_set_intra_op_thread_count(lw_session* session, uint32_t thread_c
     session->intra_op_thread_count = lw_thread_pool_worker_count(session->thread_pool);
 }
 
+void lw_session_set_external_thread_pool(lw_session* session, lw_thread_pool* pool,
+                                         uint32_t worker_count) {
+    if (session == NULL) {
+        return;
+    }
+    if (pool == NULL || worker_count <= 1u) {
+        pool = NULL;
+        worker_count = 0u;
+    }
+    session->external_thread_pool = pool;
+    session->external_worker_count = worker_count;
+}
+
+lw_thread_pool* lw_session_ctc_head_pool(const lw_session* session, uint32_t* out_workers) {
+    if (out_workers != NULL) {
+        *out_workers = 1u;
+    }
+    if (session == NULL) {
+        return NULL;
+    }
+    if (session->external_thread_pool != NULL && session->external_worker_count > 1u) {
+        if (out_workers != NULL) {
+            *out_workers = session->external_worker_count;
+        }
+        return session->external_thread_pool;
+    }
+    if (session->thread_pool != NULL && session->intra_op_thread_count > 1u) {
+        if (out_workers != NULL) {
+            *out_workers = session->intra_op_thread_count;
+        }
+        return session->thread_pool;
+    }
+    return NULL;
+}
+
 void lw_session_free(lw_session* session) {
     if (session == NULL) {
         return;

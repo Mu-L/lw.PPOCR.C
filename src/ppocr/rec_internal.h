@@ -66,6 +66,10 @@ lw_status lw_rec_ctc_decode_greedy_known_capacity_f32(
 lw_status lw_recognizer_clone(const lw_recognizer* source, lw_recognizer** out_recognizer,
                               lw_error* error);
 
+/* Enable intra-op parallelism for the recognizer's CTC head projection.
+ * thread_count <= 1 keeps the serial path. */
+void lw_recognizer_set_intra_op_thread_count(lw_recognizer* recognizer, uint32_t thread_count);
+
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
 /* Test-only internal hook: disable the compiled x64 REC backend so the same
  * binary can measure canonical recognizer timing. */

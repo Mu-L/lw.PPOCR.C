@@ -7,6 +7,7 @@
  */
 
 #include "lwm_read.h"
+#include "ctc_head_parallel_internal.h"
 #include "packed_conv_internal.h"
 #include "packed_conv3x3_internal.h"
 #include "parallel_internal.h"
@@ -1540,10 +1541,27 @@ static lw_status execute_packed_ctc_projection_tiled(
             lw_set_error(error, LW_STATUS_OUT_OF_BOUNDS, "CTC tiled projection buffer is too large");
             return LW_STATUS_OUT_OF_BOUNDS;
         }
-        lw_avx2_packed_matmul_bias_argmax_f32(
-            projection->activation + (size_t)activation_offset, projection->packed_weights,
-            projection->bias, session->ctc_logits_scratch, best_indices + offset, 1u, rows,
-            projection->inner_dimension, projection->columns);
+        {
+            uint32_t head_workers = 1u;
+            lw_thread_pool* head_pool = lw_session_ctc_head_pool(session, &head_workers);
+            head_workers = lw_ctc_head_parallel_worker_count(head_pool, head_workers, rows,
+                                                             projection->inner_dimension,
+                                                             projection->columns);
+            if (head_workers > 1u) {
+                /* Row-parallel head projection: bit-identical per element. */
+                lw_ctc_head_bias_argmax_parallel_f32(
+                    head_pool, head_workers,
+                    projection->activation + (size_t)activation_offset,
+                    projection->packed_weights, projection->bias, session->ctc_logits_scratch,
+                    best_indices + offset, rows, projection->inner_dimension,
+                    projection->columns);
+            } else {
+                lw_avx2_packed_matmul_bias_argmax_f32(
+                    projection->activation + (size_t)activation_offset, projection->packed_weights,
+                    projection->bias, session->ctc_logits_scratch, best_indices + offset, 1u, rows,
+                    projection->inner_dimension, projection->columns);
+            }
+        }
         block_finished = profile == NULL ? 0u : profile->clock(profile->clock_context);
         if (profile != NULL && block_finished >= block_started) {
             block_elapsed = block_finished - block_started;
@@ -1666,10 +1684,24 @@ lw_status lw_execute_session_f32_ctc_greedy(
         } else
 #endif
         {
-            lw_avx2_packed_matmul_bias_argmax_f32(
-                projection.activation, projection.packed_weights, projection.bias,
-                projection.logits, best_indices, 1u, projection.rows,
-                projection.inner_dimension, projection.columns);
+            uint32_t head_workers = 1u;
+            lw_thread_pool* head_pool = lw_session_ctc_head_pool(session, &head_workers);
+            head_workers = lw_ctc_head_parallel_worker_count(head_pool, head_workers,
+                                                             projection.rows,
+                                                             projection.inner_dimension,
+                                                             projection.columns);
+            if (head_workers > 1u) {
+                /* Row-parallel head projection: bit-identical per element. */
+                lw_ctc_head_bias_argmax_parallel_f32(
+                    head_pool, head_workers, projection.activation, projection.packed_weights,
+                    projection.bias, projection.logits, best_indices, projection.rows,
+                    projection.inner_dimension, projection.columns);
+            } else {
+                lw_avx2_packed_matmul_bias_argmax_f32(
+                    projection.activation, projection.packed_weights, projection.bias,
+                    projection.logits, best_indices, 1u, projection.rows,
+                    projection.inner_dimension, projection.columns);
+            }
         }
         if (profile != NULL) {
             if (!tiled_projection) {
