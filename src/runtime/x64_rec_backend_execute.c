@@ -271,6 +271,70 @@ static uint8_t* dense_shard_scratch(lw_x64_rec_instance* instance, uint32_t work
     return instance->dense_shard_scratch;
 }
 
+/* Depthwise convs shard along output rows like dense ones; the kernel applies
+ * output_row_offset to the input window and needs no scratch.  Every output
+ * pixel keeps the serial tap order, so splits are bit-identical. */
+typedef struct lw_rec_depthwise_shard {
+    const float* input;
+    const float* packed_weights;
+    const float* bias;
+    float* output;
+    lw_nhwc_depthwise_desc desc;
+    lw_status status[LW_PARALLEL_MAX_WORKERS];
+} lw_rec_depthwise_shard;
+
+static void depthwise_shard_entry(void* context_void, uint32_t worker_index,
+                                  uint32_t worker_count) {
+    lw_rec_depthwise_shard* shard = (lw_rec_depthwise_shard*)context_void;
+    const uint32_t full_rows = shard->desc.output_height +
+                               shard->desc.output_row_offset;
+    uint32_t base = full_rows / worker_count;
+    uint32_t remainder = full_rows % worker_count;
+    uint32_t row_begin = worker_index * base +
+                         (worker_index < remainder ? worker_index : remainder);
+    uint32_t row_end = row_begin + base + (worker_index < remainder ? 1u : 0u);
+    lw_nhwc_depthwise_desc desc;
+    float* output;
+    if (row_end <= row_begin) {
+        shard->status[worker_index] = LW_STATUS_OK;
+        return;
+    }
+    desc = shard->desc;
+    desc.output_height = row_end - row_begin;
+    desc.output_row_offset = row_begin;
+    output = shard->output +
+             (size_t)row_begin * desc.output_width * desc.channels;
+    shard->status[worker_index] = lw_avx2_fma_nhwc_depthwise_f32(
+        shard->input, shard->packed_weights, shard->bias, output, &desc);
+}
+
+static uint32_t depthwise_shard_workers(const lw_x64_rec_instance* instance,
+                                        const lw_x64_rec_conv_op* conv) {
+    uint64_t work;
+    uint32_t workers;
+    uint32_t output_rows;
+    if (instance->thread_pool == NULL || instance->intra_op_workers <= 1u) {
+        return 1u;
+    }
+    output_rows = conv->output_height;
+    if (output_rows < 2u) {
+        return 1u;
+    }
+    work = (uint64_t)output_rows * conv->output_width * conv->input_channels *
+           conv->kernel_h * conv->kernel_w;
+    if (work < LW_REC_POINTWISE_SHARD_MIN_WORK) {
+        return 1u;
+    }
+    workers = instance->intra_op_workers;
+    if (workers > output_rows) {
+        workers = output_rows;
+    }
+    if (workers > LW_PARALLEL_MAX_WORKERS) {
+        workers = LW_PARALLEL_MAX_WORKERS;
+    }
+    return workers <= 1u ? 1u : workers;
+}
+
 static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* op,
                             lw_error* error) {
     (void)error;
@@ -491,6 +555,34 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         input = offset_ptr(instance, op->data.conv.input_offset);
         output = offset_ptr(instance, op->data.conv.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        {
+            uint32_t shard_workers = depthwise_shard_workers(instance, &op->data.conv);
+            if (shard_workers > 1u) {
+                lw_rec_depthwise_shard shard;
+                uint32_t wi;
+                shard.input = input;
+                shard.packed_weights = op->data.conv.packed_weights;
+                shard.bias = op->data.conv.bias;
+                shard.output = output;
+                shard.desc = desc;
+                lw_thread_pool_run(instance->thread_pool, shard_workers,
+                                   depthwise_shard_entry, &shard);
+                status = LW_STATUS_OK;
+                for (wi = 0u; wi < shard_workers; ++wi) {
+                    if (shard.status[wi] != LW_STATUS_OK) {
+                        status = shard.status[wi];
+                        break;
+                    }
+                }
+                if (status == LW_STATUS_OK) return LW_STATUS_OK;
+                if (desc.post_bias != NULL) {
+                    /* The scalar fallback cannot reproduce the fused epilogue. */
+                    return status;
+                }
+                scalar_nhwc_conv(&op->data.conv, input, output);
+                return LW_STATUS_OK;
+            }
+        }
         status = lw_avx2_fma_nhwc_depthwise_f32(input, op->data.conv.packed_weights,
                                                  op->data.conv.bias, output, &desc);
         if (status == LW_STATUS_OK) return LW_STATUS_OK;
@@ -852,15 +944,82 @@ void lw_x64_rec_instance_free(lw_x64_rec_instance* instance) { if (instance == N
 
 float* lw_x64_rec_instance_input(lw_x64_rec_instance* instance, uint64_t* element_count) { const lw_x64_rec_value* value; if (element_count != NULL) *element_count = 0u; if (instance == NULL || instance->program == NULL || instance->program->input_value >= instance->program->value_count) return NULL; value=&instance->program->values[instance->program->input_value]; if (element_count != NULL) *element_count=value->bytes/sizeof(float); return offset_ptr(instance,value->offset); }
 
+/* Env-gated (LW_X64_REC_PROFILE=1) per-kind op timing for the compiled
+ * backend.  Zero overhead when disabled: one cached getenv per process. */
+#if defined(_MSC_VER)
+#pragma warning(disable : 4996)
+#endif
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+static uint64_t rec_profile_now_ns(void) {
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER now;
+    if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    return (uint64_t)((now.QuadPart * 1000000000ull) / (uint64_t)freq.QuadPart);
+}
+#else
+#include <time.h>
+static uint64_t rec_profile_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+#endif
+
+static int rec_profile_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) cached = getenv("LW_X64_REC_PROFILE") != NULL ? 1 : 0;
+    return cached;
+}
+
+static uint64_t* rec_profile_slot(lw_x64_rec_profile* profile, uint16_t kind) {
+    switch (kind) {
+    case LW_X64_REC_OP_POINTWISE: return &profile->pointwise_ns;
+    case LW_X64_REC_OP_DENSE: return &profile->dense_ns;
+    case LW_X64_REC_OP_DEPTHWISE: return &profile->depthwise_ns;
+    case LW_X64_REC_OP_ADD: case LW_X64_REC_OP_MUL: case LW_X64_REC_OP_DIV:
+    case LW_X64_REC_OP_SUB: case LW_X64_REC_OP_POW: return &profile->binary_ns;
+    case LW_X64_REC_OP_RELU: case LW_X64_REC_OP_ERF: case LW_X64_REC_OP_GELU:
+    case LW_X64_REC_OP_HARD_SIGMOID: case LW_X64_REC_OP_SIGMOID:
+    case LW_X64_REC_OP_SQRT: return &profile->unary_ns;
+    case LW_X64_REC_OP_REDUCE_MEAN: return &profile->reduce_ns;
+    case LW_X64_REC_OP_AVG_POOL: case LW_X64_REC_OP_MAX_POOL: return &profile->pool_ns;
+    case LW_X64_REC_OP_TRANSPOSE: return &profile->transpose_ns;
+    case LW_X64_REC_OP_MATMUL: return &profile->matmul_ns;
+    default: return NULL;
+    }
+}
+
 static lw_status run_backbone_ops(lw_x64_rec_instance* instance, lw_error* error) {
     uint32_t i;
     lw_status status;
+    int profiling;
     if (instance == NULL || instance->program == NULL) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "REC instance is invalid");
         return LW_STATUS_INVALID_ARGUMENT;
     }
+    profiling = rec_profile_enabled();
+    if (profiling) {
+        memset(&instance->profile, 0, sizeof(instance->profile));
+    }
     for (i = 0u; i < instance->program->op_count; ++i) {
-        status = execute_op(instance, &instance->program->ops[i], error);
+        if (profiling) {
+            uint64_t started = rec_profile_now_ns();
+            uint64_t* slot;
+            status = execute_op(instance, &instance->program->ops[i], error);
+            slot = rec_profile_slot(&instance->profile, instance->program->ops[i].kind);
+            {
+                uint64_t elapsed = rec_profile_now_ns() - started;
+                if (slot != NULL) *slot += elapsed;
+                instance->profile.total_ns += elapsed;
+            }
+        } else {
+            status = execute_op(instance, &instance->program->ops[i], error);
+        }
         if (status != LW_STATUS_OK) {
             if (error != NULL && error->message[0] == '\0') {
                 char message[96];
@@ -889,12 +1048,28 @@ lw_status lw_x64_rec_instance_run_backbone(lw_x64_rec_instance* instance, lw_err
 lw_status lw_x64_rec_instance_run(lw_x64_rec_instance* instance, lw_error* error) {
     lw_status status;
     float* activation;
+    int profiling = rec_profile_enabled();
     status = run_backbone_ops(instance, error);
     if (status != LW_STATUS_OK) return status;
     if (instance->program->ctc.enabled) {
+        uint64_t ctc_started = profiling ? rec_profile_now_ns() : 0u;
         activation = offset_ptr(instance, instance->program->values[instance->program->ctc.activation_value].offset);
         status = lw_x64_rec_ctc_execute(instance->program, instance, activation, error);
         if (status != LW_STATUS_OK) return status;
+        if (profiling) {
+            instance->profile.ctc_ns = rec_profile_now_ns() - ctc_started;
+        }
+    }
+    if (profiling) {
+        const lw_x64_rec_profile* p = &instance->profile;
+        fprintf(stderr,
+            "X64REC width=%u total=%.3f pw=%.3f dense=%.3f dw=%.3f bin=%.3f unary=%.3f "
+            "reduce=%.3f pool=%.3f transpose=%.3f matmul=%.3f ctc=%.3f\n",
+            (unsigned)instance->program->target_width, p->total_ns / 1e6,
+            p->pointwise_ns / 1e6, p->dense_ns / 1e6, p->depthwise_ns / 1e6,
+            p->binary_ns / 1e6, p->unary_ns / 1e6, p->reduce_ns / 1e6,
+            p->pool_ns / 1e6, p->transpose_ns / 1e6, p->matmul_ns / 1e6,
+            p->ctc_ns / 1e6);
     }
     lw_set_error(error, LW_STATUS_OK, "");
     return LW_STATUS_OK;

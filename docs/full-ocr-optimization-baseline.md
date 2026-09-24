@@ -602,3 +602,17 @@ iYí¹dense 3x3 convmedium node 11 ¦ 41ms/L	q« scratch *Gdepthwise
 - A/B:¤ÿchecksum hÑ	tiny 1w -9%small 1w -12%medium 1w -3%6 nG<
   :híû>	4w ú,s¿ worker ò`á8	
 - ctest 88/88 hÿ
+
+## 2026-09-24 REC depthwise LG + per-kind ¡ö¢ˆ,A	n	
+
+- °ž¯ƒØÏ¢ˆ LW_X64_REC_PROFILE=1run_backbone_ops —P¡öinstance_run +>
+   stderr Sp{öpw/dense/dw/bin/unary/reduce/pool/transpose/matmul/ctc	
+  síöö  medium 960 ½2LžKpw 283ms/L85%	dw 19.5matmul 11.3ctc 7
+- DEPTHWISE —P	“úLG8Ÿ output_row_offsetà scratchM ô	
+- A/Bù pointwise G HEAD¤ÿnchecksum hÑ	
+  tiny 1w -9%small 1w -9%medium 1w -7% / 4w -11%dense+dw v6Ê	
+- ctest 88/88 hÿ
+
+iYí¹medium 960 ½vLÏL ~110ms	pw ~72ms2L 283ms8 ¿Å 4.2x
+&½/iU'×P	matmul ~13msè›þ*G	dw ~11msctc ~11msprobabilities
+2LÍ—	
