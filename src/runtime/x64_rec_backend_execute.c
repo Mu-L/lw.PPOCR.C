@@ -335,6 +335,110 @@ static uint32_t depthwise_shard_workers(const lw_x64_rec_instance* instance,
     return workers <= 1u ? 1u : workers;
 }
 
+/* Matmul sharding.  Two bit-identical modes:
+ * - mode 1: rank-2 shared-weight matmul, split over rows (4-row grain keeps
+ *   the AVX2 row blocking; the kernel tail handles the remainder rows);
+ * - mode 2: attention-style rank-4 [1,B,M,K] x [1,B,K,N] (no broadcasting),
+ *   split over B, each batch dispatched as a rank-2 matmul.
+ * Every output element accumulates over the inner axis in the serial order. */
+typedef struct lw_rec_matmul_shard {
+    const float* input;
+    const float* right;
+    float* output;
+    uint32_t batch;
+    uint32_t rows;
+    uint32_t inner;
+    uint32_t columns;
+    uint32_t mode;
+    lw_status status[LW_PARALLEL_MAX_WORKERS];
+} lw_rec_matmul_shard;
+
+static uint32_t matmul_shard_row_begin(uint32_t rows, uint32_t worker_count,
+                                       uint32_t worker_index) {
+    uint32_t blocks = (rows + 3u) / 4u;
+    uint32_t base = blocks / worker_count;
+    uint32_t remainder = blocks % worker_count;
+    uint32_t block = worker_index * base + (worker_index < remainder ? worker_index : remainder);
+    uint32_t begin = block * 4u;
+    return begin > rows ? rows : begin;
+}
+
+static void matmul_shard_entry(void* context_void, uint32_t worker_index,
+                               uint32_t worker_count) {
+    lw_rec_matmul_shard* shard = (lw_rec_matmul_shard*)context_void;
+    shard->status[worker_index] = LW_STATUS_OK;
+    if (shard->mode == 1u) {
+        uint32_t row_begin = matmul_shard_row_begin(shard->rows, worker_count, worker_index);
+        uint32_t row_end = matmul_shard_row_begin(shard->rows, worker_count, worker_index + 1u);
+        if (row_end <= row_begin) return;
+        shard->status[worker_index] = lw_matmul_shared_f32(
+            shard->input + (size_t)row_begin * shard->inner, shard->right,
+            shard->output + (size_t)row_begin * shard->columns, 1u, row_end - row_begin,
+            shard->inner, shard->columns);
+    } else {
+        /* Per-batch rank-2 view through the same scalar kernel the unsplit
+         * op would use, so every element keeps the exact accumulation order. */
+        int32_t in_dims[2];
+        int32_t w_dims[2];
+        int32_t out_dims[2];
+        uint32_t base = shard->batch / worker_count;
+        uint32_t remainder = shard->batch % worker_count;
+        uint32_t batch_begin = worker_index * base +
+                               (worker_index < remainder ? worker_index : remainder);
+        uint32_t batch_end = batch_begin + base + (worker_index < remainder ? 1u : 0u);
+        uint32_t b;
+        in_dims[0] = (int32_t)shard->rows; in_dims[1] = (int32_t)shard->inner;
+        w_dims[0] = (int32_t)shard->inner; w_dims[1] = (int32_t)shard->columns;
+        out_dims[0] = (int32_t)shard->rows; out_dims[1] = (int32_t)shard->columns;
+        for (b = batch_begin; b < batch_end; ++b) {
+            lw_status status = lw_scalar_matmul_f32(
+                shard->input + (size_t)b * shard->rows * shard->inner,
+                shard->right + (size_t)b * shard->inner * shard->columns,
+                shard->output + (size_t)b * shard->rows * shard->columns,
+                2u, in_dims, 2u, w_dims, 2u, out_dims);
+            if (status != LW_STATUS_OK) {
+                shard->status[worker_index] = status;
+                return;
+            }
+        }
+    }
+}
+
+static uint32_t matmul_shard_workers(const lw_x64_rec_instance* instance,
+                                     const lw_x64_rec_matmul_op* matmul,
+                                     uint32_t* out_mode) {
+    uint64_t work = (uint64_t)matmul->batch * matmul->rows * matmul->inner *
+                    matmul->columns;
+    uint32_t workers;
+    *out_mode = 0u;
+    if (instance->thread_pool == NULL || instance->intra_op_workers <= 1u ||
+        work < LW_REC_POINTWISE_SHARD_MIN_WORK) {
+        return 1u;
+    }
+    workers = instance->intra_op_workers;
+    if (workers > LW_PARALLEL_MAX_WORKERS) {
+        workers = LW_PARALLEL_MAX_WORKERS;
+    }
+    if (matmul->weights_rank == 2u && matmul->batch == 1u && matmul->rows >= 8u) {
+        /* Rank-2: row split. */
+        if (workers > matmul->rows / 4u) workers = matmul->rows / 4u;
+        *out_mode = 1u;
+    } else if (matmul->input_rank == 4u && matmul->weights_rank == 4u &&
+               matmul->output_rank == 4u && matmul->batch > 1u &&
+               matmul->input_dimensions[0] == 1 && matmul->weights_dimensions[0] == 1 &&
+               matmul->output_dimensions[0] == 1 &&
+               matmul->input_dimensions[1] == (int32_t)matmul->batch &&
+               matmul->weights_dimensions[1] == (int32_t)matmul->batch &&
+               matmul->output_dimensions[1] == (int32_t)matmul->batch) {
+        /* Attention-style batched matmul without broadcasting: batch split. */
+        if (workers > matmul->batch) workers = matmul->batch;
+        *out_mode = 2u;
+    } else {
+        return 1u;
+    }
+    return workers <= 1u ? 1u : workers;
+}
+
 static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* op,
                             lw_error* error) {
     (void)error;
@@ -883,6 +987,33 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         }
         right = op->data.matmul.weights != NULL ? op->data.matmul.weights : (const float*)offset_ptr(instance, op->data.matmul.weights_offset);
         if (right == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        {
+            uint32_t shard_mode = 0u;
+            uint32_t shard_workers = matmul_shard_workers(instance, &op->data.matmul,
+                                                          &shard_mode);
+            if (shard_workers > 1u) {
+                lw_rec_matmul_shard shard;
+                uint32_t wi;
+                lw_status status = LW_STATUS_OK;
+                shard.input = input;
+                shard.right = right;
+                shard.output = output;
+                shard.batch = op->data.matmul.batch;
+                shard.rows = op->data.matmul.rows;
+                shard.inner = op->data.matmul.inner;
+                shard.columns = op->data.matmul.columns;
+                shard.mode = shard_mode;
+                lw_thread_pool_run(instance->thread_pool, shard_workers,
+                                   matmul_shard_entry, &shard);
+                for (wi = 0u; wi < shard_workers; ++wi) {
+                    if (shard.status[wi] != LW_STATUS_OK) {
+                        status = shard.status[wi];
+                        break;
+                    }
+                }
+                return status;
+            }
+        }
         if (op->data.matmul.weights_rank == 2u) {
             return lw_matmul_shared_f32(input, right, output, op->data.matmul.batch, op->data.matmul.rows, op->data.matmul.inner, op->data.matmul.columns);
         }

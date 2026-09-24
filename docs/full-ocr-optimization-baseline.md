@@ -616,3 +616,13 @@ iYí¹dense 3x3 convmedium node 11 ¦ 41ms/L	q« scratch *Gdepthwise
 iYí¹medium 960 ½vLÏL ~110ms	pw ~72ms2L 283ms8 ¿Å 4.2x
 &½/iU'×P	matmul ~13msè›þ*G	dw ~11msctc ~11msprobabilities
 2LÍ—	
+
+## 2026-09-24 REC matmul GvL,AÛn	
+
+- MATMUL —P$ÍM ôGrank-2 q«CÍ	L4 L’¦Ý AVX2 LW>è18
+  ê&Ypï„	è› rank-4 [1,B,M,K]x[1,B,K,N] à­ö	 B ÏyÏ *
+  lw_scalar_matmul_f32 å rank-2 ÆþgL( lw_matmul_shared_f32M FMA 6)î	
+- packed ï„CTC 4	ò1 ctc_head :6vL(dG
+- medium 960 ½ matmul 13 -> 7ms/LA/Bù pointwise HEAD+ dense+dw+matmul /¡
+  checksum hÑ	tiny 1w -8%small 1w -13%medium 1w -16%4w ú,s
+- ctest 88/88 hÿ
