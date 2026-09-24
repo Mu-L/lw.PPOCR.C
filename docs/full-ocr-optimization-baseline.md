@@ -565,3 +565,15 @@ lw_x64_rec_fast_plan; the grouped path mainly serves their DET stages.
 
 ízô48SMÏ* 4 LWÍA 14.4MB(medium)/9MB(small) CÍpanel-outer ª¯Í’ï
 äCÍU!ÇXb’øìËÍ’MØ		bvLZ%<'v
+
+## 2026-09-24 CTC 48 panel-outer Í’,An	
+
+- lw_avx2_fma_packed_matmul_argmax_scores_f32 ª¯Í’b16 	BLW…B
+  L	 128 WÏLĞL '<¶{Y
+24KB	b/’ø¤„“úW
+  ÏC  inner ô/ zØÏL argmax Í	bGvM ô®úÆ MATCH	
+- 2L®úÆ120x192x18710	22.0 -> 7.2 ms/call-67%	CÍÏ§AÏ 432MB -> 14.4MB
+- ï0ï§ï„4òL§vLvL¡—;ü	tiny/small/medium M¦ 1-2%
+- -şÂK medium 6889-7584ms „GŞ ::h}jğŒÛ6 profile q¨àØ
+  Kb 4480ms Ï§	A/B Å{¤ÿú¿ŒÛ6 &MW DLL
+- ctest 88/88 hÿ	!‹ checksum hÑ
