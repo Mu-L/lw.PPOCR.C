@@ -591,3 +591,14 @@ lw_x64_rec_fast_plan; the grouped path mainly serves their DET stages.
 
 iYí¹dense 3x3 convmedium node 11 ¦ 41ms/L	q« scratch *Gdepthwise 	
 S¤X¨œLdense G  per-worker scratchY\ n
+
+## 2026-09-24 REC dense wï“úLGvL,AŒn	
+
+- x64_rec_backend_execute.cDENSE —P	“úL0 intra `dense 8Ÿ/
+  output_row_offset“eÎhÏ Ï	 (oy+offset)*stride-pad û@“ú/‹î	LOû
+  ÏÏ  tap / zØM ôchecksum hÑ	
+- per-worker scratchdense 8 scratch àULpàsž‹ð'	 M workers*scratch_bytes
+  owns_workspace ìËinstance_free àaöÊ>	M1%Þ 2L
+- A/B:¤ÿchecksum hÑ	tiny 1w -9%small 1w -12%medium 1w -3%6 nG<
+  :híû>	4w ú,s¿ worker ò`á8	
+- ctest 88/88 hÿ

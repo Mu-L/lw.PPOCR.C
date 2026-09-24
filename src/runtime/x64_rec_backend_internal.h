@@ -395,6 +395,11 @@ typedef struct lw_x64_rec_instance {
      * shares it, and slots never run concurrently. */
     lw_thread_pool* thread_pool;
     uint32_t intra_op_workers;
+    /* Lazily allocated per-worker scratch for sharded dense convs
+     * (intra_op_workers * per-op scratch bytes, grown on demand).
+     * Always owned by the instance, independent of owns_workspace. */
+    uint8_t* dense_shard_scratch;
+    uint64_t dense_shard_scratch_bytes;
     /* 0 when arena/scratch/CTC buffers are borrowed from a shared
      * cross-width workspace owned by the recognizer. */
     uint8_t owns_workspace;

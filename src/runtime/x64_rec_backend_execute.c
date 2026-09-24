@@ -174,6 +174,103 @@ static uint32_t pointwise_shard_workers(const lw_x64_rec_instance* instance,
     return workers <= 1u ? 1u : workers;
 }
 
+/* Intra-op sharding for dense convs along output rows.  The kernel accepts an
+ * output_row_offset and computes every output pixel with the same tap order
+ * as the serial run, so row splits are bit-identical.  Each worker gets its
+ * own scratch slice: the per-op scratch geometry is row-count independent. */
+typedef struct lw_rec_dense_shard {
+    const float* input;
+    const float* packed_weights;
+    lw_nhwc_epilogue epilogue;
+    float* output;
+    lw_nhwc_dense_desc desc;
+    uint8_t* scratch_base;
+    uint64_t scratch_stride;
+    uint64_t scratch_bytes;
+    lw_status status[LW_PARALLEL_MAX_WORKERS];
+} lw_rec_dense_shard;
+
+static void dense_shard_entry(void* context_void, uint32_t worker_index,
+                              uint32_t worker_count) {
+    lw_rec_dense_shard* shard = (lw_rec_dense_shard*)context_void;
+    const uint32_t full_rows = shard->desc.output_height +
+                               shard->desc.output_row_offset;
+    uint32_t base = full_rows / worker_count;
+    uint32_t remainder = full_rows % worker_count;
+    uint32_t row_begin = worker_index * base +
+                         (worker_index < remainder ? worker_index : remainder);
+    uint32_t row_end = row_begin + base + (worker_index < remainder ? 1u : 0u);
+    lw_nhwc_dense_desc desc;
+    lw_nhwc_epilogue ep;
+    float* output;
+    if (row_end <= row_begin) {
+        shard->status[worker_index] = LW_STATUS_OK;
+        return;
+    }
+    desc = shard->desc;
+    desc.output_height = row_end - row_begin;
+    desc.output_row_offset = row_begin;
+    ep = shard->epilogue;
+    output = shard->output +
+             (size_t)row_begin * desc.output_width * desc.output_channels;
+    if (ep.residual != NULL) {
+        ep.residual += (size_t)row_begin * desc.output_width * desc.output_channels;
+    }
+    shard->status[worker_index] = lw_avx2_fma_nhwc_dense_f32(
+        shard->input, shard->packed_weights, &ep, output, &desc,
+        shard->scratch_base + (size_t)worker_index * shard->scratch_stride,
+        shard->scratch_bytes);
+}
+
+static uint32_t dense_shard_workers(const lw_x64_rec_instance* instance,
+                                    const lw_x64_rec_conv_op* conv) {
+    uint64_t work;
+    uint32_t workers;
+    uint32_t output_rows;
+    if (instance->thread_pool == NULL || instance->intra_op_workers <= 1u) {
+        return 1u;
+    }
+    output_rows = conv->output_height;
+    if (output_rows < 2u) {
+        return 1u;
+    }
+    work = (uint64_t)output_rows * conv->output_width * conv->output_channels *
+           conv->input_channels * conv->kernel_h * conv->kernel_w;
+    if (work < LW_REC_POINTWISE_SHARD_MIN_WORK) {
+        return 1u;
+    }
+    workers = instance->intra_op_workers;
+    if (workers > output_rows) {
+        workers = output_rows;
+    }
+    if (workers > LW_PARALLEL_MAX_WORKERS) {
+        workers = LW_PARALLEL_MAX_WORKERS;
+    }
+    return workers <= 1u ? 1u : workers;
+}
+
+static uint8_t* dense_shard_scratch(lw_x64_rec_instance* instance, uint32_t workers,
+                                    uint64_t scratch_bytes) {
+    uint64_t needed;
+    if (scratch_bytes == 0u || workers <= 1u) {
+        return NULL;
+    }
+    needed = (uint64_t)workers * scratch_bytes;
+    if (instance->dense_shard_scratch_bytes < needed) {
+        uint8_t* grown;
+        rec_aligned_free(instance->dense_shard_scratch);
+        instance->dense_shard_scratch = NULL;
+        instance->dense_shard_scratch_bytes = 0u;
+        grown = (uint8_t*)rec_aligned_alloc(64u, (size_t)needed);
+        if (grown == NULL) {
+            return NULL;
+        }
+        instance->dense_shard_scratch = grown;
+        instance->dense_shard_scratch_bytes = needed;
+    }
+    return instance->dense_shard_scratch;
+}
+
 static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* op,
                             lw_error* error) {
     (void)error;
@@ -323,6 +420,42 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         if (op->data.conv.has_residual != 0u) {
             ep.residual = offset_ptr(instance, op->data.conv.residual_offset);
             if (ep.residual == NULL) return LW_STATUS_INVALID_ARGUMENT;
+        }
+        {
+            uint32_t shard_workers = dense_shard_workers(instance, &op->data.conv);
+            if (shard_workers > 1u) {
+                uint8_t* shard_scratch = dense_shard_scratch(instance, shard_workers,
+                                                             op->data.conv.scratch_bytes);
+                if (shard_scratch != NULL) {
+                    lw_rec_dense_shard shard;
+                    uint32_t wi;
+                    shard.input = input;
+                    shard.packed_weights = op->data.conv.packed_weights;
+                    shard.epilogue = ep;
+                    shard.output = output;
+                    shard.desc = desc;
+                    shard.scratch_base = shard_scratch;
+                    shard.scratch_stride = op->data.conv.scratch_bytes;
+                    shard.scratch_bytes = op->data.conv.scratch_bytes;
+                    lw_thread_pool_run(instance->thread_pool, shard_workers,
+                                       dense_shard_entry, &shard);
+                    status = LW_STATUS_OK;
+                    for (wi = 0u; wi < shard_workers; ++wi) {
+                        if (shard.status[wi] != LW_STATUS_OK) {
+                            status = shard.status[wi];
+                            break;
+                        }
+                    }
+                    if (status == LW_STATUS_OK) return LW_STATUS_OK;
+                    if (ep.post_bias != NULL || ep.residual != NULL ||
+                        ep.activation != LW_NHWC_ACT_NONE) {
+                        /* The scalar fallback cannot reproduce the fused epilogue. */
+                        return status;
+                    }
+                    scalar_nhwc_conv(&op->data.conv, input, output);
+                    return LW_STATUS_OK;
+                }
+            }
         }
         status = lw_avx2_fma_nhwc_dense_f32(
             input, op->data.conv.packed_weights, &ep, output, &desc,
@@ -715,7 +848,7 @@ lw_status lw_x64_rec_instance_create_borrowed(
     *out = instance; lw_set_error(error, LW_STATUS_OK, ""); return LW_STATUS_OK;
 }
 
-void lw_x64_rec_instance_free(lw_x64_rec_instance* instance) { if (instance == NULL) return; if (instance->owns_workspace != 0u) { rec_aligned_free(instance->ctc_scores); rec_aligned_free(instance->best_indices); rec_aligned_free(instance->best_probabilities); rec_aligned_free(instance->scratch); rec_aligned_free(instance->arena); } free(instance); }
+void lw_x64_rec_instance_free(lw_x64_rec_instance* instance) { if (instance == NULL) return; rec_aligned_free(instance->dense_shard_scratch); if (instance->owns_workspace != 0u) { rec_aligned_free(instance->ctc_scores); rec_aligned_free(instance->best_indices); rec_aligned_free(instance->best_probabilities); rec_aligned_free(instance->scratch); rec_aligned_free(instance->arena); } free(instance); }
 
 float* lw_x64_rec_instance_input(lw_x64_rec_instance* instance, uint64_t* element_count) { const lw_x64_rec_value* value; if (element_count != NULL) *element_count = 0u; if (instance == NULL || instance->program == NULL || instance->program->input_value >= instance->program->value_count) return NULL; value=&instance->program->values[instance->program->input_value]; if (element_count != NULL) *element_count=value->bytes/sizeof(float); return offset_ptr(instance,value->offset); }
 
