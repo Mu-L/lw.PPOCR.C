@@ -81,6 +81,99 @@ static void scalar_nhwc_batch_norm(const lw_x64_rec_affine_op* affine, const flo
     }
 }
 
+/* Intra-op sharding for 1x1 pointwise convs: pixels are independent and each
+ * output pixel accumulates over the input channels in the kernel's fixed
+ * order, so any contiguous pixel split is bit-identical to the serial run. */
+typedef struct lw_rec_pointwise_shard {
+    const float* input;
+    const float* packed_weights;
+    lw_nhwc_epilogue epilogue;
+    float* output;
+    uint32_t pixels;
+    uint32_t input_channels;
+    uint32_t output_channels;
+    uint16_t kernel;
+} lw_rec_pointwise_shard;
+
+static void pointwise_run_range(const lw_rec_pointwise_shard* shard,
+                                uint32_t pixel_begin, uint32_t pixel_count) {
+    lw_nhwc_epilogue ep = shard->epilogue;
+    const float* input = shard->input + (size_t)pixel_begin * shard->input_channels;
+    float* output = shard->output + (size_t)pixel_begin * shard->output_channels;
+    if (ep.residual != NULL) {
+        ep.residual += (size_t)pixel_begin * shard->output_channels;
+    }
+    switch (shard->kernel) {
+    case LW_X64_REC_PW_4X16:
+        lw_avx2_fma_nhwc_pointwise_4x16_f32(input, shard->packed_weights, &ep, output,
+                                            pixel_count, shard->input_channels,
+                                            shard->output_channels);
+        break;
+    case LW_X64_REC_PW_3X32:
+        lw_avx2_fma_nhwc_pointwise_3x32_f32(input, shard->packed_weights, &ep, output,
+                                            pixel_count, shard->input_channels,
+                                            shard->output_channels);
+        break;
+    case LW_X64_REC_PW_2X32:
+        lw_avx2_fma_nhwc_pointwise_2x32_f32(input, shard->packed_weights, &ep, output,
+                                            pixel_count, shard->input_channels,
+                                            shard->output_channels);
+        break;
+    default:
+        lw_avx2_fma_nhwc_pointwise_f32(input, shard->packed_weights, &ep, output,
+                                       pixel_count, shard->input_channels,
+                                       shard->output_channels);
+        break;
+    }
+}
+
+/* Shard begins use 12-pixel blocks: the kernel tile widths (2, 3, 4, 6) all
+ * divide 12, so every worker starts on a clean tile boundary.  The final
+ * shard takes the arbitrary tail. */
+#define LW_REC_POINTWISE_SHARD_GRAIN 12u
+static uint32_t pointwise_shard_begin(uint32_t pixels, uint32_t worker_count,
+                                      uint32_t worker_index) {
+    uint32_t blocks = (pixels + LW_REC_POINTWISE_SHARD_GRAIN - 1u) /
+                      LW_REC_POINTWISE_SHARD_GRAIN;
+    uint32_t base = blocks / worker_count;
+    uint32_t remainder = blocks % worker_count;
+    uint32_t block = worker_index * base + (worker_index < remainder ? worker_index : remainder);
+    uint32_t begin = block * LW_REC_POINTWISE_SHARD_GRAIN;
+    return begin > pixels ? pixels : begin;
+}
+
+static void pointwise_shard_entry(void* context_void, uint32_t worker_index,
+                                  uint32_t worker_count) {
+    const lw_rec_pointwise_shard* shard = (const lw_rec_pointwise_shard*)context_void;
+    uint32_t begin = pointwise_shard_begin(shard->pixels, worker_count, worker_index);
+    uint32_t end = pointwise_shard_begin(shard->pixels, worker_count, worker_index + 1u);
+    if (end > begin) {
+        pointwise_run_range(shard, begin, end - begin);
+    }
+}
+
+/* Minimum MACs before worker fan-out pays for synchronization. */
+#define LW_REC_POINTWISE_SHARD_MIN_WORK (4ull * 1000ull * 1000ull)
+static uint32_t pointwise_shard_workers(const lw_x64_rec_instance* instance,
+                                        uint32_t pixels, uint32_t input_channels,
+                                        uint32_t output_channels) {
+    uint64_t work;
+    uint32_t workers;
+    if (instance->thread_pool == NULL || instance->intra_op_workers <= 1u ||
+        pixels < 2u * LW_REC_POINTWISE_SHARD_GRAIN) {
+        return 1u;
+    }
+    work = (uint64_t)pixels * input_channels * output_channels;
+    if (work < LW_REC_POINTWISE_SHARD_MIN_WORK) {
+        return 1u;
+    }
+    workers = instance->intra_op_workers;
+    if (workers > pixels / LW_REC_POINTWISE_SHARD_GRAIN) {
+        workers = pixels / LW_REC_POINTWISE_SHARD_GRAIN;
+    }
+    return workers <= 1u ? 1u : workers;
+}
+
 static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* op,
                             lw_error* error) {
     (void)error;
@@ -158,6 +251,22 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         }
         {
             uint32_t pixels = op->data.conv.input_height * op->data.conv.input_width;
+            uint32_t shard_workers = pointwise_shard_workers(instance, pixels,
+                op->data.conv.input_channels, op->data.conv.output_channels);
+            if (shard_workers > 1u) {
+                lw_rec_pointwise_shard shard;
+                shard.input = input;
+                shard.packed_weights = op->data.conv.packed_weights;
+                shard.epilogue = ep;
+                shard.output = output;
+                shard.pixels = pixels;
+                shard.input_channels = op->data.conv.input_channels;
+                shard.output_channels = op->data.conv.output_channels;
+                shard.kernel = op->data.conv.pointwise_kernel;
+                lw_thread_pool_run(instance->thread_pool, shard_workers,
+                                   pointwise_shard_entry, &shard);
+                return LW_STATUS_OK;
+            }
             switch (op->data.conv.pointwise_kernel) {
             case LW_X64_REC_PW_4X16:
                 lw_avx2_fma_nhwc_pointwise_4x16_f32(

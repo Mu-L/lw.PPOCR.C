@@ -577,3 +577,17 @@ lw_x64_rec_fast_plan; the grouped path mainly serves their DET stages.
 - -þÂK medium 6889-7584ms „GÞ ž::h}jðŒÛ6 profile q¨àØ
   Kb 4480ms Ï§	A/B Å{¤ÿú¿ŒÛ6 &MW DLL
 - ctest 88/88 hÿ	!‹ checksum hÑ
+
+## 2026-09-24 REC ¨r 1x1 pointwise wïÏ GvL,A n	
+
+- x64_rec_backend_execute.cPOINTWISE —P	 12 Ï ’¦2/3/4/6 Ï  tile Gtd 12	
+  0 recognizer intra `ÏÏ ¹ï/ zØM ôchecksum hÑ	
+- èÛpixels*ic*oc >= 4M MAC  pixels >= 24 MGúM—Pe  
+- A/B:¤ÿG<checksum hÑ	
+  tiny    1w 182->117ms (-36%)   4w 65->53ms (-18%)
+  small   1w 850->427ms (-49%)   4w 287->220ms (-23%)
+  medium  1w 5640->2219ms (-60%) 4w 2315->1532ms (-34%):hâ¨'¹ ô	
+- ctest 88/88 hÿ
+
+iYí¹dense 3x3 convmedium node 11 ¦ 41ms/L	q« scratch *Gdepthwise 	
+S¤X¨œLdense G  per-worker scratchY\ n
