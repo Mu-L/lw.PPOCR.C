@@ -154,9 +154,6 @@ static void convtranspose_tile_16(const float* input_row, const float* packed_we
 lw_status lw_avx2_fma_nhwc_convtranspose2x2_s2_f32(
     const float* input, const float* packed_weights, const lw_nhwc_epilogue* epilogue,
     float* output, const lw_nhwc_convtranspose_desc* desc) {
-    uint32_t oc_blocks;
-    uint32_t batch;
-    uint32_t input_y;
     if (input == NULL || packed_weights == NULL || output == NULL || desc == NULL ||
         desc->batch == 0u || desc->input_channels == 0u || desc->input_height == 0u ||
         desc->input_width == 0u || desc->output_channels == 0u ||
@@ -168,6 +165,9 @@ lw_status lw_avx2_fma_nhwc_convtranspose2x2_s2_f32(
     (void)epilogue;
     return LW_STATUS_UNSUPPORTED;
 #else
+    uint32_t oc_blocks;
+    uint32_t batch;
+    uint32_t input_y;
     oc_blocks = (desc->output_channels + LW_NHWC_OC_BLOCK - 1u) / LW_NHWC_OC_BLOCK;
     for (batch = 0u; batch < desc->batch; ++batch) {
         const float* input_batch =
@@ -201,8 +201,6 @@ LW_CT_TARGET
 lw_status lw_avx2_fma_nhwc_convtranspose2x2_s2_c1_f32(
     const float* input, const float* weights, const lw_nhwc_epilogue* epilogue,
     float* output, const lw_nhwc_convtranspose_desc* desc) {
-    uint32_t batch;
-    uint32_t input_y;
     if (input == NULL || weights == NULL || output == NULL || desc == NULL ||
         desc->batch == 0u || desc->input_channels == 0u || desc->input_height == 0u ||
         desc->input_width == 0u || desc->output_channels != 1u ||
@@ -214,6 +212,8 @@ lw_status lw_avx2_fma_nhwc_convtranspose2x2_s2_c1_f32(
     (void)epilogue;
     return LW_STATUS_UNSUPPORTED;
 #else
+    uint32_t batch;
+    uint32_t input_y;
     {
         /* Strided per-tap weight columns (ONNX [ic, 1, 2, 2]: w[tap][ic] =
          * weights[ic*4+tap]) gathered once into contiguous vectors. The first
