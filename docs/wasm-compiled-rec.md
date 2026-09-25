@@ -8,8 +8,9 @@ arena lifetime plan, fused epilogues, and CTC output elision. The compiled
 executor selects a 4-pixel x 16-output-channel SIMD128 pointwise kernel and
 panel-outer SIMD128 CTC projection with emitted-row probability recomputation.
 Dense/depthwise currently use portable physical kernels. The pack format
-remains OC16. The CLS
-backbone attempts the same compiler; unsupported CLS graphs fall back to the
+remains OC16. Only the NHWC compiled layout is supported on WASM; NCHW-only
+x64 kernels are not linked into its executor. The CLS backbone attempts the
+same compiler; unsupported CLS graphs fall back to the
 normal session. DET remains on the existing WASM executor.
 
 There is no pthread requirement, fast-math flag, or relaxed-SIMD dependency.

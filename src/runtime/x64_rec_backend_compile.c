@@ -1056,6 +1056,14 @@ lw_x64_rec_compile_result lw_x64_rec_backend_compile_ex(
     const lw_model* model, uint32_t target_width,
     lw_x64_rec_compile_strategy strategy,
     lw_x64_rec_program** out_program, lw_error* error) {
+#if defined(__EMSCRIPTEN__)
+    if (strategy != LW_X64_REC_COMPILE_NHWC) {
+        if (out_program != NULL) *out_program = NULL;
+        lw_set_error(error, LW_STATUS_UNSUPPORTED,
+                     "WASM compiled REC supports NHWC layout only");
+        return LW_X64_REC_COMPILE_UNSUPPORTED;
+    }
+#endif
     return lw_x64_rec_backend_compile_input(model, 48u, target_width, strategy, 1u,
                                             out_program, error);
 }

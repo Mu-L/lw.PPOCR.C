@@ -453,6 +453,7 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
     float* output;
     if (op == NULL) return LW_STATUS_INVALID_ARGUMENT;
     switch (op->kind) {
+#if !defined(__EMSCRIPTEN__)
     case LW_X64_REC_OP_POINTWISE_NCHW:
     case LW_X64_REC_OP_STEM_NCHW:
     case LW_X64_REC_OP_DEPTHWISE_NCHW: {
@@ -510,6 +511,7 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         }
         return LW_STATUS_OK;
     }
+#endif
     case LW_X64_REC_OP_POINTWISE: {
         lw_nhwc_epilogue ep = { NULL, NULL, op->data.conv.activation, 0u, 0.0f, 0.0f, NULL };
         input = offset_ptr(instance, op->data.conv.input_offset);
