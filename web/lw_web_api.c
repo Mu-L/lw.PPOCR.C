@@ -50,6 +50,7 @@ static void web_print_ocr_profile(const lw_ocr_execution_profile* profile) {
     (void)fprintf(stderr,
         "LW_WASM_OCR_PROFILE total=%.3f det_preprocess=%.3f det_graph=%.3f "
         "det_postprocess=%.3f crop=%.3f cls=%.3f rec=%.3f "
+        "det_compiled=%llu det_fallback=%llu cls_compiled=%llu cls_fallback=%llu "
         "rec_compiled=%llu rec_fallback=%llu\n",
         profile->total_nanoseconds * to_ms,
         det->preprocess_nanoseconds * to_ms,
@@ -60,6 +61,10 @@ static void web_print_ocr_profile(const lw_ocr_execution_profile* profile) {
          cls->postprocess_nanoseconds) * to_ms,
         (rec->preprocess_nanoseconds + rec->graph_nanoseconds +
          rec->postprocess_nanoseconds) * to_ms,
+        (unsigned long long)det->compiled_backend_runs,
+        (unsigned long long)det->canonical_fallback_runs,
+        (unsigned long long)cls->compiled_backend_runs,
+        (unsigned long long)cls->canonical_fallback_runs,
         (unsigned long long)rec->compiled_backend_lines,
         (unsigned long long)rec->canonical_fallback_lines);
 }
@@ -286,7 +291,7 @@ LW_WEB_API int lw_web_run(const uint8_t* source, uint32_t source_byte_count,
     lw_error_init(&g_error);
     lw_ocr_result_init(&native_result);
 #if defined(LW_NODE_WASM_PROFILE)
-    if (getenv("LW_WASM_OCR_PROFILE") != NULL) {
+    if (lw_profile_env_present("LW_WASM_OCR_PROFILE")) {
         profile = (lw_ocr_execution_profile*)malloc(sizeof(*profile));
         if (profile == NULL)
             return web_fail(LW_STATUS_OUT_OF_MEMORY, "unable to allocate OCR profile");

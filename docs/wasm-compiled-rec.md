@@ -77,6 +77,8 @@ zero REC line fallbacks, and SIMD128 WASM heap no more than 5 MiB above
 canonical. Latency and process RSS remain informational on hosted runners.
 The separate instrumented run prints DET/CLS/REC component times and DET/REC
 physical-op breakdowns; those times are not mixed into the uninstrumented A/B.
+It also counts actual compiled and canonical-fallback DET/CLS executions and
+compiled/fallback REC lines; CI requires zero fallback for the measured image.
 The `*-profile-summary.json` artifacts retain those component times alongside
 actual compiled DET/CLS arena and packed-constant bytes, plus each resident REC
 width's owned/borrowed constants and arena/scratch capacity. Borrowed REC

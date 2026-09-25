@@ -31,6 +31,11 @@ def write_profile_json(log_path: Path, output_path: Path, variant: str) -> None:
                 break
     if any(not rows for rows in snapshots.values()):
         raise ValueError("instrumented WASM run did not emit full OCR, DET, and REC profiles")
+    for run in snapshots["LW_WASM_OCR_PROFILE "]:
+        if (run.get("det_compiled") != 1 or run.get("det_fallback") != 0 or
+                run.get("cls_compiled", 0) < 1 or run.get("cls_fallback") != 0 or
+                run.get("rec_compiled", 0) < 1 or run.get("rec_fallback") != 0):
+            raise ValueError("instrumented WASM run used a canonical OCR graph fallback")
     ocr = snapshots["LW_WASM_OCR_PROFILE "][-1]
     det = snapshots["LW_WASM_DET_PROFILE "][-1]
     lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -54,6 +59,10 @@ def write_profile_json(log_path: Path, output_path: Path, variant: str) -> None:
                       "crop", "cls", "rec")},
         "rec_compiled_lines": int(ocr["rec_compiled"]),
         "rec_fallback_lines": int(ocr["rec_fallback"]),
+        "det_compiled_runs": int(ocr["det_compiled"]),
+        "det_fallback_runs": int(ocr["det_fallback"]),
+        "cls_compiled_runs": int(ocr["cls_compiled"]),
+        "cls_fallback_runs": int(ocr["cls_fallback"]),
         "det_physical": {f"{name}_ms": det[name] for name in
                          ("total", "pointwise", "dense", "depthwise", "convtranspose",
                           "binary", "pool", "concat", "resize", "other")},
@@ -139,6 +148,10 @@ def print_full_ocr_profile(path: Path) -> None:
         print(f"| {label} | {ocr.get(field, 0.0):.3f} |")
     print(f"REC compiled/fallback lines: {int(ocr.get('rec_compiled', 0))}/"
           f"{int(ocr.get('rec_fallback', 0))}.")
+    print(f"DET compiled/fallback runs: {int(ocr.get('det_compiled', 0))}/"
+          f"{int(ocr.get('det_fallback', 0))}; CLS: "
+          f"{int(ocr.get('cls_compiled', 0))}/"
+          f"{int(ocr.get('cls_fallback', 0))}.")
     print()
     print("| DET physical op | Measured ms |")
     print("| --- | ---: |")

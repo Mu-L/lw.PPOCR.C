@@ -693,12 +693,11 @@ static int recognizer_has_full_compiled_coverage(const lw_recognizer* recognizer
 #endif
 
 static void recognizer_report_compiled_memory(const lw_recognizer* recognizer) {
-    const char* enabled = getenv("LW_REC_MEMORY_PROFILE");
     uint32_t index;
     uint64_t arena_bytes = 0u;
     uint64_t scratch_bytes = 0u;
     uint64_t ctc_rows = 0u;
-    if (enabled == NULL || enabled[0] != '1' || enabled[1] != '\0') return;
+    if (!lw_profile_env_is_one("LW_REC_MEMORY_PROFILE")) return;
     for (index = 0u; index < LW_REC_RESIDENT_WIDTH_COUNT; ++index) {
         const lw_x64_rec_backend_slot* slot = &recognizer->x64_slots[index];
         if (slot->program == NULL) continue;

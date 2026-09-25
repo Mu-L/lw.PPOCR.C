@@ -2,6 +2,7 @@
 #include "lwm_read.h"
 #include "operator_internal.h"
 #include "parallel_internal.h"
+#include "../ppocr/profile_internal.h"
 #include "rec_backend_kernels_internal.h"
 #include "../simd/simd_kernels.h"
 
@@ -1576,7 +1577,7 @@ lw_status lw_x64_det_instance_run_profiled_ex(lw_x64_det_instance* instance, flo
     instance->profile.total_ns = total_ns;
 #if defined(__EMSCRIPTEN__) && defined(LW_WASM_COMPILED_DET)
     if (profile != NULL && profile->clock != NULL &&
-        getenv("LW_WASM_OCR_PROFILE") != NULL) {
+        lw_profile_env_present("LW_WASM_OCR_PROFILE")) {
         const lw_x64_det_profile* det_profile = &instance->profile;
         const double to_ms = 1.0 / 1000000.0;
         (void)fprintf(stderr,

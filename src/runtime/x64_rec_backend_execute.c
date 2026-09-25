@@ -2,6 +2,7 @@
 #include "ctc_projection_internal.h"
 #include "rec_backend_kernels_internal.h"
 #include "operator_internal.h"
+#include "../ppocr/profile_internal.h"
 #include "../simd/simd_kernels.h"
 
 #include <stdint.h>
@@ -1203,7 +1204,7 @@ static uint64_t rec_profile_now_ns(void) {
 
 static int rec_profile_enabled(void) {
     static int cached = -1;
-    if (cached < 0) cached = getenv("LW_X64_REC_PROFILE") != NULL ? 1 : 0;
+    if (cached < 0) cached = lw_profile_env_present("LW_X64_REC_PROFILE") ? 1 : 0;
     return cached;
 }
 

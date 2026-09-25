@@ -208,7 +208,7 @@ jobs:
           cat build-wasm/rec-benchmark-compiled-scalar.log
           grep -q 'LW_WASM_OCR_PROFILE total=' build-wasm/rec-profile-compiled.log
           grep -q 'LW_WASM_DET_PROFILE total=' build-wasm/rec-profile-compiled.log
-          grep -Eq 'LW_WASM_OCR_PROFILE .*rec_compiled=[1-9][0-9]* rec_fallback=0' \
+          grep -Eq 'LW_WASM_OCR_PROFILE .*det_compiled=1 det_fallback=0 cls_compiled=[1-9][0-9]* cls_fallback=0 rec_compiled=[1-9][0-9]* rec_fallback=0' \
             build-wasm/rec-profile-compiled.log
           set +e
           python tools/compare_wasm_rec_benchmark.py \
@@ -304,7 +304,7 @@ jobs:
               "build-wasm/wasm-${variant}-simd128.log"
             grep -Eq 'LW_WASM_COMPILED_DET input=512x512 layout=nhwc ops=[1-9][0-9]* unsupported=0 conversions=[0-9]+ direct_input=1' \
               "build-wasm/wasm-${variant}-simd128.log"
-            grep -Eq 'LW_WASM_OCR_PROFILE .*rec_compiled=[1-9][0-9]* rec_fallback=0' \
+            grep -Eq 'LW_WASM_OCR_PROFILE .*det_compiled=1 det_fallback=0 cls_compiled=[1-9][0-9]* cls_fallback=0 rec_compiled=[1-9][0-9]* rec_fallback=0' \
               "build-wasm/wasm-${variant}-profile.log"
             grep -q 'LW_WASM_DET_PROFILE total=' "build-wasm/wasm-${variant}-profile.log"
           done

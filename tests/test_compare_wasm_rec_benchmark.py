@@ -110,6 +110,7 @@ class WasmBenchmarkReportTest(unittest.TestCase):
         profile = "\n".join([
             "LW_WASM_OCR_PROFILE total=100.000 det_preprocess=5.000 det_graph=30.000 "
             "det_postprocess=4.000 crop=3.000 cls=8.000 rec=50.000 "
+            "det_compiled=1 det_fallback=0 cls_compiled=2 cls_fallback=0 "
             "rec_compiled=2 rec_fallback=0",
             "LW_WASM_DET_PROFILE total=30.000 pointwise=10.000 dense=8.000 "
             "depthwise=6.000 convtranspose=3.000 binary=1.000 pool=1.000 "
@@ -128,6 +129,7 @@ class WasmBenchmarkReportTest(unittest.TestCase):
         self.assertIn("| DET graph | 30.000 |", result.stdout)
         self.assertIn("| ConvTranspose | 3.000 |", result.stdout)
         self.assertIn("REC compiled/fallback lines: 2/0", result.stdout)
+        self.assertIn("DET compiled/fallback runs: 1/0; CLS: 2/0", result.stdout)
         self.assertIn("Text contract: PASS", result.stdout)
 
     def test_profile_json_keeps_measured_components(self) -> None:
@@ -142,6 +144,7 @@ class WasmBenchmarkReportTest(unittest.TestCase):
             log.write_text(
                 "LW_WASM_OCR_PROFILE total=100.000 det_preprocess=5.000 det_graph=30.000 "
                 "det_postprocess=4.000 crop=3.000 cls=8.000 rec=50.000 "
+                "det_compiled=1 det_fallback=0 cls_compiled=2 cls_fallback=0 "
                 "rec_compiled=2 rec_fallback=0\n"
                 "LW_WASM_DET_PROFILE total=30.000 pointwise=10.000 dense=8.000 "
                 "depthwise=6.000 convtranspose=3.000 binary=1.000 pool=1.000 "
@@ -164,10 +167,16 @@ class WasmBenchmarkReportTest(unittest.TestCase):
             self.assertEqual(value["det_physical"]["pointwise_ms"], 10.0)
             self.assertEqual(value["rec_compiled_lines"], 2)
             self.assertEqual(value["rec_fallback_lines"], 0)
+            self.assertEqual(value["det_compiled_runs"], 1)
+            self.assertEqual(value["cls_fallback_runs"], 0)
             self.assertEqual(len(value["rec_invocations"]), 1)
             self.assertEqual(value["compiled_memory"]["det_arena_bytes"], 8192)
             self.assertEqual(value["compiled_memory"]["cls_packed_bytes"], 512)
             self.assertEqual(value["compiled_memory"]["rec_unique_owned_constant_bytes"], 2048)
+            log.write_text(log.read_text(encoding="utf-8").replace("cls_fallback=0",
+                         "cls_fallback=1"), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "canonical OCR graph fallback"):
+                module.write_profile_json(log, report, "small")
 
 
 if __name__ == "__main__":

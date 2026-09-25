@@ -336,6 +336,11 @@ int main(int argc, char** argv) {
             goto cleanup;
         }
     }
+    if (profile.detector.compiled_backend_runs +
+            profile.detector.canonical_fallback_runs != iterations) {
+        fprintf(stderr, "DET profile did not account for every graph execution\n");
+        goto cleanup;
+    }
 
     for (index = 1u; index < LW_EXECUTION_PROFILE_OPERATOR_CAPACITY; ++index) {
         graph_work_nanoseconds =

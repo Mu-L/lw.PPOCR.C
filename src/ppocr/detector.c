@@ -579,6 +579,8 @@ static lw_status detector_detect_bgr_u8_impl(
                 detector->probability_element_count, detector->session->thread_pool,
                 detector->intra_op_thread_count,
                 profile == NULL ? NULL : &profile->execution, error);
+            if (status == LW_STATUS_OK && profile != NULL)
+                lw_profile_add_value(&profile->compiled_backend_runs, 1u);
         }
     } else
 #endif
@@ -592,6 +594,8 @@ static lw_status detector_detect_bgr_u8_impl(
                            detector->session, detector->input, detector->input_element_count,
                            detector->probabilities, detector->probability_element_count,
                            &profile->execution, error);
+        if (status == LW_STATUS_OK && profile != NULL)
+            lw_profile_add_value(&profile->canonical_fallback_runs, 1u);
     }
     lw_pipeline_profile_add_elapsed(profile == NULL ? NULL : &profile->graph_nanoseconds, started,
                                     profile);

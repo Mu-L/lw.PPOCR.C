@@ -1,6 +1,54 @@
 #include "profile_internal.h"
 
+#include <stdlib.h>
 #include <string.h>
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
+
+/* The C environment is virtual in Emscripten and does not inherit Node's
+ * process.env. Browser builds have no process, so profiling stays disabled. */
+EM_JS(int, lw_node_profile_env_present, (const char* name), {
+    return typeof process !== 'undefined' && process.env &&
+           process.env[UTF8ToString(name)] !== undefined ? 1 : 0;
+});
+EM_JS(int, lw_node_profile_env_is_one, (const char* name), {
+    return typeof process !== 'undefined' && process.env &&
+           process.env[UTF8ToString(name)] === '1' ? 1 : 0;
+});
+#endif
+
+int lw_profile_env_present(const char* name) {
+#if defined(__EMSCRIPTEN__)
+    return name != NULL && lw_node_profile_env_present(name);
+#elif defined(_MSC_VER)
+    char* value = NULL;
+    size_t length = 0u;
+    int present;
+    if (name == NULL || _dupenv_s(&value, &length, name) != 0) return 0;
+    present = value != NULL;
+    free(value);
+    return present;
+#else
+    return name != NULL && getenv(name) != NULL;
+#endif
+}
+
+int lw_profile_env_is_one(const char* name) {
+#if defined(__EMSCRIPTEN__)
+    return name != NULL && lw_node_profile_env_is_one(name);
+#elif defined(_MSC_VER)
+    char* value = NULL;
+    size_t length = 0u;
+    int enabled;
+    if (name == NULL || _dupenv_s(&value, &length, name) != 0) return 0;
+    enabled = value != NULL && value[0] == '1' && value[1] == '\0';
+    free(value);
+    return enabled;
+#else
+    const char* value = name == NULL ? NULL : getenv(name);
+    return value != NULL && value[0] == '1' && value[1] == '\0';
+#endif
+}
 
 static void add_saturated(uint64_t* destination, uint64_t value) {
     if (*destination > UINT64_MAX - value) {
@@ -67,6 +115,8 @@ void lw_pipeline_component_profile_accumulate(lw_pipeline_component_profile* des
     add_saturated(&destination->session_reconfigurations, source->session_reconfigurations);
     add_saturated(&destination->compiled_backend_lines, source->compiled_backend_lines);
     add_saturated(&destination->canonical_fallback_lines, source->canonical_fallback_lines);
+    add_saturated(&destination->compiled_backend_runs, source->compiled_backend_runs);
+    add_saturated(&destination->canonical_fallback_runs, source->canonical_fallback_runs);
     for (index = 0u; index < LW_REC_WIDTH_HISTOGRAM_BUCKET_COUNT; ++index) {
         uint32_t node;
         for (node = 0u; node < LW_EXECUTION_PROFILE_NODE_CAPACITY; ++node) {

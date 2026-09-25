@@ -23,6 +23,8 @@ typedef struct lw_pipeline_component_profile {
     uint64_t session_reconfigurations;
     uint64_t compiled_backend_lines;
     uint64_t canonical_fallback_lines;
+    uint64_t compiled_backend_runs;
+    uint64_t canonical_fallback_runs;
     uint64_t node_nanoseconds_by_width[LW_REC_WIDTH_HISTOGRAM_BUCKET_COUNT]
                                     [LW_EXECUTION_PROFILE_NODE_CAPACITY];
     uint64_t node_invocations_by_width[LW_REC_WIDTH_HISTOGRAM_BUCKET_COUNT]
@@ -64,6 +66,8 @@ uint64_t lw_ocr_profile_now(const lw_ocr_execution_profile* profile);
 void lw_ocr_profile_add_elapsed(uint64_t* destination, uint64_t started,
                                 const lw_ocr_execution_profile* profile);
 void lw_profile_add_value(uint64_t* destination, uint64_t value);
+int lw_profile_env_present(const char* name);
+int lw_profile_env_is_one(const char* name);
 uint32_t lw_rec_width_histogram_bucket(uint32_t resized_width);
 void lw_pipeline_profile_capture_node_width_delta(
     lw_pipeline_component_profile* profile, uint32_t width_bucket,

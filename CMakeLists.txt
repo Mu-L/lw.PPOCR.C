@@ -878,7 +878,6 @@ if(EMSCRIPTEN)
             "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/ppocr")
         target_compile_definitions(lw_ppocr_node PRIVATE LW_NODE_WASM_PROFILE=1)
-        target_link_options(lw_ppocr_node PRIVATE "-sNODE_HOST_ENV=1")
     endif()
     target_link_options(lw_ppocr_node PRIVATE
         -O3

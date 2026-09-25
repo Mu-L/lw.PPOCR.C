@@ -351,6 +351,8 @@ static lw_status classifier_classify_bgr_u8_impl(lw_classifier* classifier, cons
 #endif
         status = lw_x64_rec_instance_run(classifier->x64_instance, error);
         if (status == LW_STATUS_OK) {
+            if (profile != NULL)
+                lw_profile_add_value(&profile->compiled_backend_runs, 1u);
             const lw_x64_rec_program* program = classifier->x64_program;
             const float* probabilities =
                 (const float*)(const void*)(classifier->x64_instance->arena +
@@ -383,6 +385,8 @@ static lw_status classifier_classify_bgr_u8_impl(lw_classifier* classifier, cons
                            classifier->session, classifier->input, classifier->input_element_count,
                            classifier->probabilities, LW_CLS_CLASS_COUNT, &profile->execution,
                            error);
+        if (status == LW_STATUS_OK && profile != NULL)
+            lw_profile_add_value(&profile->canonical_fallback_runs, 1u);
     }
     lw_pipeline_profile_add_elapsed(profile == NULL ? NULL : &profile->graph_nanoseconds, started,
                                     profile);
