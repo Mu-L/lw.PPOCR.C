@@ -60,12 +60,80 @@ The four-worker configuration reduced complete OCR latency by 58.51% and ran
 2.41x as fast as one worker on this host. This is a local engineering result,
 not a portable latency guarantee.
 
+## Local three-model full OCR snapshot (2026-09-25)
+
+This is the local source-build snapshot used in both READMEs, not a comparison
+against a different CPU. Revision: `ce8497cbb51ec0e5307760f684f52138f015c890`.
+The same bundled 500×500/16-line PPM was used for Tiny, Small, and Medium;
+SHA-256: `a694ab9def7845b53470aab9f3b819d6469a7b652f820fa30799d918cede4743`.
+Small and Medium use the shared Tiny CLS model and
+`PP-OCRv6_small_rec_dict.txt`. Models were prepared with
+`tools/prepare_ppocrv6_runtime_variant.py` from the repository's ONNX sources
+and Tiny build assets. The generated LWM files stay under ignored `build/`.
+
+Local configuration:
+
+| Item | Value |
+|---|---|
+| CPU | AMD Ryzen 7 7735H, 8 physical cores / 16 logical CPUs |
+| Memory | 15.24 GiB installed |
+| OS | Windows 10 Enterprise x64, 10.0.19045 |
+| Build | Visual Studio 2022 x64, Release; MSVC 19.40.33813.0; CMake 3.31.0-rc2 |
+| CMake options | `BUILD_TESTING=ON`, `LW_BUILD_HTTP_DEMO=OFF`, `LW_BUILD_CSHARP_DEMOS=OFF`, `LW_REC_RESIDENT_WIDTHS=OFF`; other runtime options at their defaults |
+| Runtime | AVX2 backend, maximum REC width 960, 1 or 4 line workers; DET intra-op budget left at its CPU-topology default |
+| Measurement | 2 warm-ups + 5 measured OCR calls per fresh process, 3 processes per case; median of process means and process peak working sets |
+
+| Model | 1 worker mean | 4 worker mean | 1 worker peak WS | 4 worker peak WS | Text checksum |
+|---|---:|---:|---:|---:|---|
+| Tiny | 111.32 ms | 54.86 ms | 100.7 MiB | 118.3 MiB | `46d99468540b5eb7` |
+| Small | 373.19 ms | 215.39 ms | 274.9 MiB | 312.0 MiB | `2ee4a78f9306c18b` |
+| Medium | 1,275.58 ms | 1,013.85 ms | 1,078.5 MiB | 1,100.3 MiB | `12aff0763cbd432b` |
+
+All runs returned 16 lines; each model's checksum was unchanged across workers
+and fresh processes. Medium 1-worker process means ranged from 1,274.37 to
+1,779.79 ms in the three reporting runs. Two extra checks (1,406.46 and
+1,265.75 ms) preserved its text checksum and the five-run median remained
+1,275.58 ms. Treat the latency as a local snapshot, not a stable cross-host
+claim. Peak WS includes initialization and the benchmark's standalone detector
+handle; it is not just the steady-state OCR handle's memory.
+
+To reproduce with a fresh local build (converted models remain in the ignored
+`build/` tree; the benchmark prints one JSON object per run):
+
+```powershell
+python -m pip install -r requirements-converter.txt
+cmake -S . -B build/local-performance-build -G "Visual Studio 17 2022" -A x64 `
+  -DBUILD_TESTING=ON -DLW_BUILD_HTTP_DEMO=OFF `
+  -DLW_BUILD_CSHARP_DEMOS=OFF -DLW_REC_RESIDENT_WIDTHS=OFF
+cmake --build build/local-performance-build --config Release --parallel 4 --target lw-ocr-benchmark
+foreach ($model in @('tiny', 'small', 'medium')) {
+  python tools/prepare_ppocrv6_runtime_variant.py --variant $model `
+    --build-dir build/local-performance-build `
+    --output-dir "build/local-performance/assets/$model"
+}
+$driver = 'build/local-performance-build/Release/lw-ocr-benchmark.exe'
+$sample = 'build/local-performance-build/models/sample.ppm'
+foreach ($model in @('tiny', 'small', 'medium')) {
+  $assets = "build/local-performance/assets/$model"
+  foreach ($workers in @(1, 4)) {
+    1..3 | ForEach-Object {
+      & $driver "$assets/det.lwm" "$assets/cls.lwm" "$assets/rec.lwm" `
+        "$assets/ppocr_keys.txt" $sample 2 5 $workers 960
+    }
+  }
+}
+```
+
+The benchmark emits one JSON object per run with `ocr_ms.mean`,
+`peak_rss_bytes`, `lines`, `backend`, and `output_checksum`. Compare revisions
+on the same host and input rather than comparing these absolute values with CI.
+
 ## Historical local PP-OCRv6 Tiny/Small/Medium 960 baseline
 
 This earlier local measurement predates the current x64 backend. For a newer
-three-model 960-width snapshot, see the
-[README performance snapshot](../README.md#performance-snapshot) and its linked
-paired CI run. All three historical profiles used the project test image
+three-model 960-width snapshot, see the local measurement above and the
+[README performance snapshot](../README.md#performance-snapshot). All three
+historical profiles used the project test image
 `build/models/sample.ppm`, `REC width=960`, one warm-up, and three measured
 iterations through the same `lw-ocr-benchmark` executable on Windows x64 AVX2.
 Small and Medium reused the shared Tiny CLS asset and the shared

@@ -109,20 +109,22 @@ DET/CLS/REC 分阶段、算子、REC 宽度和 RSS，作为定向 x64 优化前�
 
 ## 性能快照与口径
 
-2026-09-25 的[三模型 x64 CI 对照](https://github.com/lxw112190/lw.PPOCR.C/actions/runs/36099882256)
-在项目自带的 500×500 样例图上，使用最大 `REC target_width = 960` 测量完整原生 OCR。
-候选提交为 `d6e180c`；Windows Server 2022 runner 使用 AMD EPYC 7763 的 4 个逻辑 CPU。
-每组预热 2 次、测量 5 次，独立进程配对重复 3 轮。下表为候选版本各进程 OCR 平均耗时
-与进程峰值工作集的中位数：
+本机 Windows x64 Release 构建（`ce8497c`）在项目自带的 500×500 测试图上，
+以最大 `REC target_width = 960`（自适应宽度上限）测量完整原生 OCR。
+测试机器为 AMD Ryzen 7 7735H（8 核/16 线程）、Windows 10、15.24 GiB 内存，
+实际后端为 AVX2。每组预热 2 次、测量 5 次，独立进程重复 3 轮；下表取各进程
+OCR 平均耗时和进程峰值工作集的中位数：
 
 | 模型 | 1 worker | 4 workers | 1 worker 峰值工作集 | 4 workers 峰值工作集 |
 |---|---:|---:|---:|---:|
-| Tiny | 207.76 ms | 144.72 ms | 99.8 MiB | 117.2 MiB |
-| Small | 770.33 ms | 597.77 ms | 275.1 MiB | 311.0 MiB |
-| Medium | 3,021.26 ms | 2,704.40 ms | 1,077.8 MiB | 1,095.6 MiB |
+| Tiny | 111.32 ms | 54.86 ms | 100.7 MiB | 118.3 MiB |
+| Small | 373.19 ms | 215.39 ms | 274.9 MiB | 312.0 MiB |
+| Medium | 1,275.58 ms | 1,013.85 ms | 1,078.5 MiB | 1,100.3 MiB |
 
-峰值工作集包含模型初始化和 benchmark 额外创建的 DET handle；这是 CI runner 上的参考值，
-不是跨机器的耗时或内存保证。不同提交只应在同一次配对 CI 中比较。
+峰值工作集包含模型初始化和 benchmark 额外创建的 DET handle。各组均返回 16 行，
+同一模型的文本校验值在 1/4 worker 间一致。这是本机快照，不是跨机器的耗时或内存保证。
+[本机配置、复现步骤及 Medium 波动说明](docs/performance-baseline.md#local-three-model-full-ocr-snapshot-2026-09-25)
+见性能文档；版本间比较另见[同机配对 x64 CI 对照](https://github.com/lxw112190/lw.PPOCR.C/actions/runs/36099882256)。
 
 为保证新闻正文等长文字行的识别精度，C 完整 OCR Demo、离线 HTML、Java/JNI 和 C# Demo
 使用 `REC target_width = 960` 作为最大宽度。完整 OCR 会按文字行宽高比自动选择
