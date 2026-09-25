@@ -354,6 +354,7 @@ if(LW_WASM_COMPILED_REC_ENABLED)
     list(APPEND LW_PPOCR_C_SOURCES
         src/simd/wasm128_nhwc_pointwise.c
         src/simd/wasm128_elementwise.c
+        src/simd/wasm128_bitmap.c
         src/simd/wasm128_matmul.c
         src/simd/wasm128_nhwc_convtranspose.c
         src/simd/wasm128_packed_matmul.c)
@@ -873,6 +874,10 @@ if(EMSCRIPTEN)
     if(LW_WASM_COMPILED_REC_ENABLED)
         # Only the experimental Node package accepts the C profiler switch.
         # The browser SDK and canonical Node package keep their normal env policy.
+        target_include_directories(lw_ppocr_node PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/ppocr")
+        target_compile_definitions(lw_ppocr_node PRIVATE LW_NODE_WASM_PROFILE=1)
         target_link_options(lw_ppocr_node PRIVATE "-sNODE_HOST_ENV=1")
     endif()
     target_link_options(lw_ppocr_node PRIVATE

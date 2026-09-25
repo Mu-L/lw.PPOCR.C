@@ -206,10 +206,19 @@ static void detector_try_backend(lw_detector* detector, uint32_t width, uint32_t
     detector->x64_instance = instance;
 #if defined(LW_WASM_COMPILED_DET)
     if (program != NULL && instance != NULL) {
+        uint64_t packed_bytes = 0u;
+        uint32_t constant_index;
+        for (constant_index = 0u; constant_index < program->packed_constant_count;
+             ++constant_index) {
+            packed_bytes += program->constants[constant_index].bytes;
+        }
         (void)fprintf(stderr,
-            "LW_WASM_COMPILED_DET input=%ux%u layout=nhwc ops=%u unsupported=%u conversions=%u direct_input=%u\n",
+            "LW_WASM_COMPILED_DET input=%ux%u layout=nhwc ops=%u unsupported=%u "
+            "conversions=%u direct_input=%u arena_bytes=%llu packed_bytes=%llu\n",
             width, height, program->op_count, program->unsupported_nodes,
-            program->layout_conversions, program->direct_nhwc);
+            program->layout_conversions, program->direct_nhwc,
+            (unsigned long long)program->arena_bytes,
+            (unsigned long long)packed_bytes);
     }
 #endif
 }

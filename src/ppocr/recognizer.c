@@ -705,11 +705,14 @@ static void recognizer_report_compiled_memory(const lw_recognizer* recognizer) {
         if (slot->program->arena_bytes > arena_bytes) arena_bytes = slot->program->arena_bytes;
         if (slot->program->scratch_bytes > scratch_bytes) scratch_bytes = slot->program->scratch_bytes;
         if (slot->program->ctc.rows > ctc_rows) ctc_rows = slot->program->ctc.rows;
-        fprintf(stderr, "REC_MEMORY width=%u owned=%llu borrowed=%llu borrowed_count=%u\n",
+        fprintf(stderr, "REC_MEMORY width=%u owned=%llu borrowed=%llu borrowed_count=%u "
+                "arena=%llu scratch=%llu\n",
                 slot->target_width,
                 (unsigned long long)slot->program->owned_constant_bytes,
                 (unsigned long long)slot->program->borrowed_constant_bytes,
-                slot->program->borrowed_constant_count);
+                slot->program->borrowed_constant_count,
+                (unsigned long long)slot->program->arena_bytes,
+                (unsigned long long)slot->program->scratch_bytes);
     }
     fprintf(stderr, "REC_MEMORY shared_arena=%llu shared_scratch=%llu ctc_workspace=%llu medium_fast_shared=%u\n",
             (unsigned long long)(recognizer->x64_shared_arena == NULL ? 0u : arena_bytes),

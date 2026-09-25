@@ -19,6 +19,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(LW_NODE_WASM_PROFILE)
+#  include "../src/ppocr/profile_internal.h"
+#  include <stdio.h>
+#endif
 
 #ifndef LW_WEB_ABI_VERSION
 #  define LW_WEB_ABI_VERSION 1u
@@ -29,6 +33,37 @@
  * detail instead of shrinking those lines to 320. Short lines are still
  * aspect-ratio-preserved and padded on the right by the shared preprocessor. */
 #define LW_WEB_REC_TARGET_WIDTH 960u
+
+#if defined(LW_NODE_WASM_PROFILE)
+static uint64_t web_profile_now(void* context) {
+    double milliseconds;
+    (void)context;
+    milliseconds = emscripten_get_now();
+    return milliseconds > 0.0 ? (uint64_t)(milliseconds * 1000000.0) : 0u;
+}
+
+static void web_print_ocr_profile(const lw_ocr_execution_profile* profile) {
+    const double to_ms = 1.0 / 1000000.0;
+    const lw_pipeline_component_profile* det = &profile->detector;
+    const lw_pipeline_component_profile* cls = &profile->classifier;
+    const lw_pipeline_component_profile* rec = &profile->recognizer;
+    (void)fprintf(stderr,
+        "LW_WASM_OCR_PROFILE total=%.3f det_preprocess=%.3f det_graph=%.3f "
+        "det_postprocess=%.3f crop=%.3f cls=%.3f rec=%.3f "
+        "rec_compiled=%llu rec_fallback=%llu\n",
+        profile->total_nanoseconds * to_ms,
+        det->preprocess_nanoseconds * to_ms,
+        det->graph_nanoseconds * to_ms,
+        det->postprocess_nanoseconds * to_ms,
+        profile->crop_nanoseconds * to_ms,
+        (cls->preprocess_nanoseconds + cls->graph_nanoseconds +
+         cls->postprocess_nanoseconds) * to_ms,
+        (rec->preprocess_nanoseconds + rec->graph_nanoseconds +
+         rec->postprocess_nanoseconds) * to_ms,
+        (unsigned long long)rec->compiled_backend_lines,
+        (unsigned long long)rec->canonical_fallback_lines);
+}
+#endif
 
 typedef struct lw_web_info {
     uint32_t abi_version;
@@ -237,6 +272,9 @@ LW_WEB_API int lw_web_run(const uint8_t* source, uint32_t source_byte_count,
     lw_ocr_result native_result;
     lw_status status;
     uint32_t index;
+#if defined(LW_NODE_WASM_PROFILE)
+    lw_ocr_execution_profile* profile = NULL;
+#endif
 
     if (g_ocr == NULL || g_native_lines == NULL || lines == NULL || text == NULL ||
         result == NULL || line_capacity == 0u ||
@@ -247,6 +285,20 @@ LW_WEB_API int lw_web_run(const uint8_t* source, uint32_t source_byte_count,
     memset(result, 0, sizeof(*result));
     lw_error_init(&g_error);
     lw_ocr_result_init(&native_result);
+#if defined(LW_NODE_WASM_PROFILE)
+    if (getenv("LW_WASM_OCR_PROFILE") != NULL) {
+        profile = (lw_ocr_execution_profile*)malloc(sizeof(*profile));
+        if (profile == NULL)
+            return web_fail(LW_STATUS_OUT_OF_MEMORY, "unable to allocate OCR profile");
+        lw_ocr_execution_profile_init(profile, web_profile_now, NULL);
+        status = lw_ocr_run_bgr_u8_profiled(
+            g_ocr, source, source_byte_count, source_width, source_height,
+            source_stride, g_native_lines, line_capacity, text, text_capacity,
+            &native_result, profile, &g_error);
+        if (status == LW_STATUS_OK) web_print_ocr_profile(profile);
+        free(profile);
+    } else
+#endif
     status = lw_ocr_run_bgr_u8(g_ocr, source, source_byte_count, source_width, source_height,
                                source_stride, g_native_lines, line_capacity, text, text_capacity,
                                &native_result, &g_error);

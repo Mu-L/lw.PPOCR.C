@@ -1574,6 +1574,31 @@ lw_status lw_x64_det_instance_run_profiled_ex(lw_x64_det_instance* instance, flo
         }
     }
     instance->profile.total_ns = total_ns;
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_COMPILED_DET)
+    if (profile != NULL && profile->clock != NULL &&
+        getenv("LW_WASM_OCR_PROFILE") != NULL) {
+        const lw_x64_det_profile* det_profile = &instance->profile;
+        const double to_ms = 1.0 / 1000000.0;
+        (void)fprintf(stderr,
+            "LW_WASM_DET_PROFILE total=%.3f pointwise=%.3f dense=%.3f "
+            "depthwise=%.3f convtranspose=%.3f binary=%.3f pool=%.3f "
+            "concat=%.3f resize=%.3f other=%.3f\n",
+            det_profile->total_ns * to_ms,
+            det_profile->pointwise_ns * to_ms,
+            det_profile->dense_ns * to_ms,
+            det_profile->depthwise_ns * to_ms,
+            det_profile->conv_transpose_ns * to_ms,
+            det_profile->binary_ns * to_ms,
+            det_profile->pool_ns * to_ms,
+            det_profile->concat_ns * to_ms,
+            det_profile->resize_ns * to_ms,
+            (det_profile->total_ns - det_profile->pointwise_ns -
+             det_profile->dense_ns - det_profile->depthwise_ns -
+             det_profile->conv_transpose_ns - det_profile->binary_ns -
+             det_profile->pool_ns - det_profile->concat_ns -
+             det_profile->resize_ns) * to_ms);
+    }
+#endif
     if (output_value->layout == LW_X64_DET_LAYOUT_NCHW || output_value->alt_producer < 0) {
         memcpy(output, offset_ptr(instance, output_value->offset),
                (size_t)(output_value->bytes));

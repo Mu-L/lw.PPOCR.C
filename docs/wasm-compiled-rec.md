@@ -54,17 +54,36 @@ After the uninstrumented A/B, CI also runs compiled SIMD128 in a separate
 profile process and summarizes accumulated REC stage times (pointwise, dense,
 depthwise, CTC, etc.). Those instrumented timings identify hotspots but must
 not be compared to the full-OCR A/B latency. Only the experimental Node package
-accepts `LW_X64_REC_PROFILE` from its host environment; browser and canonical
-Node packages do not change their environment policy.
+accepts `LW_X64_REC_PROFILE`, `LW_WASM_OCR_PROFILE`, and
+`LW_REC_MEMORY_PROFILE` from its host environment; browser and canonical Node
+packages do not change their environment policy.
 The CI log must also confirm `widths=5/5`, `ctc=simd128`, and a compiled NHWC
 DET marker for the sample's 512x512 resized input. This prevents a successful
 32x32 initialization compile from hiding a fallback on the measured image.
 The compiled-scalar control keeps existing SIMD128 Pointwise/CTC (and DET
 ConvTranspose) kernels; it only disables the optional SIMD128 Dense,
 Depthwise, and common-op dispatch. It is not a wholly scalar runtime.
+REC preprocessing already writes into its active compiled backend input; DET
+and CLS fixed-point preprocessing now also write directly into NHWC backend
+input when those compiled programs are active. The optional SIMD128 DB bitmap
+path preserves the strict `probability > threshold` rule and rejects NaN/Inf.
+
+Push/PR CI also stages the Small and Medium runtime model packs and runs the
+same Node/WASM canonical, compiled portable, and compiled SIMD128 full-OCR
+comparison for each. Tiny uses five measured runs, Small three, and Medium
+two, each following one warm-up. The report gates exact text against the
+variant's checked-in checksum and line count, equal DET box counts, compiled backend markers,
+zero REC line fallbacks, and SIMD128 WASM heap no more than 5 MiB above
+canonical. Latency and process RSS remain informational on hosted runners.
+The separate instrumented run prints DET/CLS/REC component times and DET/REC
+physical-op breakdowns; those times are not mixed into the uninstrumented A/B.
+The `*-profile-summary.json` artifacts retain those component times alongside
+actual compiled DET/CLS arena and packed-constant bytes, plus each resident REC
+width's owned/borrowed constants and arena/scratch capacity. Borrowed REC
+constants are references to shared storage, not additional allocations.
 
 This does **not** yet establish a performance win or complete coverage across
-Tiny, Small, and Medium. Keep `LW_WASM_COMPILED_REC` off for releases until CI
-confirms exact text, backend coverage, and end-to-end latency/memory improvement
-on all intended model packs. The local native tests do not substitute for an
-Emscripten build and the remote WASM comparison.
+Tiny, Small, and Medium until that CI runs successfully. Keep
+`LW_WASM_COMPILED_REC` off for releases until CI confirms exact text, backend
+coverage, and end-to-end latency/memory improvement on all intended model
+packs. The local native tests do not substitute for an Emscripten build.

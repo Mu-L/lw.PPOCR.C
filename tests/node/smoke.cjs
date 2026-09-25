@@ -84,12 +84,12 @@ function verifyPackage(root) {
   return manifest;
 }
 
-async function createRuntime(root, useCls) {
+async function createRuntime(root, useCls, modelRoot = root) {
   const factory = require(path.join(root, "runtime.cjs"));
   const runtime = await factory({});
   runtime.FS.mkdir("/models");
   for (const name of ["det.lwm", "cls.lwm", "rec.lwm", "ppocr_keys.txt"]) {
-    runtime.FS.writeFile(`/models/${name}`, fs.readFileSync(path.join(root, name)));
+    runtime.FS.writeFile(`/models/${name}`, fs.readFileSync(path.join(modelRoot, name)));
   }
   const status = runtime._lw_web_init(useCls ? 1 : 0);
   if (status !== 0) fail(`lw_web_init failed: ${status}`);
@@ -123,9 +123,11 @@ function runOcr(engine, image) {
     );
     if (status !== 0) fail(`lw_web_run failed: ${status}`);
     const lineCount = runtime.HEAPU32[result >> 2] >>> 0;
+    const detectedCount = runtime.HEAPU32[(result + 4) >> 2] >>> 0;
     if (lineCount === 0 || lineCount > info.maxLines) fail("invalid OCR line count");
     const decoder = new TextDecoder();
     const output = [];
+    output.detectedCount = detectedCount;
     for (let index = 0; index < lineCount; index++) {
       const pointer = lines + index * info.lineSize;
       const offset = runtime.HEAPU32[(pointer + 52) >> 2] >>> 0;

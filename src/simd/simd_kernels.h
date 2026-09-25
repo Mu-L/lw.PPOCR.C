@@ -47,6 +47,8 @@ void lw_wasm128_binary_channel_nhwc_f32(lw_scalar_binary_op operation,
 void lw_wasm128_affine_nhwc_f32(const float* input, const float* mul,
     const float* add, float* output, uint32_t pixels, uint32_t channels);
 void lw_wasm128_relu_f32(const float* input, float* output, uint64_t count);
+int lw_wasm128_threshold_bitmap_f32(const float* prediction, uint8_t* bitmap,
+                                    uint64_t pixel_count, float threshold);
 void lw_wasm128_reduce_mean_hw_f32(const float* input, float* output,
     uint32_t batch, uint32_t height, uint32_t width, uint32_t channels);
 void lw_wasm128_pool_nhwc_f32(const float* input, float* output,

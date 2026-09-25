@@ -209,10 +209,20 @@ lw_status lw_classifier_create(const char* model_path_utf8, const lw_classifier_
         }
 #if defined(__EMSCRIPTEN__)
         if (classifier->x64_program != NULL && classifier->x64_instance != NULL) {
+            uint64_t packed_bytes = 0u;
+            uint32_t constant_index;
+            for (constant_index = 0u;
+                 constant_index < classifier->x64_program->packed_constant_count;
+                 ++constant_index) {
+                packed_bytes += classifier->x64_program->constants[constant_index].bytes;
+            }
             (void)fprintf(stderr,
-                "LW_WASM_COMPILED_CLS layout=nhwc ops=%u unsupported=%u\n",
+                "LW_WASM_COMPILED_CLS layout=nhwc ops=%u unsupported=%u "
+                "arena_bytes=%llu packed_bytes=%llu\n",
                 classifier->x64_program->op_count,
-                classifier->x64_program->unsupported_nodes);
+                classifier->x64_program->unsupported_nodes,
+                (unsigned long long)classifier->x64_program->arena_bytes,
+                (unsigned long long)packed_bytes);
         }
 #endif
     }
