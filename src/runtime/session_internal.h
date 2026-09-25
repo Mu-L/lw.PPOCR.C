@@ -15,6 +15,7 @@
 
 #define LW_WORKSPACE_ALIGNMENT 64u
 #define LW_SESSION_PLAN_CTC_GREEDY UINT32_C(1)
+#define LW_SESSION_PLAN_METADATA_ONLY UINT32_C(2)
 
 typedef enum lw_prepared_constant_kind {
     LW_PREPARED_CONSTANT_NONE = 0,
@@ -166,6 +167,12 @@ void lw_free_execution_plan(lw_session* session);
 lw_status lw_session_create_ctc_greedy(const lw_model* model, const lw_tensor_desc* inputs,
                                         uint32_t input_count, const lw_session_options* options,
                                         lw_session** out_session, lw_error* error);
+/* Resolve shapes and the workspace plan without allocating execution buffers.
+ * A metadata-only session must never be passed to the canonical executor. */
+lw_status lw_session_create_metadata_only(const lw_model* model,
+                                          const lw_tensor_desc* inputs, uint32_t input_count,
+                                          const lw_session_options* options,
+                                          lw_session** out_session, lw_error* error);
 lw_status lw_session_create_with_prepared_source(
     const lw_model* model, const lw_tensor_desc* inputs, uint32_t input_count,
     const lw_session_options* options, uint32_t plan_flags, const lw_session* prepared_source,

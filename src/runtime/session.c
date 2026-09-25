@@ -635,7 +635,8 @@ static lw_status lw_session_create_with_plan_flags(const lw_model* model,
         lw_session_free(session);
         return status;
     }
-    if (session->workspace_bytes != 0u) {
+    if (session->workspace_bytes != 0u &&
+        (plan_flags & LW_SESSION_PLAN_METADATA_ONLY) == 0u) {
         session->workspace = (uint8_t*)workspace_allocate(session->workspace_bytes);
         if (session->workspace == NULL) {
             lw_session_free(session);
@@ -644,15 +645,17 @@ static lw_status lw_session_create_with_plan_flags(const lw_model* model,
             return LW_STATUS_OUT_OF_MEMORY;
         }
     }
-    status = prepare_or_share_constant_weights(session, prepared_source, error);
-    if (status != LW_STATUS_OK) {
-        lw_session_free(session);
-        return status;
-    }
-    status = lw_prepare_execution_nodes(session, error);
-    if (status != LW_STATUS_OK) {
-        lw_session_free(session);
-        return status;
+    if ((plan_flags & LW_SESSION_PLAN_METADATA_ONLY) == 0u) {
+        status = prepare_or_share_constant_weights(session, prepared_source, error);
+        if (status != LW_STATUS_OK) {
+            lw_session_free(session);
+            return status;
+        }
+        status = lw_prepare_execution_nodes(session, error);
+        if (status != LW_STATUS_OK) {
+            lw_session_free(session);
+            return status;
+        }
     }
     memset(&session->info, 0, sizeof(session->info));
     session->info.struct_size = (uint32_t)sizeof(session->info);
@@ -678,6 +681,15 @@ lw_status lw_session_create_ctc_greedy(const lw_model* model, const lw_tensor_de
     return lw_session_create_with_plan_flags(model, inputs, input_count, options,
                                              LW_SESSION_PLAN_CTC_GREEDY, NULL, out_session,
                                              error);
+}
+
+lw_status lw_session_create_metadata_only(const lw_model* model,
+                                          const lw_tensor_desc* inputs, uint32_t input_count,
+                                          const lw_session_options* options,
+                                          lw_session** out_session, lw_error* error) {
+    return lw_session_create_with_plan_flags(model, inputs, input_count, options,
+                                             LW_SESSION_PLAN_METADATA_ONLY, NULL,
+                                             out_session, error);
 }
 
 lw_status lw_session_create_with_prepared_source(

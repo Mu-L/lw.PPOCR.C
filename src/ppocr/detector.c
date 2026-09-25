@@ -270,6 +270,12 @@ void lw_detector_test_disable_x64_backend(lw_detector* detector) {
     detector->x64_program = NULL;
     lw_x64_det_instance_free(detector->x64_instance);
     detector->x64_instance = NULL;
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_COMPILED_DET)
+    /* The compiled WASM path keeps a metadata-only session. Recreate a full
+     * canonical session on the next detection after the test hook disables it. */
+    lw_session_free(detector->session);
+    detector->session = NULL;
+#endif
 }
 #endif
 
@@ -283,6 +289,9 @@ static lw_status ensure_session(lw_detector* detector, uint32_t width, uint32_t 
     uint64_t plane;
     uint64_t input_count;
     lw_status status;
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_COMPILED_DET)
+    uint8_t needs_input = 1u;
+#endif
     if (detector->session != NULL && detector->resized_width == width &&
         detector->resized_height == height) {
         return LW_STATUS_OK;
@@ -304,11 +313,18 @@ static lw_status ensure_session(lw_detector* detector, uint32_t width, uint32_t 
     input_desc.dimensions[1] = 3;
     input_desc.dimensions[2] = (int32_t)height;
     input_desc.dimensions[3] = (int32_t)width;
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_COMPILED_DET)
+    status = detector->x64_backend_enabled != 0u
+        ? lw_session_create_metadata_only(detector->model, &input_desc, 1u,
+                                          &detector->session_options, &new_session, error)
+        : lw_session_create(detector->model, &input_desc, 1u,
+                            &detector->session_options, &new_session, error);
+#else
     status = lw_session_create(detector->model, &input_desc, 1u, &detector->session_options,
                                &new_session, error);
+#endif
     if (status != LW_STATUS_OK)
         goto fail;
-    lw_session_set_intra_op_thread_count(new_session, detector->intra_op_thread_count);
     lw_tensor_desc_init(&output_desc);
     status = lw_session_get_output_desc(new_session, 0u, &output_desc);
     if (status != LW_STATUS_OK || output_desc.dtype != LW_DTYPE_F32 || output_desc.rank != 4u ||
@@ -320,9 +336,31 @@ static lw_status ensure_session(lw_detector* detector, uint32_t width, uint32_t 
         status = LW_STATUS_INVALID_SHAPE;
         goto fail;
     }
-    new_input = (float*)malloc((size_t)input_count * sizeof(*new_input));
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_COMPILED_DET)
+    if (detector->x64_backend_enabled != 0u) {
+        detector_try_backend(detector, width, height);
+        if (detector->x64_instance == NULL) {
+            /* Preserve the canonical fallback if this shape cannot compile. */
+            lw_session_free(new_session);
+            new_session = NULL;
+            status = lw_session_create(detector->model, &input_desc, 1u,
+                                       &detector->session_options, &new_session, error);
+            if (status != LW_STATUS_OK) goto fail;
+        } else if (detector->x64_program->direct_nhwc != 0u) {
+            needs_input = 0u;
+        }
+    }
+    if (needs_input != 0u)
+#endif
+        new_input = (float*)malloc((size_t)input_count * sizeof(*new_input));
     new_probabilities = (float*)malloc((size_t)plane * sizeof(*new_probabilities));
-    if (new_input == NULL || new_probabilities == NULL) {
+    if (
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_COMPILED_DET)
+        (needs_input != 0u && new_input == NULL) ||
+#else
+        new_input == NULL ||
+#endif
+        new_probabilities == NULL) {
         lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "unable to allocate detector tensor buffers");
         status = LW_STATUS_OUT_OF_MEMORY;
         goto fail;
@@ -331,13 +369,15 @@ static lw_status ensure_session(lw_detector* detector, uint32_t width, uint32_t 
     free(detector->input);
     lw_session_free(detector->session);
     detector->session = new_session;
+    lw_session_set_intra_op_thread_count(new_session, detector->intra_op_thread_count);
     detector->input = new_input;
     detector->probabilities = new_probabilities;
     detector->input_element_count = input_count;
     detector->probability_element_count = plane;
     detector->resized_width = width;
     detector->resized_height = height;
-#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH) && \
+    !(defined(__EMSCRIPTEN__) && defined(LW_WASM_COMPILED_DET))
     detector_try_backend(detector, width, height);
 #endif
     return LW_STATUS_OK;

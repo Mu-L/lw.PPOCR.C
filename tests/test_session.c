@@ -16,6 +16,52 @@ static void make_rec_input(lw_tensor_desc* input, int32_t batch, int32_t width) 
     input->dimensions[3] = width;
 }
 
+static int check_metadata_only_session(const lw_model* model) {
+    lw_tensor_desc input;
+    lw_session* full = NULL;
+    lw_session* metadata = NULL;
+    lw_error error;
+    uint32_t index;
+    int ok = 0;
+    make_rec_input(&input, 1, 320);
+    lw_error_init(&error);
+    if (lw_session_create(model, &input, 1u, NULL, &full, &error) != LW_STATUS_OK ||
+        lw_session_create_metadata_only(model, &input, 1u, NULL, &metadata, &error) !=
+            LW_STATUS_OK) {
+        fprintf(stderr, "metadata-only session creation failed: %s\n", error.message);
+        goto done;
+    }
+    if (metadata->workspace != NULL || metadata->execution_nodes != NULL ||
+        metadata->prepared_constants != NULL || metadata->packed_weights != NULL ||
+        metadata->workspace_bytes != full->workspace_bytes ||
+        metadata->info.workspace_size != full->info.workspace_size) {
+        fprintf(stderr, "metadata-only session allocated execution buffers or changed the plan\n");
+        goto done;
+    }
+    for (index = 0u; index < model->info.tensor_count; ++index) {
+        const lw_runtime_tensor* expected = &full->tensors[index];
+        const lw_runtime_tensor* actual = &metadata->tensors[index];
+        if (expected->rank != actual->rank || expected->dtype != actual->dtype ||
+            expected->byte_size != actual->byte_size ||
+            expected->workspace_offset != actual->workspace_offset) {
+            fprintf(stderr, "metadata-only session tensor %u differs\n", (unsigned)index);
+            goto done;
+        }
+        for (uint32_t dimension = 0u; dimension < expected->rank; ++dimension) {
+            if (expected->dimensions[dimension] != actual->dimensions[dimension]) {
+                fprintf(stderr, "metadata-only session tensor %u shape differs\n",
+                        (unsigned)index);
+                goto done;
+            }
+        }
+    }
+    ok = 1;
+done:
+    lw_session_free(metadata);
+    lw_session_free(full);
+    return ok;
+}
+
 static uint64_t aligned_tensor_bytes(uint64_t bytes) {
     if (bytes > UINT64_MAX - (LW_WORKSPACE_ALIGNMENT - 1u)) {
         return UINT64_MAX;
@@ -391,7 +437,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "%s: %s\n", lw_status_string(status), error.message);
         return 1;
     }
-    if (!check_plan_determinism(model) || !check_prepared_constant_sharing(model) ||
+    if (!check_metadata_only_session(model) || !check_plan_determinism(model) ||
+        !check_prepared_constant_sharing(model) ||
         !check_prepared_constant_sharing_stress(model) ||
         !check_prepared_source_release_order(model) ||
         !create_and_check(model, 1, 7, 1, &workspace_minimum) ||

@@ -22,7 +22,11 @@ static lw_status make_shape_session(const lw_model* model, uint32_t height, uint
     input.dimensions[1] = 3;
     input.dimensions[2] = (int32_t)height;
     input.dimensions[3] = (int32_t)width;
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_COMPILED_DET)
+    return lw_session_create_metadata_only(model, &input, 1u, NULL, out, error);
+#else
     return lw_session_create(model, &input, 1u, NULL, out, error);
+#endif
 }
 
 static const uint8_t* node_bytes(const lw_model* model, uint32_t index) {
