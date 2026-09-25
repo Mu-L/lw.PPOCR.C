@@ -42,7 +42,6 @@ static float read_f32(const uint8_t* p) {
     return value;
 }
 
-static int value_is_constant(const lw_x64_det_value* value) { return value->constant_data != NULL; }
 static uint64_t value_elements(const lw_x64_det_value* value) { return value->bytes / sizeof(float); }
 
 /* Effective layout of a tensor's primary slot: whatever layout its producer

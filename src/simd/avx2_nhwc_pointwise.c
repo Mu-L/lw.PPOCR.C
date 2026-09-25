@@ -583,6 +583,7 @@ static void lw_nhwc_tile_rows16_4(const float* input, const float* packed_weight
     }
 }
 
+LW_NHWC_AVX2_FMA
 static __m256 lw_nhwc_apply_vec(__m256 value, uint16_t activation) {
     if (activation == LW_NHWC_ACT_RELU) {
         return _mm256_max_ps(value, _mm256_setzero_ps());
@@ -599,6 +600,7 @@ static __m256 lw_nhwc_apply_vec(__m256 value, uint16_t activation) {
     return value;
 }
 
+LW_NHWC_AVX2_FMA
 static void lw_nhwc_store_row32(__m256* accumulators, float* output,
                                 const float* residual, const float* post_bias,
                                 uint16_t activation) {
@@ -611,6 +613,7 @@ static void lw_nhwc_store_row32(__m256* accumulators, float* output,
     }
 }
 
+LW_NHWC_AVX2_FMA
 static void lw_nhwc_tile_rows32(const float* input, const float* packed_weights,
                                 const float* bias, const float* residual,
                                 const float* post_bias, float* output,

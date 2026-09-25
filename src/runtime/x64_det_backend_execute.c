@@ -645,7 +645,7 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
         default: {
             int32_t weight_dimensions[4] = {
                 (int32_t)op->data.conv.output_channels,
-                (int32_t)op->data.conv.groups == op->data.conv.input_channels
+                op->data.conv.groups == op->data.conv.input_channels
                     ? 1 : (int32_t)op->data.conv.input_channels,
                 (int32_t)op->data.conv.weight_h, (int32_t)op->data.conv.weight_w
             };
@@ -668,7 +668,7 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
         }
     }
     case LW_X64_DET_OP_POINTWISE: {
-        lw_nhwc_epilogue ep = { NULL, NULL, op->data.conv.activation, 0u, 0.0f, 0.0f };
+        lw_nhwc_epilogue ep = { NULL, NULL, op->data.conv.activation, 0u, 0.0f, 0.0f, NULL };
         uint32_t pixels = op->data.conv.input_height * op->data.conv.input_width;
         uint32_t workers = det_shard_workers(state, conv_macs(&op->data.conv),
                                              LW_X64_DET_CONV_SHARD_MACS);
@@ -782,7 +782,7 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
         if (det_shard_workers(state, conv_macs(&op->data.conv),
                               LW_X64_DET_DEPTHWISE_SHARD_MACS) > 1u &&
             op->data.conv.output_height > 1u) {
-            lw_nhwc_epilogue ep = { op->data.conv.bias, NULL, 0u, 0u, 0.0f, 0.0f };
+            lw_nhwc_epilogue ep = { op->data.conv.bias, NULL, 0u, 0u, 0.0f, 0.0f, NULL };
             return run_sharded_conv(instance, op, state, LW_X64_DET_SHARD_DEPTHWISE_ROWS,
                                     op->data.conv.output_height, ep);
         }

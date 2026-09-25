@@ -144,19 +144,7 @@ static int detect_ctc(const lw_model* model, const lw_session* session, lw_x64_r
     return 1;
 }
 
-static int value_is_constant(const lw_x64_rec_value* value) { return value->constant_data != NULL; }
 static uint64_t value_elements(const lw_x64_rec_value* value) { return value->bytes / sizeof(float); }
-
-static lw_x64_rec_op* push_op(lw_x64_rec_program* program, uint32_t* count, uint16_t kind,
-                              uint32_t semantic_begin, uint16_t semantic_count) {
-    lw_x64_rec_op* op = &program->ops[*count];
-    memset(op, 0, sizeof(*op));
-    op->kind = kind;
-    op->semantic_begin = semantic_begin;
-    op->semantic_count = semantic_count;
-    ++*count;
-    return op;
-}
 
 static uint8_t choose_nchw_pointwise_kernel(uint32_t height,
                                                uint32_t input_channels,

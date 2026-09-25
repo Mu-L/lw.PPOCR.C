@@ -227,7 +227,8 @@ static int fast_prepare_reduce_mean(lw_x64_rec_fast_plan* plan, uint32_t node_in
         lwm_read_u16(node + 4u) != 1u || lwm_read_u16(params + 2u) != 2u || lwm_read_u32(params + 4u) == 0u) return 0;
     input = &plan->session->tensors[lwm_read_u32(node + 8u)]; output = &plan->session->tensors[lwm_read_u32(node + 40u)];
     axis0 = lwm_read_i32(params + 12u); axis1 = lwm_read_i32(params + 16u);
-    if (axis0 < 0) axis0 += 4; if (axis1 < 0) axis1 += 4;
+    if (axis0 < 0) axis0 += 4;
+    if (axis1 < 0) axis1 += 4;
     if (!fast_tensor_eligible(input) || !fast_tensor_eligible(output) ||
         !((axis0 == 2 && axis1 == 3) || (axis0 == 3 && axis1 == 2)) ||
         output->dimensions[0] != input->dimensions[0] || output->dimensions[1] != input->dimensions[1] ||
