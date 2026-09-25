@@ -185,7 +185,16 @@ async function main() {
   const textSha256 = crypto.createHash("sha256").update(expectedTexts.join("\n"), "utf8").digest("hex");
   const expectedTextSha256 = argument("--expected-text-sha256");
   if (expectedTextSha256 && textSha256 !== expectedTextSha256) {
-    fail(`unexpected full OCR text SHA-256: ${textSha256}`);
+    const diagnostic = expectedTexts
+      .map((text, index) => `${String(index).padStart(2, "0")}: ${text}`)
+      .join("\n");
+    fail([
+      "unexpected full OCR text SHA-256",
+      `expected: ${expectedTextSha256}`,
+      `actual:   ${textSha256}`,
+      "text lines:",
+      diagnostic
+    ].join("\n"));
   }
   console.log(JSON.stringify({
     ok: true,

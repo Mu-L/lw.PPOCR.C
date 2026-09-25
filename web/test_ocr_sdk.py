@@ -21,6 +21,33 @@ def text_sha256(lines: list[dict]) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def assert_text_contract(
+    lines: list[dict],
+    expected_line_count: int,
+    expected_text_sha256: str,
+    label: str,
+) -> str:
+    actual_line_count = len(lines)
+    actual_text_sha256 = text_sha256(lines)
+    if (
+        actual_line_count != expected_line_count
+        or actual_text_sha256 != expected_text_sha256
+    ):
+        texts = "\n".join(
+            f"{index:02d}: {line.get('text', '')}"
+            for index, line in enumerate(lines)
+        )
+        raise AssertionError(
+            f"{label} OCR text contract mismatch\n"
+            f"expected lines: {expected_line_count}\n"
+            f"actual lines: {actual_line_count}\n"
+            f"expected SHA-256: {expected_text_sha256}\n"
+            f"actual SHA-256: {actual_text_sha256}\n"
+            f"text lines:\n{texts}"
+        )
+    return actual_text_sha256
+
+
 def run_sample(page: Page) -> dict:
     return page.evaluate(
         """async () => {
@@ -180,8 +207,12 @@ def main() -> int:
             assert result["timing"]["decode_ms"] >= 0
             assert result["timing"]["inference_ms"] > 0
             assert result["timing"]["total_ms"] >= result["timing"]["inference_ms"]
-            assert len(result["lines"]) == arguments.expected_line_count
-            assert text_sha256(result["lines"]) == arguments.expected_text_sha256
+            actual_text_sha256 = assert_text_contract(
+                result["lines"],
+                arguments.expected_line_count,
+                arguments.expected_text_sha256,
+                "initial",
+            )
             if arguments.expected_variant == "tiny":
                 assert result["lines"][0]["text"] == EXPECTED_FIRST_LINE
             expected_text = [line["text"] for line in result["lines"]]
@@ -221,9 +252,15 @@ def main() -> int:
                       };
                     }"""
                 )
-                for repeated in (lifecycle["second"], lifecycle["third"]):
-                    assert len(repeated["lines"]) == arguments.expected_line_count
-                    assert text_sha256(repeated["lines"]) == arguments.expected_text_sha256
+                for index, repeated in enumerate(
+                    (lifecycle["second"], lifecycle["third"]), start=2
+                ):
+                    assert_text_contract(
+                        repeated["lines"],
+                        arguments.expected_line_count,
+                        arguments.expected_text_sha256,
+                        f"lifecycle-{index}",
+                    )
                 assert lifecycle["destroyedStatus"]["state"] == "DESTROYED"
                 assert lifecycle["readyStatus"]["state"] == "READY"
                 assert lifecycle["finalStatus"]["state"] == "DESTROYED"
@@ -241,7 +278,7 @@ def main() -> int:
                     "reinit_ms": round(float(lifecycle["reinitMs"]), 3),
                     "ocr_ms": round(float(result["timing"]["total_ms"]), 3),
                     "result_lines": len(result["lines"]),
-                    "text_sha256": text_sha256(result["lines"]),
+                    "text_sha256": actual_text_sha256,
                 }
                 if arguments.report:
                     arguments.report.parent.mkdir(parents=True, exist_ok=True)

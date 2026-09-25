@@ -19,6 +19,33 @@ def text_sha256(lines: list[dict]) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def assert_text_contract(
+    lines: list[dict],
+    expected_line_count: int,
+    expected_text_sha256: str,
+    label: str,
+) -> str:
+    actual_line_count = len(lines)
+    actual_text_sha256 = text_sha256(lines)
+    if (
+        actual_line_count != expected_line_count
+        or actual_text_sha256 != expected_text_sha256
+    ):
+        texts = "\n".join(
+            f"{index:02d}: {line.get('text', '')}"
+            for index, line in enumerate(lines)
+        )
+        raise AssertionError(
+            f"{label} OCR text contract mismatch\n"
+            f"expected lines: {expected_line_count}\n"
+            f"actual lines: {actual_line_count}\n"
+            f"expected SHA-256: {expected_text_sha256}\n"
+            f"actual SHA-256: {actual_text_sha256}\n"
+            f"text lines:\n{texts}"
+        )
+    return actual_text_sha256
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--html", type=Path, required=True)
@@ -186,7 +213,6 @@ def main() -> int:
         }
         assert result["image"]["width"] > 0 and result["image"]["height"] > 0
         assert result["elapsed_ms"] > 0
-        assert len(result["lines"]) == arguments.expected_line_count
         timing = page.evaluate("window.__lwOcrTest.timingBreakdown()")
         assert timing["prepareMilliseconds"] > 0
         assert timing["sdkTotalMilliseconds"] > 0
@@ -201,7 +227,12 @@ def main() -> int:
             "result": result["elapsed_ms"],
             "breakdown": timing,
         }
-        assert text_sha256(result["lines"]) == arguments.expected_text_sha256
+        actual_text_sha256 = assert_text_contract(
+            result["lines"],
+            arguments.expected_line_count,
+            arguments.expected_text_sha256,
+            "standalone-html",
+        )
 
         if arguments.variant_contract_only:
             report = {
@@ -210,7 +241,7 @@ def main() -> int:
                 "html_bytes": html.stat().st_size,
                 "ocr_ms": round(float(result["elapsed_ms"]), 3),
                 "result_lines": len(result["lines"]),
-                "text_sha256": text_sha256(result["lines"]),
+                "text_sha256": actual_text_sha256,
             }
             browser.close()
             if browser_messages:
