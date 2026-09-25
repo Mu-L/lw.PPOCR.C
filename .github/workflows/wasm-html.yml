@@ -153,6 +153,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          print_benchmark_logs_on_failure() {
+            local status=$?
+            if [[ "${status}" -ne 0 ]]; then
+              for log in build-wasm/rec-benchmark-compiled.log \
+                         build-wasm/rec-benchmark-compiled-scalar.log \
+                         build-wasm/rec-profile-compiled.log; do
+                if [[ -s "${log}" ]]; then
+                  echo "::group::${log}"
+                  cat "${log}"
+                  echo '::endgroup::'
+                fi
+              done
+            fi
+          }
+          trap print_benchmark_logs_on_failure EXIT
           if [[ "${{ inputs.compiled_rec || false }}" == "true" ]]; then
             canonical_package=build-wasm-canonical/node-wasm
             compiled_package=build-wasm/node-wasm

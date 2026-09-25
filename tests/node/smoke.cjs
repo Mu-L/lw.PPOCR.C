@@ -124,7 +124,10 @@ function runOcr(engine, image) {
     if (status !== 0) fail(`lw_web_run failed: ${status}`);
     const lineCount = runtime.HEAPU32[result >> 2] >>> 0;
     const detectedCount = runtime.HEAPU32[(result + 4) >> 2] >>> 0;
-    if (lineCount === 0 || lineCount > info.maxLines) fail("invalid OCR line count");
+    if (lineCount === 0 || lineCount > info.maxLines) {
+      fail(`invalid OCR line count: ${lineCount}; detected: ${detectedCount}; ` +
+           `capacity: ${info.maxLines}`);
+    }
     const decoder = new TextDecoder();
     const output = [];
     output.detectedCount = detectedCount;

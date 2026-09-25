@@ -1009,7 +1009,7 @@ lw_status lw_db_postprocess_f32_ws(
     results = (lw_detection_box*)workspace->results;
     memset(visited, 0, (size_t)pixel_count);
     /* Convert model probabilities to a compact bitmap after rejecting NaN/Inf. */
-#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_SIMD_KERNELS)
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_DB_BITMAP_SIMD)
     if (lw_wasm128_threshold_bitmap_f32(prediction, bitmap, pixel_count,
                                         bitmap_threshold) != 0) {
 #else

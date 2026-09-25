@@ -65,8 +65,10 @@ ConvTranspose) kernels; it only disables the optional SIMD128 Dense,
 Depthwise, and common-op dispatch. It is not a wholly scalar runtime.
 REC preprocessing already writes into its active compiled backend input; DET
 and CLS fixed-point preprocessing now also write directly into NHWC backend
-input when those compiled programs are active. The optional SIMD128 DB bitmap
-path preserves the strict `probability > threshold` rule and rejects NaN/Inf.
+input when those compiled programs are active. The experimental SIMD128 DB
+bitmap path (`LW_WASM_DB_BITMAP_SIMD=ON`) is disabled by default pending
+full-OCR parity validation; the default retains the established scalar DB
+threshold contract, including strict `probability > threshold` and NaN/Inf rejection.
 
 Push/PR CI also stages the Small and Medium runtime model packs and runs the
 same Node/WASM canonical, compiled portable, and compiled SIMD128 full-OCR

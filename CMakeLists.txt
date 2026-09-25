@@ -16,6 +16,8 @@ option(LW_WASM_COMPILED_DET
     "Run WASM DET on the compiled NHWC backend when compiled REC is enabled" ON)
 option(LW_WASM_REC_SIMD_KERNELS
     "Use SIMD128 Dense and Depthwise kernels in experimental WASM compiled REC" ON)
+option(LW_WASM_DB_BITMAP_SIMD
+    "Experimentally use SIMD128 DB thresholding in compiled WASM OCR" OFF)
 option(LW_WEB_LEGACY
     "Build the Tiny scalar Web compatibility distribution" OFF)
 set(LW_WEB_MIN_CHROME_VERSION "70" CACHE STRING
@@ -354,10 +356,12 @@ if(LW_WASM_COMPILED_REC_ENABLED)
     list(APPEND LW_PPOCR_C_SOURCES
         src/simd/wasm128_nhwc_pointwise.c
         src/simd/wasm128_elementwise.c
-        src/simd/wasm128_bitmap.c
         src/simd/wasm128_matmul.c
         src/simd/wasm128_nhwc_convtranspose.c
         src/simd/wasm128_packed_matmul.c)
+    if(LW_WASM_DB_BITMAP_SIMD)
+        list(APPEND LW_PPOCR_C_SOURCES src/simd/wasm128_bitmap.c)
+    endif()
 endif()
 if(MSVC AND MSVC_C_ARCHITECTURE_ID MATCHES "^(x64|X86)$")
     set_property(SOURCE src/simd/avx2_binary.c src/simd/avx2_conv1x1.c
@@ -450,6 +454,9 @@ if(LW_X64_REC_FAST_ENABLED OR LW_WASM_COMPILED_REC_ENABLED)
     target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
     if(LW_WASM_COMPILED_REC_ENABLED AND LW_WASM_REC_SIMD_KERNELS)
         target_compile_definitions(lw_ppocr_c PRIVATE LW_WASM_REC_SIMD_KERNELS=1)
+    endif()
+    if(LW_WASM_COMPILED_REC_ENABLED AND LW_WASM_DB_BITMAP_SIMD)
+        target_compile_definitions(lw_ppocr_c PRIVATE LW_WASM_DB_BITMAP_SIMD=1)
     endif()
     if(LW_WASM_COMPILED_REC_ENABLED AND LW_WASM_COMPILED_DET AND
        LW_EXPERIMENTAL_DET_FIXED_POINT_RESIZE)
