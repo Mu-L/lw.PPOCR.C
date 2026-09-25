@@ -112,6 +112,9 @@ void lw_avx2_fma_packed_matmul_bias_argmax_f32(
 /* Strict-greater vector running max: replaces the value and its index only
  * when the new value is strictly greater, which keeps the lowest column index
  * on ties (same semantics as the stored-logits kernel). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2,fma")))
+#endif
 static void update_max256(__m256* maxima, __m256* maxima_indices, __m256 values,
                           uint32_t column_base, __m256 lane_offsets) {
     const __m256 candidates =
@@ -123,6 +126,9 @@ static void update_max256(__m256* maxima, __m256* maxima_indices, __m256 values,
 
 /* Scalar horizontal reduce of one 8-lane max/index pair; strict-greater
  * keeps the lowest lane index on ties. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2,fma")))
+#endif
 static void reduce_max8(__m256 values, __m256 indices, float* best_value,
                         uint32_t* best_index) {
     float lane_values[8];
