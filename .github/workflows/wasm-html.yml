@@ -169,6 +169,15 @@ jobs:
             -DLW_WEB_PDF=OFF \
             -DLW_WASM_COMPILED_REC="${extra_compiled}"
           cmake --build "${extra_build}" --target lw-node-wasm-package --parallel
+          emcmake cmake -S . -B build-wasm-compiled-scalar -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLW_BUILD_HTTP_DEMO=OFF \
+            -DLW_BUILD_CSHARP_DEMOS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DLW_WEB_PDF=OFF \
+            -DLW_WASM_COMPILED_REC=ON \
+            -DLW_WASM_REC_SIMD_KERNELS=OFF
+          cmake --build build-wasm-compiled-scalar --target lw-node-wasm-package --parallel
           expected_text_sha256="$(node -p "require('./ci/web-ppocrv6-tiny.json').expected_text_sha256")"
           node tests/node/benchmark.cjs \
             --package "${canonical_package}" \
@@ -181,16 +190,35 @@ jobs:
             --expected-text-sha256 "${expected_text_sha256}" \
             --iterations 5 2> build-wasm/rec-benchmark-compiled.log \
             | tee build-wasm/rec-benchmark-compiled.json
+          node tests/node/benchmark.cjs \
+            --package build-wasm-compiled-scalar/node-wasm \
+            --sample build-wasm/models/sample.ppm \
+            --expected-text-sha256 "${expected_text_sha256}" \
+            --iterations 5 2> build-wasm/rec-benchmark-compiled-scalar.log \
+            | tee build-wasm/rec-benchmark-compiled-scalar.json
           cat build-wasm/rec-benchmark-compiled.log
+          cat build-wasm/rec-benchmark-compiled-scalar.log
           grep -q 'LW_WASM_COMPILED_REC widths=5/5' \
             build-wasm/rec-benchmark-compiled.log
           grep -q 'LW_WASM_COMPILED_REC ctc=simd128' \
             build-wasm/rec-benchmark-compiled.log
+          grep -q 'LW_WASM_COMPILED_REC widths=5/5' \
+            build-wasm/rec-benchmark-compiled-scalar.log
+          grep -q 'LW_WASM_COMPILED_REC ctc=simd128' \
+            build-wasm/rec-benchmark-compiled-scalar.log
           python tools/compare_wasm_rec_benchmark.py \
             --canonical build-wasm/rec-benchmark-canonical.json \
             --compiled build-wasm/rec-benchmark-compiled.json \
             | tee build-wasm/rec-benchmark-summary.md
+          python tools/compare_wasm_rec_benchmark.py \
+            --canonical build-wasm/rec-benchmark-compiled-scalar.json \
+            --compiled build-wasm/rec-benchmark-compiled.json \
+            --baseline-label 'Compiled scalar kernels' \
+            --candidate-label 'Compiled SIMD128 kernels' \
+            --title 'Experimental WASM REC kernel A/B: paired full OCR' \
+            | tee build-wasm/rec-benchmark-kernel-ab.md
           cat build-wasm/rec-benchmark-summary.md >> "$GITHUB_STEP_SUMMARY"
+          cat build-wasm/rec-benchmark-kernel-ab.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run browser fallback simulation test
         run: >-
@@ -285,7 +313,10 @@ jobs:
             build-wasm/rec-benchmark-canonical.json
             build-wasm/rec-benchmark-compiled.json
             build-wasm/rec-benchmark-compiled.log
+            build-wasm/rec-benchmark-compiled-scalar.json
+            build-wasm/rec-benchmark-compiled-scalar.log
             build-wasm/rec-benchmark-summary.md
+            build-wasm/rec-benchmark-kernel-ab.md
           if-no-files-found: warn
           retention-days: 14
 

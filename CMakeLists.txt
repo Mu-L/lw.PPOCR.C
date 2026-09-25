@@ -12,6 +12,8 @@ option(LW_WASM_SIMD128
     "Enable portable WebAssembly SIMD128 for the standalone OCR HTML" ON)
 option(LW_WASM_COMPILED_REC
     "Experimentally run WASM REC on the compiled physical backend" OFF)
+option(LW_WASM_REC_SIMD_KERNELS
+    "Use SIMD128 Dense and Depthwise kernels in experimental WASM compiled REC" ON)
 option(LW_WEB_LEGACY
     "Build the Tiny scalar Web compatibility distribution" OFF)
 set(LW_WEB_MIN_CHROME_VERSION "70" CACHE STRING
@@ -440,6 +442,9 @@ set_target_properties(lw_ppocr_c PROPERTIES
 lw_configure_runtime_target(lw_ppocr_c)
 if(LW_X64_REC_FAST_ENABLED OR LW_WASM_COMPILED_REC_ENABLED)
     target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+    if(LW_WASM_COMPILED_REC_ENABLED AND LW_WASM_REC_SIMD_KERNELS)
+        target_compile_definitions(lw_ppocr_c PRIVATE LW_WASM_REC_SIMD_KERNELS=1)
+    endif()
     if(MSVC)
         set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c src/simd/avx2_nhwc_depthwise.c src/simd/avx2_nhwc_support.c src/simd/avx2_nhwc_convtranspose.c APPEND PROPERTY
             COMPILE_OPTIONS /arch:AVX2 /fp:strict)

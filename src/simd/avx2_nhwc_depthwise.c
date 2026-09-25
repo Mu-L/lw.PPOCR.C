@@ -3,6 +3,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_SIMD_KERNELS)
+#include <wasm_simd128.h>
+#define LW_DW_WASM128 1
+#else
+#define LW_DW_WASM128 0
+#endif
+
 #if !defined(LW_NHWC_FORCE_PORTABLE) && \
     (defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__))
 #include <immintrin.h>
@@ -166,6 +173,73 @@ static lw_status depthwise_execute(const float* input, const float* packed_weigh
                         if (stats != NULL && stats->x1_invocations != UINT64_MAX) ++stats->x1_invocations;
                         ++output_x;
                     }
+                }
+            }
+        }
+    }
+    return LW_STATUS_OK;
+#elif LW_DW_WASM128
+    /* Preserve the OC32 pack and ascending tap order, but compute four
+     * adjacent channels per SIMD128 lane group. This path handles borders,
+     * row shards and channel tails with the same descriptor as the scalar
+     * implementation. */
+    uint32_t taps = desc->kernel_h * desc->kernel_w;
+    uint32_t blocks = (desc->channels + LW_NHWC_DEPTHWISE_BLOCK - 1u) /
+                      LW_NHWC_DEPTHWISE_BLOCK;
+    for (uint32_t batch = 0u; batch < desc->batch; ++batch) {
+        const float* input_batch = input + (size_t)batch * desc->input_height *
+            desc->input_width * desc->channels;
+        float* output_batch = output + (size_t)batch * desc->output_height *
+            desc->output_width * desc->channels;
+        for (uint32_t oy = 0u; oy < desc->output_height; ++oy) {
+            int32_t iy0 = (int32_t)((uint64_t)(oy + desc->output_row_offset) *
+                desc->stride_h) - (int32_t)desc->pad_top;
+            for (uint32_t ox = 0u; ox < desc->output_width; ++ox) {
+                int32_t ix0 = (int32_t)((uint64_t)ox * desc->stride_w) -
+                    (int32_t)desc->pad_left;
+                float* destination = output_batch +
+                    ((size_t)oy * desc->output_width + ox) * desc->channels;
+                for (uint32_t block = 0u; block < blocks; ++block) {
+                    uint32_t channel_base = block * LW_NHWC_DEPTHWISE_BLOCK;
+                    uint32_t lanes = desc->channels - channel_base;
+                    const float* block_weights = packed_weights +
+                        (size_t)block * taps * LW_NHWC_DEPTHWISE_BLOCK;
+                    v128_t sums[LW_NHWC_DEPTHWISE_BLOCK / 4u];
+                    if (lanes > LW_NHWC_DEPTHWISE_BLOCK) lanes = LW_NHWC_DEPTHWISE_BLOCK;
+                    for (uint32_t lane = 0u; lane < lanes; lane += 4u) {
+                        sums[lane / 4u] = bias == NULL ? wasm_f32x4_splat(0.0f) :
+                            wasm_v128_load(bias + channel_base + lane);
+                    }
+                    for (uint32_t ky = 0u; ky < desc->kernel_h; ++ky) {
+                        int32_t iy = iy0 + (int32_t)ky;
+                        if (iy < 0 || iy >= (int32_t)desc->input_height) continue;
+                        for (uint32_t kx = 0u; kx < desc->kernel_w; ++kx) {
+                            int32_t ix = ix0 + (int32_t)kx;
+                            if (ix < 0 || ix >= (int32_t)desc->input_width) continue;
+                            const float* source = input_batch +
+                                ((size_t)(uint32_t)iy * desc->input_width + (uint32_t)ix) *
+                                desc->channels + channel_base;
+                            const float* weight = block_weights +
+                                ((size_t)ky * desc->kernel_w + kx) *
+                                LW_NHWC_DEPTHWISE_BLOCK;
+                            for (uint32_t lane = 0u; lane < lanes; lane += 4u) {
+                                sums[lane / 4u] = wasm_f32x4_add(sums[lane / 4u],
+                                    wasm_f32x4_mul(wasm_v128_load(source + lane),
+                                        wasm_v128_load(weight + lane)));
+                            }
+                        }
+                    }
+                    for (uint32_t lane = 0u; lane < lanes; lane += 4u) {
+                        v128_t sum = sums[lane / 4u];
+                        if (desc->post_bias != NULL) {
+                            sum = wasm_f32x4_add(sum,
+                                wasm_v128_load(desc->post_bias + channel_base + lane));
+                        }
+                        wasm_v128_store(destination + channel_base + lane, sum);
+                    }
+                }
+                if (stats != NULL && stats->x1_invocations != UINT64_MAX) {
+                    ++stats->x1_invocations;
                 }
             }
         }
