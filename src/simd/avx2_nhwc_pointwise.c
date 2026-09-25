@@ -781,7 +781,30 @@ void lw_avx2_fma_nhwc_pointwise_f32(const float* input,
         return;
     }
 #endif
-    lw_avx2_fma_nhwc_pointwise_grouped_f32(
-        input, packed_weights, epilogue, output, pixels, input_channels,
-        output_channels, LW_NHWC_POINTWISE_GROUP_TILES);
+    {
+        /* Adaptive pixel grouping: make each pixel group as large as possible
+         * while its input slice stays L2-resident (~448 KB budget, leaving
+         * room for the output slice and weight block), so the per-oc-block
+         * input re-reads hit L2 and the packed weights stream from DRAM as
+         * few times as possible.  Small inputs collapse to a single group and
+         * the weights stream exactly once; huge detection feature maps still
+         * get bounded input slices.  Bit-identical: grouping only reorders
+         * independent (tile, oc block) computations. */
+        uint32_t tile_count =
+            (pixels + LW_NHWC_PIXEL_TILE - 1u) / LW_NHWC_PIXEL_TILE;
+        uint64_t row_bytes = (uint64_t)input_channels * sizeof(float);
+        uint32_t budget_pixels =
+            (uint32_t)(UINT64_C(458752) / (row_bytes == 0u ? 1u : row_bytes));
+        uint32_t group_tiles =
+            (budget_pixels + LW_NHWC_PIXEL_TILE - 1u) / LW_NHWC_PIXEL_TILE;
+        if (group_tiles < LW_NHWC_POINTWISE_GROUP_TILES) {
+            group_tiles = LW_NHWC_POINTWISE_GROUP_TILES;
+        }
+        if (group_tiles > tile_count) {
+            group_tiles = tile_count;
+        }
+        lw_avx2_fma_nhwc_pointwise_grouped_f32(
+            input, packed_weights, epilogue, output, pixels, input_channels,
+            output_channels, group_tiles);
+    }
 }
