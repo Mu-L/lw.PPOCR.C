@@ -18,7 +18,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
-#if defined(__EMSCRIPTEN__) && defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
 #include <stdio.h>
 #endif
 #if defined(_MSC_VER)
@@ -675,6 +675,49 @@ uint32_t lw_recognizer_current_target_width(const lw_recognizer* recognizer) {
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
 static void recognizer_try_backends(lw_recognizer* recognizer);
 static void recognizer_release_backends(lw_recognizer* recognizer);
+#if !defined(LW_EXPERIMENTAL_CTC_TILED)
+static int recognizer_has_full_compiled_coverage(const lw_recognizer* recognizer) {
+    uint32_t index;
+    int target_is_standard = 0;
+    if (recognizer == NULL) return 0;
+    for (index = 0u; index < LW_REC_RESIDENT_WIDTH_COUNT; ++index) {
+        const uint32_t width = lw_rec_adaptive_widths[index];
+        const lw_x64_rec_backend_slot* slot = &recognizer->x64_slots[index];
+        if (width == recognizer->info.target_width) target_is_standard = 1;
+        if (width <= recognizer->info.target_width &&
+            (slot->target_width != width || slot->program == NULL || slot->instance == NULL))
+            return 0;
+    }
+    return target_is_standard;
+}
+#endif
+
+static void recognizer_report_compiled_memory(const lw_recognizer* recognizer) {
+    const char* enabled = getenv("LW_REC_MEMORY_PROFILE");
+    uint32_t index;
+    uint64_t arena_bytes = 0u;
+    uint64_t scratch_bytes = 0u;
+    uint64_t ctc_rows = 0u;
+    if (enabled == NULL || enabled[0] != '1' || enabled[1] != '\0') return;
+    for (index = 0u; index < LW_REC_RESIDENT_WIDTH_COUNT; ++index) {
+        const lw_x64_rec_backend_slot* slot = &recognizer->x64_slots[index];
+        if (slot->program == NULL) continue;
+        if (slot->program->arena_bytes > arena_bytes) arena_bytes = slot->program->arena_bytes;
+        if (slot->program->scratch_bytes > scratch_bytes) scratch_bytes = slot->program->scratch_bytes;
+        if (slot->program->ctc.rows > ctc_rows) ctc_rows = slot->program->ctc.rows;
+        fprintf(stderr, "REC_MEMORY width=%u owned=%llu borrowed=%llu borrowed_count=%u\n",
+                slot->target_width,
+                (unsigned long long)slot->program->owned_constant_bytes,
+                (unsigned long long)slot->program->borrowed_constant_bytes,
+                slot->program->borrowed_constant_count);
+    }
+    fprintf(stderr, "REC_MEMORY shared_arena=%llu shared_scratch=%llu ctc_workspace=%llu medium_fast_shared=%u\n",
+            (unsigned long long)(recognizer->x64_shared_arena == NULL ? 0u : arena_bytes),
+            (unsigned long long)(recognizer->x64_shared_scratch == NULL ? 0u : scratch_bytes),
+            (unsigned long long)(recognizer->x64_shared_ctc_scores == NULL ? 0u :
+                ctc_rows * (sizeof(float) * 2u + sizeof(uint32_t))),
+            recognizer->fast_shared == NULL ? 0u : 1u);
+}
 #endif
 
 lw_status lw_recognizer_create(const char* model_path_utf8, const char* dictionary_path_utf8,
@@ -739,7 +782,8 @@ lw_status lw_recognizer_create(const char* model_path_utf8, const char* dictiona
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
     recognizer_try_backends(recognizer);
 #if !defined(LW_EXPERIMENTAL_CTC_TILED)
-    if (recognizer->model->info.content_checksum == LW_MEDIUM_REC_LWM_CHECKSUM) {
+    if (!recognizer_has_full_compiled_coverage(recognizer) &&
+        recognizer->model->info.content_checksum == LW_MEDIUM_REC_LWM_CHECKSUM) {
         lw_cpu_capabilities cpu = lw_get_cpu_capabilities();
         if (lw_simd_level_is_avx2(cpu.simd) && cpu.has_avx2_fma) {
             lw_medium_fast_shared* shared = (lw_medium_fast_shared*)calloc(1u, sizeof(*shared));
@@ -766,6 +810,7 @@ lw_status lw_recognizer_create(const char* model_path_utf8, const char* dictiona
         }
     }
 #endif
+    recognizer_report_compiled_memory(recognizer);
 #endif
     *out_recognizer = recognizer;
     lw_set_error(error, LW_STATUS_OK, "");
@@ -885,20 +930,50 @@ static void recognizer_try_backends(lw_recognizer* recognizer) {
 #if !defined(__EMSCRIPTEN__)
     lw_cpu_capabilities cpu = lw_get_cpu_capabilities();
 #endif
+    int32_t root_index;
+    lw_x64_rec_program* root_program = NULL;
     uint32_t index;
 #if !defined(__EMSCRIPTEN__)
     if (!lw_simd_level_is_avx2(cpu.simd) || !cpu.has_avx2_fma) return;
 #endif
+    root_index = (int32_t)LW_REC_RESIDENT_WIDTH_COUNT - 1;
+    while (root_index >= 0 &&
+           lw_rec_adaptive_widths[root_index] > recognizer->info.target_width)
+        --root_index;
+    if (root_index < 0) return;
+    {
+        lw_x64_rec_backend_slot* root = &recognizer->x64_slots[root_index];
+        lw_error backend_error;
+        root->target_width = lw_rec_adaptive_widths[root_index];
+        lw_error_init(&backend_error);
+        if (lw_x64_rec_backend_compile(recognizer->model, root->target_width,
+                                       &root->program, &backend_error) == LW_X64_REC_COMPILE_OK &&
+            root->program != NULL && root->program->ctc.enabled != 0u &&
+            root->program->time_steps != 0u &&
+            root->program->class_count == recognizer->info.class_count) {
+            root_program = root->program;
+        } else {
+            lw_x64_rec_program_free(root->program);
+            root->program = NULL;
+        }
+    }
     for (index = 0u; index < LW_REC_RESIDENT_WIDTH_COUNT; ++index) {
         lw_x64_rec_backend_slot* slot = &recognizer->x64_slots[index];
         lw_error backend_error;
         uint32_t width = lw_rec_adaptive_widths[index];
-        if (width > recognizer->info.target_width) continue;
+        if (width > recognizer->info.target_width || (int32_t)index == root_index) continue;
         slot->target_width = width;
         lw_error_init(&backend_error);
-        if (lw_x64_rec_backend_compile(recognizer->model, width, &slot->program,
-                                       &backend_error) != LW_X64_REC_COMPILE_OK ||
-            slot->program == NULL || slot->program->ctc.enabled == 0u ||
+        if (root_program == NULL ||
+            lw_x64_rec_backend_compile_shared(recognizer->model, width, root_program,
+                                              &slot->program, &backend_error) != LW_X64_REC_COMPILE_OK) {
+            lw_x64_rec_program_free(slot->program);
+            slot->program = NULL;
+            lw_error_init(&backend_error);
+            (void)lw_x64_rec_backend_compile(recognizer->model, width,
+                                             &slot->program, &backend_error);
+        }
+        if (slot->program == NULL || slot->program->ctc.enabled == 0u ||
             slot->program->time_steps == 0u ||
             slot->program->class_count != recognizer->info.class_count) {
             lw_x64_rec_program_free(slot->program);

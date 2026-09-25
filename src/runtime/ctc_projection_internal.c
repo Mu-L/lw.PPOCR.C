@@ -17,8 +17,9 @@ static const float* constant_f32(const lw_model* model, uint32_t index) {
     return (const float*)(const void*)(model->bytes + (size_t)lwm_read_u64(tensor + 48u));
 }
 
-lw_status lw_x64_rec_ctc_prepare(const lw_model* model, const lw_session* session,
-                                 lw_x64_rec_ctc_tail* tail, lw_error* error) {
+lw_status lw_x64_rec_ctc_prepare_shared(const lw_model* model, const lw_session* session,
+                                        const lw_x64_rec_ctc_tail* source,
+                                        lw_x64_rec_ctc_tail* tail, lw_error* error) {
     uint64_t count;
     (void)session;
     if (model == NULL || tail == NULL || !tail->enabled ||
@@ -26,6 +27,15 @@ lw_status lw_x64_rec_ctc_prepare(const lw_model* model, const lw_session* sessio
         count > SIZE_MAX / sizeof(float)) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "invalid CTC projection descriptor");
         return LW_STATUS_INVALID_ARGUMENT;
+    }
+    if (source != NULL && source->enabled != 0u && source->packed_weights != NULL &&
+        source->weight_tensor == tail->weight_tensor && source->inner == tail->inner &&
+        source->classes == tail->classes) {
+        tail->packed_weights = source->packed_weights;
+        tail->packed_weights_borrowed = 1u;
+        tail->bias = constant_f32(model, tail->bias_tensor);
+        lw_set_error(error, LW_STATUS_OK, "");
+        return LW_STATUS_OK;
     }
     tail->packed_weights = (float*)malloc((size_t)count * sizeof(float));
     if (tail->packed_weights == NULL) {
@@ -39,10 +49,16 @@ lw_status lw_x64_rec_ctc_prepare(const lw_model* model, const lw_session* sessio
     return LW_STATUS_OK;
 }
 
+lw_status lw_x64_rec_ctc_prepare(const lw_model* model, const lw_session* session,
+                                 lw_x64_rec_ctc_tail* tail, lw_error* error) {
+    return lw_x64_rec_ctc_prepare_shared(model, session, NULL, tail, error);
+}
+
 void lw_x64_rec_ctc_free(lw_x64_rec_ctc_tail* tail) {
     if (tail == NULL) return;
-    free(tail->packed_weights);
+    if (tail->packed_weights_borrowed == 0u) free(tail->packed_weights);
     tail->packed_weights = NULL;
+    tail->packed_weights_borrowed = 0u;
     tail->bias = NULL;
 }
 

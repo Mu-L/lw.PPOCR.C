@@ -2334,6 +2334,22 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
         add_test(NAME x64_rec_backend_execution
             COMMAND x64-rec-backend-execution-driver ${LW_PPOCR_C_REC_LWM})
         set_tests_properties(x64_rec_backend_execution PROPERTIES TIMEOUT 120)
+        add_executable(x64-rec-shared-constants-driver
+            tests/x64_rec_shared_constants_driver.c)
+        target_link_libraries(x64-rec-shared-constants-driver PRIVATE lw_ppocr_c)
+        target_include_directories(x64-rec-shared-constants-driver PRIVATE
+            src/runtime src/kernels src/simd)
+        target_compile_features(x64-rec-shared-constants-driver PRIVATE c_std_11)
+        add_dependencies(x64-rec-shared-constants-driver convert_rec_model)
+        if(MSVC)
+            target_compile_options(x64-rec-shared-constants-driver PRIVATE /W4 /WX /utf-8)
+        else()
+            target_compile_options(x64-rec-shared-constants-driver PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+        endif()
+        add_test(NAME x64_rec_shared_constants
+            COMMAND x64-rec-shared-constants-driver ${LW_PPOCR_C_REC_LWM})
+        set_tests_properties(x64_rec_shared_constants PROPERTIES TIMEOUT 120)
         add_executable(x64-rec-backend-nchw-driver
             tests/x64_rec_backend_nchw_driver.c)
         target_link_libraries(x64-rec-backend-nchw-driver PRIVATE lw_ppocr_c)

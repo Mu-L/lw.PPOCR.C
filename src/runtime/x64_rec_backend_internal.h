@@ -325,7 +325,8 @@ typedef struct lw_x64_rec_constant {
 
 typedef struct lw_x64_rec_ctc_tail {
     uint8_t enabled;
-    uint8_t reserved[3];
+    uint8_t packed_weights_borrowed;
+    uint8_t reserved[2];
     uint32_t activation_value;
     uint32_t classes;
     uint32_t rows;
@@ -363,6 +364,10 @@ typedef struct lw_x64_rec_program {
     uint8_t backend_layout;
     uint32_t packed_constant_count;
     lw_x64_rec_constant* constants;
+    const struct lw_x64_rec_program* packed_source;
+    uint64_t owned_constant_bytes;
+    uint64_t borrowed_constant_bytes;
+    uint32_t borrowed_constant_count;
     lw_x64_rec_ctc_tail ctc;
     /* Number of additional owners beyond the original compiler caller. */
     lw_atomic_u32 shared_refs;
@@ -421,6 +426,9 @@ lw_x64_rec_compile_result lw_x64_rec_backend_compile_ex(
 lw_x64_rec_compile_result lw_x64_rec_backend_compile(
     const lw_model* model, uint32_t target_width, lw_x64_rec_program** out_program,
     lw_error* error);
+lw_x64_rec_compile_result lw_x64_rec_backend_compile_shared(
+    const lw_model* model, uint32_t target_width, const lw_x64_rec_program* packed_source,
+    lw_x64_rec_program** out_program, lw_error* error);
 void lw_x64_rec_program_free(lw_x64_rec_program* program);
 void lw_x64_rec_program_retain(lw_x64_rec_program* program);
 lw_status lw_x64_rec_instance_create(const lw_x64_rec_program* program,

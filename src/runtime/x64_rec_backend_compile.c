@@ -107,6 +107,7 @@ static int add_constant(lw_x64_rec_program* program, void* data, uint64_t bytes)
     program->constants[program->packed_constant_count].data = data;
     program->constants[program->packed_constant_count].bytes = bytes;
     ++program->packed_constant_count;
+    program->owned_constant_bytes += bytes;
     return 1;
 }
 
@@ -119,6 +120,53 @@ static void* alloc_constant(lw_x64_rec_program* program, uint64_t bytes) {
         return NULL;
     }
     return data;
+}
+
+/* A width-specific op can borrow only a pack with the same semantic node and
+ * packing contract. The root stays alive through packed_source's reference. */
+static const lw_x64_rec_op* find_packed_source_op(const lw_x64_rec_program* program,
+                                                  uint32_t semantic_begin) {
+    const lw_x64_rec_program* source = program->packed_source;
+    uint32_t i;
+    if (source == NULL) return NULL;
+    for (i = 0u; i < source->op_count; ++i) {
+        if (source->ops[i].semantic_begin == semantic_begin) return &source->ops[i];
+    }
+    return NULL;
+}
+
+static void note_borrow(lw_x64_rec_program* program, uint64_t bytes) {
+    program->borrowed_constant_bytes += bytes;
+    ++program->borrowed_constant_count;
+}
+
+static const float* borrow_conv_pack(lw_x64_rec_program* program,
+                                     const lw_x64_rec_op* op, uint64_t bytes) {
+    const lw_x64_rec_op* source = find_packed_source_op(program, op->semantic_begin);
+    if (source == NULL || source->kind != op->kind ||
+        source->data.conv.packed_weights == NULL ||
+        source->data.conv.kernel_kind != op->data.conv.kernel_kind ||
+        source->data.conv.input_channels != op->data.conv.input_channels ||
+        source->data.conv.output_channels != op->data.conv.output_channels ||
+        source->data.conv.kernel_h != op->data.conv.kernel_h ||
+        source->data.conv.kernel_w != op->data.conv.kernel_w ||
+        source->data.conv.original_weights != op->data.conv.original_weights)
+        return NULL;
+    note_borrow(program, bytes);
+    return source->data.conv.packed_weights;
+}
+
+static const float* borrow_matmul_pack(lw_x64_rec_program* program,
+                                       const lw_x64_rec_op* op, uint64_t bytes) {
+    const lw_x64_rec_op* source = find_packed_source_op(program, op->semantic_begin);
+    if (source == NULL || source->kind != LW_X64_REC_OP_MATMUL ||
+        source->data.matmul.packed_weights == NULL ||
+        source->data.matmul.inner != op->data.matmul.inner ||
+        source->data.matmul.columns != op->data.matmul.columns ||
+        source->data.matmul.weights != op->data.matmul.weights)
+        return NULL;
+    note_borrow(program, bytes);
+    return source->data.matmul.packed_weights;
 }
 
 static int detect_ctc(const lw_model* model, const lw_session* session, lw_x64_rec_ctc_tail* tail) {
@@ -517,15 +565,18 @@ static lw_status compile_conv(const lw_model* model, const lw_session* session,
         lw_set_error(error, LW_STATUS_UNSUPPORTED, "Tiny REC Conv shape is not NHWC-lowerable");
         return LW_STATUS_UNSUPPORTED;
     }
-    packed = (float*)alloc_constant(program, count * sizeof(float));
-    if (packed == NULL) { lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "Conv packed weight allocation failed"); return LW_STATUS_OUT_OF_MEMORY; }
-    if (op->data.conv.kernel_kind == LW_X64_REC_CONV_DEPTHWISE)
-        lw_pack_nhwc_depthwise_f32(constant_f32(model, lwm_read_u32(node + 12u)), op->data.conv.input_channels, kh, kw, packed);
-    else
-        lw_pack_nhwc_dense_f32(constant_f32(model, lwm_read_u32(node + 12u)), op->data.conv.input_channels,
-                               op->data.conv.output_channels, kh, kw, packed);
-    op->data.conv.packed_weights = packed;
     op->data.conv.original_weights = constant_f32(model, lwm_read_u32(node + 12u));
+    packed = (float*)borrow_conv_pack(program, op, count * sizeof(float));
+    if (packed == NULL) {
+        packed = (float*)alloc_constant(program, count * sizeof(float));
+        if (packed == NULL) { lw_set_error(error, LW_STATUS_OUT_OF_MEMORY, "Conv packed weight allocation failed"); return LW_STATUS_OUT_OF_MEMORY; }
+        if (op->data.conv.kernel_kind == LW_X64_REC_CONV_DEPTHWISE)
+            lw_pack_nhwc_depthwise_f32(op->data.conv.original_weights, op->data.conv.input_channels, kh, kw, packed);
+        else
+            lw_pack_nhwc_dense_f32(op->data.conv.original_weights, op->data.conv.input_channels,
+                                   op->data.conv.output_channels, kh, kw, packed);
+    }
+    op->data.conv.packed_weights = packed;
     if (lwm_read_u16(node + 2u) >= 3u) op->data.conv.bias = constant_f32(model, lwm_read_u32(node + 16u));
     op->data.conv.scratch_bytes = 0u;
     if (op->kind == LW_X64_REC_OP_DENSE) {
@@ -571,12 +622,48 @@ static lw_status compile_node(const lw_model* model, const lw_session* session,
     case LW_OP_SQRT: op->kind = LW_X64_REC_OP_SQRT; break;
     case LW_OP_BATCH_NORMALIZATION: {
         uint32_t c = (uint32_t)input->dimensions[1];
-        float* mul = (float*)alloc_constant(program, (uint64_t)c * sizeof(float));
-        float* add = (float*)alloc_constant(program, (uint64_t)c * sizeof(float));
+        const float* scale = constant_f32(model, lwm_read_u32(node + 12u));
+        const float* bias = constant_f32(model, lwm_read_u32(node + 16u));
+        const float* mean = constant_f32(model, lwm_read_u32(node + 20u));
+        const float* variance = constant_f32(model, lwm_read_u32(node + 24u));
+        float epsilon = read_f32(params + 4u);
+        const lw_x64_rec_op* source = find_packed_source_op(program, node_index);
+        float* mul;
+        float* add;
         uint32_t j;
-        if (mul == NULL || add == NULL) return LW_STATUS_OUT_OF_MEMORY;
-        for (j = 0u; j < c; ++j) { float m = constant_f32(model,lwm_read_u32(node+12u))[j]; float b = constant_f32(model,lwm_read_u32(node+16u))[j]; float mean=constant_f32(model,lwm_read_u32(node+20u))[j]; float var=constant_f32(model,lwm_read_u32(node+24u))[j]; float scale=m/sqrtf(var+read_f32(params+4u)); mul[j]=scale; add[j]=b-mean*scale; }
-        op->kind = LW_X64_REC_OP_AFFINE; op->data.affine.input_offset=in_value->offset; op->data.affine.output_offset=out_value->offset; op->data.affine.mul=mul; op->data.affine.add=add; op->data.affine.scale=constant_f32(model,lwm_read_u32(node+12u)); op->data.affine.bias=constant_f32(model,lwm_read_u32(node+16u)); op->data.affine.mean=constant_f32(model,lwm_read_u32(node+20u)); op->data.affine.variance=constant_f32(model,lwm_read_u32(node+24u)); op->data.affine.epsilon=read_f32(params+4u); op->data.affine.channel_major=(uint8_t)(program->backend_layout == LW_X64_REC_BACKEND_NCHW || input->rank != 4u); op->data.affine.pixels=(uint32_t)(value_elements(in_value)/c); op->data.affine.channels=c; break;
+        if (source != NULL && source->kind == LW_X64_REC_OP_AFFINE &&
+            source->data.affine.channels == c && source->data.affine.epsilon == epsilon &&
+            source->data.affine.scale == scale && source->data.affine.bias == bias &&
+            source->data.affine.mean == mean && source->data.affine.variance == variance &&
+            source->data.affine.mul != NULL && source->data.affine.add != NULL) {
+            mul = (float*)source->data.affine.mul;
+            add = (float*)source->data.affine.add;
+            note_borrow(program, (uint64_t)c * sizeof(float));
+            note_borrow(program, (uint64_t)c * sizeof(float));
+        } else {
+            mul = (float*)alloc_constant(program, (uint64_t)c * sizeof(float));
+            add = (float*)alloc_constant(program, (uint64_t)c * sizeof(float));
+            if (mul == NULL || add == NULL) return LW_STATUS_OUT_OF_MEMORY;
+            for (j = 0u; j < c; ++j) {
+                float factor = scale[j] / sqrtf(variance[j] + epsilon);
+                mul[j] = factor;
+                add[j] = bias[j] - mean[j] * factor;
+            }
+        }
+        op->kind = LW_X64_REC_OP_AFFINE;
+        op->data.affine.input_offset = in_value->offset;
+        op->data.affine.output_offset = out_value->offset;
+        op->data.affine.mul = mul;
+        op->data.affine.add = add;
+        op->data.affine.scale = scale;
+        op->data.affine.bias = bias;
+        op->data.affine.mean = mean;
+        op->data.affine.variance = variance;
+        op->data.affine.epsilon = epsilon;
+        op->data.affine.channel_major = (uint8_t)(program->backend_layout == LW_X64_REC_BACKEND_NCHW || input->rank != 4u);
+        op->data.affine.pixels = (uint32_t)(value_elements(in_value) / c);
+        op->data.affine.channels = c;
+        break;
     }
     case LW_OP_ADD: case LW_OP_MUL: case LW_OP_DIV: case LW_OP_SUB: case LW_OP_POW:
         op->kind = semantic == LW_OP_ADD ? LW_X64_REC_OP_ADD : semantic == LW_OP_MUL ? LW_X64_REC_OP_MUL : semantic == LW_OP_DIV ? LW_X64_REC_OP_DIV : semantic == LW_OP_SUB ? LW_X64_REC_OP_SUB : semantic == LW_OP_POW ? LW_X64_REC_OP_POW : LW_X64_REC_OP_GENERIC_UNSUPPORTED; op->data.binary.operation=semantic; op->data.binary.element_count=elements; op->data.binary.output_offset=out_value->offset; op->data.binary.left_offset=program->values[input_index].offset; op->data.binary.left_constant=program->values[input_index].constant_data; op->data.binary.right_offset=program->values[lwm_read_u32(node+12u)].offset; op->data.binary.right_constant=program->values[lwm_read_u32(node+12u)].constant_data; op->data.binary.broadcast_kind=(program->values[lwm_read_u32(node+12u)].bytes==sizeof(float))?LW_X64_REC_BROADCAST_RIGHT_SCALAR:program->values[lwm_read_u32(node+12u)].bytes==out_value->bytes?LW_X64_REC_BROADCAST_SAME:((program->values[lwm_read_u32(node+12u)].bytes == (uint64_t)rec_binary_channel_extent(model, session, out_value, lwm_read_u32(node + 40u)) * sizeof(float))?LW_X64_REC_BROADCAST_RIGHT_CHANNEL:((program->values[input_index].bytes == (uint64_t)rec_binary_channel_extent(model, session, out_value, lwm_read_u32(node + 40u)) * sizeof(float))?LW_X64_REC_BROADCAST_LEFT_CHANNEL:LW_X64_REC_BROADCAST_GENERAL)); memcpy(op->data.binary.dimensions, out_value->dimensions, sizeof(op->data.binary.dimensions)); op->data.binary.channels = rec_binary_channel_extent(model, session, out_value, lwm_read_u32(node + 40u)); op->data.binary.pixels = op->data.binary.channels != 0u ? (uint32_t)(elements / op->data.binary.channels) : 0u;
@@ -705,10 +792,13 @@ static lw_status compile_node(const lw_model* model, const lw_session* session,
             out_tensor->dimensions[out_tensor->rank - 1u] == (int32_t)op->data.matmul.columns &&
             lw_packed_matmul_weight_count(op->data.matmul.inner, op->data.matmul.columns, &count);
         if (packable) {
-            op->data.matmul.packed_weights = (float*)alloc_constant(program, count * sizeof(float));
-            if (op->data.matmul.packed_weights == NULL) return LW_STATUS_OUT_OF_MEMORY;
-            lw_pack_matmul_weights_f32(op->data.matmul.weights, op->data.matmul.inner,
-                                       op->data.matmul.columns, op->data.matmul.packed_weights);
+            op->data.matmul.packed_weights = (float*)borrow_matmul_pack(program, op, count * sizeof(float));
+            if (op->data.matmul.packed_weights == NULL) {
+                op->data.matmul.packed_weights = (float*)alloc_constant(program, count * sizeof(float));
+                if (op->data.matmul.packed_weights == NULL) return LW_STATUS_OUT_OF_MEMORY;
+                lw_pack_matmul_weights_f32(op->data.matmul.weights, op->data.matmul.inner,
+                                           op->data.matmul.columns, op->data.matmul.packed_weights);
+            }
         } else {
             op->data.matmul.general = 1u;
         }
@@ -914,6 +1004,9 @@ static void reset_lowering(lw_x64_rec_program* program, uint32_t limit) {
     free(program->constants);
     program->constants = NULL;
     program->packed_constant_count = 0u;
+    program->owned_constant_bytes = 0u;
+    program->borrowed_constant_bytes = 0u;
+    program->borrowed_constant_count = 0u;
     memset(program->ops, 0, (size_t)limit * sizeof(*program->ops));
     program->op_count = 0u;
     program->semantic_consumed = 0u;
@@ -926,13 +1019,21 @@ static lw_x64_rec_compile_result lower_ops(const lw_model* model, const lw_sessi
                                            lw_x64_rec_program* program, uint32_t limit,
                                            lw_error* error);
 
-lw_x64_rec_compile_result lw_x64_rec_backend_compile_input(const lw_model* model, uint32_t input_height,
-                                                          uint32_t target_width,
-                                                          lw_x64_rec_compile_strategy strategy,
-                                                          uint32_t allow_ctc_tail,
-                                                          lw_x64_rec_program** out_program, lw_error* error) {
+static lw_x64_rec_compile_result rec_backend_compile_input_impl(const lw_model* model, uint32_t input_height,
+                                                                 uint32_t target_width,
+                                                                 lw_x64_rec_compile_strategy strategy,
+                                                                 uint32_t allow_ctc_tail,
+                                                                 const lw_x64_rec_program* packed_source,
+                                                                 lw_x64_rec_program** out_program, lw_error* error) {
     lw_session* session=NULL; lw_x64_rec_program* program=NULL; lw_model_info info; lw_status status; uint32_t i, limit; lw_x64_rec_compile_result lowered;
-    if(out_program==NULL||model==NULL||target_width==0u||target_width>INT32_MAX||input_height==0u||input_height>INT32_MAX){lw_set_error(error,LW_STATUS_INVALID_ARGUMENT,"REC backend arguments are invalid");return LW_X64_REC_COMPILE_INVALID_GRAPH;} *out_program=NULL; lw_model_info_init(&info); status=lw_model_get_info(model,&info); if(status!=LW_STATUS_OK)return LW_X64_REC_COMPILE_INVALID_GRAPH; status=make_shape_session(model,input_height,target_width,&session,error); if(status!=LW_STATUS_OK)return status==LW_STATUS_OUT_OF_MEMORY?LW_X64_REC_COMPILE_OUT_OF_MEMORY:LW_X64_REC_COMPILE_INVALID_GRAPH; program=(lw_x64_rec_program*)calloc(1u,sizeof(*program)); if(program==NULL){lw_session_free(session);lw_set_error(error,LW_STATUS_OUT_OF_MEMORY,"REC program allocation failed");return LW_X64_REC_COMPILE_OUT_OF_MEMORY;} program->model=model;program->cpu=lw_get_cpu_capabilities();program->model_signature=info.content_checksum;program->target_width=target_width;program->backend_layout=(uint8_t)strategy;program->value_count=info.tensor_count;program->direct_nhwc=(uint8_t)(strategy == LW_X64_REC_COMPILE_NHWC); if(!rec_backend_cpu_supported(program->cpu)){lw_session_free(session);lw_x64_rec_program_free(program);lw_set_error(error,LW_STATUS_UNSUPPORTED,"REC compiled backend requires a supported SIMD target");return LW_X64_REC_COMPILE_UNSUPPORTED;} program->ctc_fused=(allow_ctc_tail!=0u&&detect_ctc(model,session,&program->ctc))?1u:0u; limit=program->ctc_fused?info.node_count-3u:info.node_count; program->ops=(lw_x64_rec_op*)calloc(limit,sizeof(*program->ops));program->values=(lw_x64_rec_value*)calloc(program->value_count,sizeof(*program->values));if(program->ops==NULL||program->values==NULL){lw_session_free(session);lw_x64_rec_program_free(program);lw_set_error(error,LW_STATUS_OUT_OF_MEMORY,"REC program tables allocation failed");return LW_X64_REC_COMPILE_OUT_OF_MEMORY;}
+    if(out_program==NULL||model==NULL||target_width==0u||target_width>INT32_MAX||input_height==0u||input_height>INT32_MAX){lw_set_error(error,LW_STATUS_INVALID_ARGUMENT,"REC backend arguments are invalid");return LW_X64_REC_COMPILE_INVALID_GRAPH;} *out_program=NULL;
+    if (packed_source != NULL && (packed_source->model != model || packed_source->backend_layout != (uint8_t)strategy || packed_source->packed_source != NULL || packed_source->ops == NULL)) {
+        lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "REC packed source is incompatible");
+        return LW_X64_REC_COMPILE_INVALID_GRAPH;
+    }
+    lw_model_info_init(&info); status=lw_model_get_info(model,&info); if(status!=LW_STATUS_OK)return LW_X64_REC_COMPILE_INVALID_GRAPH; status=make_shape_session(model,input_height,target_width,&session,error); if(status!=LW_STATUS_OK)return status==LW_STATUS_OUT_OF_MEMORY?LW_X64_REC_COMPILE_OUT_OF_MEMORY:LW_X64_REC_COMPILE_INVALID_GRAPH; program=(lw_x64_rec_program*)calloc(1u,sizeof(*program)); if(program==NULL){lw_session_free(session);lw_set_error(error,LW_STATUS_OUT_OF_MEMORY,"REC program allocation failed");return LW_X64_REC_COMPILE_OUT_OF_MEMORY;} program->model=model;program->cpu=lw_get_cpu_capabilities();program->model_signature=info.content_checksum;program->target_width=target_width;program->backend_layout=(uint8_t)strategy;program->value_count=info.tensor_count;program->direct_nhwc=(uint8_t)(strategy == LW_X64_REC_COMPILE_NHWC);
+    if (packed_source != NULL) { program->packed_source = packed_source; lw_x64_rec_program_retain((lw_x64_rec_program*)packed_source); }
+    if(!rec_backend_cpu_supported(program->cpu)){lw_session_free(session);lw_x64_rec_program_free(program);lw_set_error(error,LW_STATUS_UNSUPPORTED,"REC compiled backend requires a supported SIMD target");return LW_X64_REC_COMPILE_UNSUPPORTED;} program->ctc_fused=(allow_ctc_tail!=0u&&detect_ctc(model,session,&program->ctc))?1u:0u; limit=program->ctc_fused?info.node_count-3u:info.node_count; program->ops=(lw_x64_rec_op*)calloc(limit,sizeof(*program->ops));program->values=(lw_x64_rec_value*)calloc(program->value_count,sizeof(*program->values));if(program->ops==NULL||program->values==NULL){lw_session_free(session);lw_x64_rec_program_free(program);lw_set_error(error,LW_STATUS_OUT_OF_MEMORY,"REC program tables allocation failed");return LW_X64_REC_COMPILE_OUT_OF_MEMORY;}
     for(i=0u;i<program->value_count;++i){fill_value(session,i,&program->values[i],strategy);if((session->tensors[i].flags&LWM_V0_TENSOR_FLAG_INPUT)!=0u)program->input_value=i;}
     lowered=lower_ops(model,session,program,limit,error);
     if(lowered!=LW_X64_REC_COMPILE_OK){lw_session_free(session);lw_x64_rec_program_free(program);return lowered;}
@@ -941,8 +1042,25 @@ lw_x64_rec_compile_result lw_x64_rec_backend_compile_input(const lw_model* model
     reset_lowering(program,limit);
     lowered=lower_ops(model,session,program,limit,error);
     if(lowered!=LW_X64_REC_COMPILE_OK){lw_session_free(session);lw_x64_rec_program_free(program);return lowered;}
-    program->semantic_consumed+=program->semantic_elided; if(program->ctc_fused){status=lw_x64_rec_ctc_prepare(model,session,&program->ctc,error);if(status!=LW_STATUS_OK){lw_session_free(session);lw_x64_rec_program_free(program);return status==LW_STATUS_OUT_OF_MEMORY?LW_X64_REC_COMPILE_OUT_OF_MEMORY:LW_X64_REC_COMPILE_INVALID_GRAPH;}}
+    program->semantic_consumed+=program->semantic_elided; if(program->ctc_fused){
+        uint64_t ctc_count = 0u;
+        status=lw_x64_rec_ctc_prepare_shared(model,session,packed_source == NULL ? NULL : &packed_source->ctc,&program->ctc,error);
+        if(status!=LW_STATUS_OK){lw_session_free(session);lw_x64_rec_program_free(program);return status==LW_STATUS_OUT_OF_MEMORY?LW_X64_REC_COMPILE_OUT_OF_MEMORY:LW_X64_REC_COMPILE_INVALID_GRAPH;}
+        if (lw_packed_matmul_weight_count(program->ctc.inner, program->ctc.classes, &ctc_count)) {
+            if (program->ctc.packed_weights_borrowed != 0u) note_borrow(program, ctc_count * sizeof(float));
+            else program->owned_constant_bytes += ctc_count * sizeof(float);
+        }
+    }
     program->class_count=program->ctc.classes;program->time_steps=program->ctc.rows;program->output_value=info.output_count?lwm_read_u32(model->bytes+(size_t)model->output_offset):0u; if(program->arena_bytes==0u){lw_session_free(session);lw_x64_rec_program_free(program);lw_set_error(error,LW_STATUS_INVALID_SHAPE,"REC graph has no runtime arena");return LW_X64_REC_COMPILE_INVALID_GRAPH;} lw_session_free(session);lw_set_error(error,LW_STATUS_OK,"");*out_program=program;return LW_X64_REC_COMPILE_OK;
+}
+
+lw_x64_rec_compile_result lw_x64_rec_backend_compile_input(const lw_model* model, uint32_t input_height,
+                                                          uint32_t target_width,
+                                                          lw_x64_rec_compile_strategy strategy,
+                                                          uint32_t allow_ctc_tail,
+                                                          lw_x64_rec_program** out_program, lw_error* error) {
+    return rec_backend_compile_input_impl(model, input_height, target_width, strategy,
+                                          allow_ctc_tail, NULL, out_program, error);
 }
 
 /* Lower semantic nodes into the physical op table. Runs twice: the first pass
@@ -1075,6 +1193,19 @@ lw_x64_rec_compile_result lw_x64_rec_backend_compile(
                                             LW_X64_REC_COMPILE_NHWC, 1u, out_program, error);
 }
 
+lw_x64_rec_compile_result lw_x64_rec_backend_compile_shared(
+    const lw_model* model, uint32_t target_width, const lw_x64_rec_program* packed_source,
+    lw_x64_rec_program** out_program, lw_error* error) {
+    if (packed_source == NULL) {
+        if (out_program != NULL) *out_program = NULL;
+        lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "REC packed source is null");
+        return LW_X64_REC_COMPILE_INVALID_GRAPH;
+    }
+    return rec_backend_compile_input_impl(model, 48u, target_width,
+                                          LW_X64_REC_COMPILE_NHWC, 1u, packed_source,
+                                          out_program, error);
+}
+
 void lw_x64_rec_program_retain(lw_x64_rec_program* program) {
     uint32_t current;
     if (program == NULL) return;
@@ -1087,16 +1218,19 @@ void lw_x64_rec_program_retain(lw_x64_rec_program* program) {
 void lw_x64_rec_program_free(lw_x64_rec_program* program) {
     uint32_t current;
     uint32_t i;
+    const lw_x64_rec_program* packed_source;
     if (program == NULL) return;
     current = lw_atomic_u32_load_acquire(&program->shared_refs);
     while (current != 0u) {
         if (lw_atomic_u32_compare_exchange_acq_rel(&program->shared_refs, &current,
                                                    current - 1u)) return;
     }
+    packed_source = program->packed_source;
     lw_x64_rec_ctc_free(&program->ctc);
     for (i = 0u; i < program->packed_constant_count; ++i) free(program->constants[i].data);
     free(program->constants);
     free(program->ops);
     free(program->values);
     free(program);
+    lw_x64_rec_program_free((lw_x64_rec_program*)packed_source);
 }

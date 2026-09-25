@@ -1,6 +1,6 @@
 # x64 REC Backend
 
-这是实验性的 x64 REC 后端，不属于公开 C ABI。当前在 `LW_EXPERIMENTAL_AVX2_FAST_PATH=ON` 且 CPU 支持 AVX2+FMA 时，recognizer 会为不超过配置上限的 192/320/480/640/960 宽度准备 compiled slot；不满足编译契约的宽度继续走 canonical executor。其他平台不受影响。
+这是实验性的 x64 REC 后端，不属于公开 C ABI。当前在 `LW_EXPERIMENTAL_AVX2_FAST_PATH=ON` 且 CPU 支持 AVX2+FMA 时，recognizer 会为不超过配置上限的 192/320/480/640/960 宽度准备 compiled slot；不满足编译契约的宽度继续走 canonical executor。其他平台不受影响。下文较早的 Tiny/Hybrid 调优记录是历史记录；当前跨宽度共享方案和测量结果见文末。
 
 ## 当前状态
 
@@ -22,9 +22,9 @@ Tiny REC 已完成 192/320/480/640/960 五宽度的 standalone 与 recognizer �
 
 该 backend 仍是实验性实现：
 
-- x64 AVX2+FMA 的 Tiny REC 已接入五个自适应宽度；Small/Medium 模型和非 x64 compiled 后端尚未宣称覆盖；
+- 当前 x64 AVX2+FMA 的 Tiny、Small、Medium REC 已接入五个自适应宽度；非 x64 compiled 后端依各平台构建选项决定；
 - 输入 API 当前要求调用方提供已经排布为 NHWC 的 `float` 输入，输出通过 program 的值表和 CTC 缓冲区读取；
-- Tiny REC960 的当前实例 arena 为 3,317,760 字节；跨宽度 packed constants 尚未共享，五宽度各自保留一份 program；
+- 五宽度保留各自的 physical ops 和 arena offset，但宽度无关的 packed constants 由最大宽度 Program 持有，其余宽度借用；runtime workspace 仍按现有策略共享；
 - GELU fusion、Concat/Resize 等非 Tiny REC960 必需路径暂不宣称覆盖。
 
 ## 构建与测试
@@ -61,3 +61,22 @@ build/Release/x64-rec-backend-benchmark-driver.exe build/models/rec.lwm 30
 ```
 
 当前 Windows x64 本地基线（30 次测量，结果会随 CPU 和负载变化）约为：canonical REC 19.6 ms、standalone backend 35.8 ms，`speedup=0.55x`、`text_match=true`；backend backbone 中 pointwise 约 20.7 ms、dense 约 1.2 ms，首层 Dense 尾块已从 scalar fallback 转为 AVX2 写回。正式输出的 `pointwise_fallbacks`、`dense_fallbacks`、`depthwise_fallbacks` 和 `scalar_conv_fallbacks` 均为 0。该数字是开发剖面，不是公开性能承诺。Dense 当前使用 KC=512；prepared offsets 的本地 A/B 为负优化，未接入 production path。正式 A/B 仍显示 backend 尚未超过 canonical，因此在完成剩余 pointwise/非卷积热点优化前不扩大模型或宽度覆盖。
+
+## 2026-09：五宽度 packed constants 共享
+
+最大可用标准宽度（通常 960）的 Program 独立打包 immutable constants；其余宽度保留自己的 op/value 表和 arena 规划，按 semantic node 与打包契约匹配后借用 Conv、可打包 MatMul、BatchNorm 派生数组和 CTC projection。借用者 retain root Program；释放顺序和 worker clone 不会使指针悬空。匹配失败时该常量独立打包，shared 编译整体失败时回退到独立编译。完整标准宽度覆盖时，Medium 不再额外建立未使用的 hybrid packed template；非标准上限或覆盖不全仍尝试原有 fallback。
+
+内部诊断可设置 `LW_REC_MEMORY_PROFILE=1`，输出各宽度的 `owned`、`borrowed` 字节及借用次数，并报告 shared arena/scratch/CTC workspace 和 Medium hybrid 是否存在。这些字节数只统计 compiled 常量，不等于进程工作集。`x64_rec_shared_constants` 在 Tiny 五宽度比较独立/共享执行结果、借用指针、内存统计和 root 先释放后的生命周期；同一驱动也已本地通过 Small、Medium 模型。
+
+在同一 Windows x64 主机，使用修改前 `d257646` 与本次代码、同一 500×500 样例及同一模型文件，固定 REC 960，每次新进程预热 1 次、计时 3 次，交替顺序做 3 轮配对。下表为每版本的耗时中位数和峰值工作集中位数；配对耗时变化按每轮新/旧比值取中位数。短测只用于本次回归判断，不作为跨机器性能承诺。
+
+| 模型 | Worker | 旧版 ms | 新版 ms | 配对耗时变化 | 旧版峰值 MiB | 新版峰值 MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Tiny | 1 | 113.137 | 112.679 | -0.4% | 100.7 | 84.3 |
+| Tiny | 4 | 53.531 | 54.085 | +1.0% | 118.2 | 100.6 |
+| Small | 1 | 372.936 | 375.913 | +0.8% | 274.9 | 198.5 |
+| Small | 4 | 219.001 | 217.741 | -0.6% | 312.0 | 233.8 |
+| Medium | 1 | 1214.548 | 1217.170 | +0.6% | 1078.6 | 744.8 |
+| Medium | 4 | 961.974 | 979.303 | +0.4% | 1100.2 | 763.2 |
+
+各模型的新旧输出 checksum 完全相同（Tiny `46d99468540b5eb7`、Small `2ee4a78f9306c18b`、Medium `12aff0763cbd432b`）。五宽度 compiled 常量总量在 Tiny 为 21,660,160→4,332,032 字节，Small 为 100,255,360→20,051,072 字节，Medium 为 363,563,520→72,712,704 字节；Medium 的 192/320/480/640 每个宽度借用 72,712,704 字节、自己持有 0 字节，960 root 持有 72,712,704 字节。此处仅计算常量，不包括模型、canonical session、program metadata 和 runtime workspace。
