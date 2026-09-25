@@ -99,24 +99,25 @@ targeted x64 optimization.
 
 ### Performance snapshot
 
-A local Windows x64 Release build at `ce8497c` measured native full OCR on the
-bundled 500×500 test image with maximum `REC target_width = 960` (adaptive
-widths up to 960). The host was an AMD Ryzen 7 7735H (8 cores/16 threads),
-Windows 10, with 15.24 GiB RAM; the selected backend was AVX2. Each case used
-two warm-ups, five measured calls, and three fresh-process runs. The table
-reports medians of the per-process OCR means and peak working sets:
+A local Windows x64 Release build with compiled REC packed-constant sharing
+(introduced in `ac59a3b`) measured native full OCR on the bundled 500×500 test
+image with maximum `REC target_width = 960` (adaptive widths up to 960). The
+host was an AMD Ryzen 7 7735H (8 cores/16 threads), Windows 10, with 15.24 GiB
+RAM; the selected backend was AVX2. Each case used one warm-up, three measured
+calls, and three fresh-process runs. The table reports medians of the
+per-process OCR means and peak working sets:
 
 | Model | 1 worker | 4 workers | Peak WS, 1 worker | Peak WS, 4 workers |
 |---|---:|---:|---:|---:|
-| Tiny | 111.32 ms | 54.86 ms | 100.7 MiB | 118.3 MiB |
-| Small | 373.19 ms | 215.39 ms | 274.9 MiB | 312.0 MiB |
-| Medium | 1,275.58 ms | 1,013.85 ms | 1,078.5 MiB | 1,100.3 MiB |
+| Tiny | 112.68 ms | 54.09 ms | 84.3 MiB | 100.6 MiB |
+| Small | 375.91 ms | 217.74 ms | 198.5 MiB | 233.8 MiB |
+| Medium | 1,217.17 ms | 979.30 ms | 744.8 MiB | 763.2 MiB |
 
 Peak WS includes model initialization and the benchmark's standalone detector
 handle. All cases returned 16 lines with stable text checksums for each model.
 These are local measurements, not portable latency or memory guarantees. The
-[local configuration and reproduction steps](docs/performance-baseline.md#local-three-model-full-ocr-snapshot-2026-09-25)
-include a note about Medium run-to-run variation; the separate
+[local configuration and paired measurements](docs/performance-baseline.md#compiled-rec-packed-constant-sharing-snapshot-2026-09-25)
+include the exact pre-change comparison; the separate
 [paired x64 CI comparison](https://github.com/lxw112190/lw.PPOCR.C/actions/runs/36099882256)
 is available for release-to-candidate comparisons.
 DET uses a separate CPU-topology-aware intra-op budget, capped at eight

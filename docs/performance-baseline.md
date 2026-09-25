@@ -60,10 +60,42 @@ The four-worker configuration reduced complete OCR latency by 58.51% and ran
 2.41x as fast as one worker on this host. This is a local engineering result,
 not a portable latency guarantee.
 
-## Local three-model full OCR snapshot (2026-09-25)
+## Compiled REC packed-constant sharing snapshot (2026-09-25)
 
-This is the local source-build snapshot used in both READMEs, not a comparison
-against a different CPU. Revision: `ce8497cbb51ec0e5307760f684f52138f015c890`.
+This is the current three-model README snapshot. An exact pre-change checkout
+at `d257646` and the packed-constant-sharing changes introduced in `ac59a3b`
+were built on the same Windows x64 host with the same Release AVX2 options,
+including `LW_EXPERIMENTAL_AVX2_FAST_PATH=ON`, `LW_REC_RESIDENT_WIDTHS=ON`, and
+`LW_AVX2_FMA_CONV3X3_DISPATCH=ON`. For each model, both revisions used the same
+converted assets and dictionary, plus the bundled 500×500/16-line PPM; maximum
+REC width was 960, with one warm-up,
+three measured OCR calls per fresh process, and three paired rounds with
+alternating run order. The table shows each revision's median process mean
+and median peak working set; the old/new ratio is evaluated within each round.
+
+| Model | Workers | Before mean | Current mean | Before peak WS | Current peak WS |
+|---|---:|---:|---:|---:|---:|
+| Tiny | 1 | 113.14 ms | 112.68 ms | 100.7 MiB | 84.3 MiB |
+| Tiny | 4 | 53.53 ms | 54.09 ms | 118.2 MiB | 100.6 MiB |
+| Small | 1 | 372.94 ms | 375.91 ms | 274.9 MiB | 198.5 MiB |
+| Small | 4 | 219.00 ms | 217.74 ms | 312.0 MiB | 233.8 MiB |
+| Medium | 1 | 1,214.55 ms | 1,217.17 ms | 1,078.6 MiB | 744.8 MiB |
+| Medium | 4 | 961.97 ms | 979.30 ms | 1,100.2 MiB | 763.2 MiB |
+
+All paired runs returned the same model-specific text checksum before and
+after the change: Tiny `46d99468540b5eb7`, Small `2ee4a78f9306c18b`, and
+Medium `12aff0763cbd432b`. The median paired latency change for every case
+was within ±2%; peak WS includes initialization and the benchmark's separate
+detector handle. The root/borrower constant byte counts, test coverage and
+remaining canonical-memory scope are documented in
+[x64 REC backend](x64-rec-backend.md#2026-09五宽度-packed-constants-共享).
+These are local engineering measurements, not cross-host performance promises.
+
+## Previous local three-model full OCR snapshot (2026-09-25)
+
+This is the earlier local source-build snapshot, retained as historical data;
+both READMEs now show the compiled-constant-sharing result above. Revision:
+`ce8497cbb51ec0e5307760f684f52138f015c890`.
 The same bundled 500×500/16-line PPM was used for Tiny, Small, and Medium;
 SHA-256: `a694ab9def7845b53470aab9f3b819d6469a7b652f820fa30799d918cede4743`.
 Small and Medium use the shared Tiny CLS model and
