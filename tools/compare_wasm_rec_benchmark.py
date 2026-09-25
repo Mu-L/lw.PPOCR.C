@@ -33,6 +33,8 @@ def main() -> int:
     canonical, scalar, simd = runs.values()
     issues = []
     for name, run in runs.items():
+        if run.get("use_cls") is not True:
+            issues.append(f"{name}: benchmark must enable CLS for the Tiny golden")
         lines = run.get("text_lines")
         if not isinstance(lines, list) or not all(isinstance(line, str) for line in lines):
             issues.append(f"{name}: missing OCR text lines")
@@ -54,7 +56,7 @@ def main() -> int:
     print("## WASM full OCR: canonical / compiled scalar / compiled SIMD128")
     print()
     print(f"Sample SHA-256: `{canonical['sample_sha256']}`. "
-          "Same runner, models, PPM input, warm-up and measured iterations.")
+          "CLS enabled; same runner, models, PPM input, warm-up and measured iterations.")
     print()
     print("| Metric | Canonical | Compiled scalar | Compiled SIMD128 |")
     print("| --- | ---: | ---: | ---: |")

@@ -28,7 +28,8 @@ async function main() {
   const image = readPpm(sample);
   const sampleSha = crypto.createHash("sha256").update(fs.readFileSync(sample)).digest("hex");
   const manifest = verifyPackage(root);
-  const engine = await createRuntime(root, false);
+  // The checked-in Tiny Web/Node golden is captured with CLS enabled.
+  const engine = await createRuntime(root, true);
   let peakRss = process.memoryUsage().rss;
   try {
     let lines = runOcr(engine, image); // warm the physical program and heap
@@ -53,6 +54,7 @@ async function main() {
     console.log(JSON.stringify({
       schema_version: 1,
       wasm_backend: manifest.runtime.backend,
+      use_cls: true,
       sample_sha256: sampleSha,
       iterations,
       median_ms: timings[Math.floor(timings.length / 2)],

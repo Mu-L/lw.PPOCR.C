@@ -13,7 +13,8 @@ SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "compare_wasm_rec_bench
 
 
 class WasmBenchmarkReportTest(unittest.TestCase):
-    def run_report(self, simd_lines: list[str], expected_override: str | None = None
+    def run_report(self, simd_lines: list[str], expected_override: str | None = None,
+                   use_cls: bool = True
                    ) -> subprocess.CompletedProcess[str]:
         canonical_lines = ["识别结果", "OCR"]
         expected = hashlib.sha256("\n".join(canonical_lines).encode()).hexdigest()
@@ -29,6 +30,7 @@ class WasmBenchmarkReportTest(unittest.TestCase):
                 path = Path(temporary) / f"{name}.json"
                 path.write_text(json.dumps({
                     "schema_version": 1,
+                    "use_cls": use_cls,
                     "sample_sha256": "fixture",
                     "line_count": len(lines),
                     "text_sha256": hashlib.sha256("\n".join(lines).encode()).hexdigest(),
@@ -68,6 +70,12 @@ class WasmBenchmarkReportTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("Median OCR latency", result.stdout)
         self.assertIn("Canonical: OCR text differs from the checked-in golden", result.stdout)
+
+    def test_cls_disabled_cannot_claim_golden_parity(self) -> None:
+        result = self.run_report(["识别结果", "OCR"], use_cls=False)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("benchmark must enable CLS", result.stdout)
+        self.assertIn("Median OCR latency", result.stdout)
 
 
 if __name__ == "__main__":

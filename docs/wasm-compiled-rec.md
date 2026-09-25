@@ -30,7 +30,8 @@ canonical vs compiled and compiled scalar vs compiled SIMD128 on the same
 runner. To validate the experimental browser HTML and SDK too,
 manually run `browser-wasm-sdk-and-html` with `compiled_rec=true`. Five warmed
 full-OCR iterations per build use the same Tiny
-models and 500x500 PPM. All three runs must match the exact text checksum in
+models and 500x500 PPM with CLS enabled, matching the Web/Node Tiny golden
+configuration. All three runs must match the exact text checksum in
 `ci/web-ppocrv6-tiny.json`; timing and memory remain informational. The job
 summary and `wasm-compiled-rec-comparison-*` artifact contain the three-way
 measurements, including process RSS and WASM heap. The benchmark records all
