@@ -3,6 +3,7 @@
 
 #include "nhwc_internal.h"
 #include "simd_kernels.h"
+#include <stddef.h>
 
 #if defined(__EMSCRIPTEN__) && defined(__wasm_simd128__)
 #include <wasm_simd128.h>
