@@ -368,7 +368,12 @@ def main() -> int:
             timeout=180_000,
         )
         assert page.locator("#file").input_value() == ""
-        page.evaluate("URL.createObjectURL = window.__savedCreateObjectURL")
+        page.evaluate(
+            """() => {
+              URL.createObjectURL = window.__savedCreateObjectURL;
+              delete window.__savedCreateObjectURL;
+            }"""
+        )
         page.locator("#file").set_input_files(str(sample))
         page.wait_for_function(
             "() => window.__lwOcrTest.snapshot().sourceKind === 'image' && "
@@ -378,7 +383,12 @@ def main() -> int:
         assert page.locator("#canvas").evaluate(
             "canvas => canvas.width > 0 && canvas.getBoundingClientRect().width > 0"
         )
-        page.evaluate("window.createImageBitmap = window.__savedCreateImageBitmap")
+        page.evaluate(
+            """() => {
+              window.createImageBitmap = window.__savedCreateImageBitmap;
+              delete window.__savedCreateImageBitmap;
+            }"""
+        )
 
         # A plain-text paste must pass through untouched. An image paste must
         # be handled by the real document paste listener, load only the first
