@@ -7,6 +7,7 @@
  * is split across pool workers. */
 
 #include "parallel_internal.h"
+#include "rec_backend_kernels_internal.h"
 
 #include <stdint.h>
 
@@ -18,6 +19,7 @@ uint32_t lw_ctc_head_parallel_worker_count(const lw_thread_pool* pool,
                                            uint32_t inner_dimension, uint32_t columns);
 
 void lw_ctc_head_argmax_scores_parallel_f32(lw_thread_pool* pool, uint32_t worker_count,
+                                            lw_rec_ctc_argmax_scores_fn kernel,
                                             const float* input, const float* packed_weights,
                                             const float* bias, uint32_t* best_indices,
                                             float* scores, uint32_t rows,

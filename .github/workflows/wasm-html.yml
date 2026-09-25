@@ -146,32 +146,45 @@ jobs:
           --golden ci/web-ppocrv6-tiny.json
 
       - name: Compare compiled REC with canonical WASM full OCR
-        if: inputs.compiled_rec == true
+        if: github.event_name == 'push' || github.event_name == 'pull_request' || inputs.compiled_rec == true
         shell: bash
         run: |
           set -euo pipefail
-          emcmake cmake -S . -B build-wasm-canonical -G Ninja \
+          if [[ "${{ inputs.compiled_rec || false }}" == "true" ]]; then
+            canonical_package=build-wasm-canonical/node-wasm
+            compiled_package=build-wasm/node-wasm
+            extra_build=build-wasm-canonical
+            extra_compiled=OFF
+          else
+            canonical_package=build-wasm/node-wasm
+            compiled_package=build-wasm-compiled/node-wasm
+            extra_build=build-wasm-compiled
+            extra_compiled=ON
+          fi
+          emcmake cmake -S . -B "${extra_build}" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DLW_BUILD_HTTP_DEMO=OFF \
             -DLW_BUILD_CSHARP_DEMOS=OFF \
             -DBUILD_TESTING=OFF \
             -DLW_WEB_PDF=OFF \
-            -DLW_WASM_COMPILED_REC=OFF
-          cmake --build build-wasm-canonical --target lw-node-wasm-package --parallel
+            -DLW_WASM_COMPILED_REC="${extra_compiled}"
+          cmake --build "${extra_build}" --target lw-node-wasm-package --parallel
           expected_text_sha256="$(node -p "require('./ci/web-ppocrv6-tiny.json').expected_text_sha256")"
           node tests/node/benchmark.cjs \
-            --package build-wasm-canonical/node-wasm \
+            --package "${canonical_package}" \
             --sample build-wasm/models/sample.ppm \
             --expected-text-sha256 "${expected_text_sha256}" \
             --iterations 5 | tee build-wasm/rec-benchmark-canonical.json
           node tests/node/benchmark.cjs \
-            --package build-wasm/node-wasm \
+            --package "${compiled_package}" \
             --sample build-wasm/models/sample.ppm \
             --expected-text-sha256 "${expected_text_sha256}" \
             --iterations 5 2> build-wasm/rec-benchmark-compiled.log \
             | tee build-wasm/rec-benchmark-compiled.json
           cat build-wasm/rec-benchmark-compiled.log
           grep -q 'LW_WASM_COMPILED_REC widths=5/5' \
+            build-wasm/rec-benchmark-compiled.log
+          grep -q 'LW_WASM_COMPILED_REC ctc=simd128' \
             build-wasm/rec-benchmark-compiled.log
           python tools/compare_wasm_rec_benchmark.py \
             --canonical build-wasm/rec-benchmark-canonical.json \
@@ -264,7 +277,7 @@ jobs:
           retention-days: 14
 
       - name: Upload compiled REC comparison
-        if: inputs.compiled_rec == true
+        if: always() && (github.event_name == 'push' || github.event_name == 'pull_request' || inputs.compiled_rec == true)
         uses: actions/upload-artifact@v7
         with:
           name: wasm-compiled-rec-comparison-${{ github.sha }}
@@ -273,7 +286,7 @@ jobs:
             build-wasm/rec-benchmark-compiled.json
             build-wasm/rec-benchmark-compiled.log
             build-wasm/rec-benchmark-summary.md
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload Node regression fixture

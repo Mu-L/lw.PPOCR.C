@@ -1,11 +1,15 @@
 #include "ctc_projection_internal.h"
 #include "ctc_head_parallel_internal.h"
 #include "packed_matmul_internal.h"
+#include "rec_backend_kernels_internal.h"
 #include "../simd/simd_kernels.h"
 #include "lwm_read.h"
 
 #include <stdlib.h>
 #include <string.h>
+#if defined(__EMSCRIPTEN__)
+#include <stdio.h>
+#endif
 
 static const float* constant_f32(const lw_model* model, uint32_t index) {
     const uint8_t* tensor = model->bytes + (size_t)model->tensor_offset +
@@ -57,18 +61,29 @@ lw_status lw_x64_rec_ctc_execute(const lw_x64_rec_program* program,
      * of logits per emitted step.  Rows are independent, so the argmax pass
      * may fan out over the borrowed intra-op pool bit-identically. */
     {
+        const lw_rec_backend_kernels* kernels = lw_rec_backend_kernels_current();
         uint32_t head_workers = lw_ctc_head_parallel_worker_count(
             instance->thread_pool, instance->intra_op_workers, program->ctc.rows,
             program->ctc.inner, program->ctc.classes);
         lw_ctc_head_argmax_scores_parallel_f32(
-            instance->thread_pool, head_workers, activation, program->ctc.packed_weights,
+            instance->thread_pool, head_workers, kernels->ctc_argmax_scores,
+            activation, program->ctc.packed_weights,
             program->ctc.bias, instance->best_indices, instance->ctc_scores, program->ctc.rows,
             program->ctc.inner, program->ctc.classes);
+        kernels->ctc_probabilities(
+            activation, program->ctc.packed_weights, program->ctc.bias,
+            instance->best_indices, instance->ctc_scores, instance->best_probabilities,
+            program->ctc.rows, program->ctc.inner, program->ctc.classes);
+#if defined(__EMSCRIPTEN__)
+        {
+            static int reported = 0;
+            if (!reported) {
+                fprintf(stderr, "LW_WASM_COMPILED_REC ctc=simd128\n");
+                reported = 1;
+            }
+        }
+#endif
     }
-    lw_avx2_ctc_row_probabilities_f32(
-        activation, program->ctc.packed_weights, program->ctc.bias,
-        instance->best_indices, instance->ctc_scores, instance->best_probabilities,
-        program->ctc.rows, program->ctc.inner, program->ctc.classes);
     lw_set_error(error, LW_STATUS_OK, "");
     return LW_STATUS_OK;
 }

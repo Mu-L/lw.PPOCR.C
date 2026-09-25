@@ -41,6 +41,7 @@ static uint32_t row_range_begin(uint32_t rows, uint32_t worker_count, uint32_t w
 }
 
 typedef struct lw_ctc_head_argmax_context {
+    lw_rec_ctc_argmax_scores_fn kernel;
     const float* input;
     const float* packed_weights;
     const float* bias;
@@ -61,24 +62,26 @@ static void execute_argmax_scores_rows(void* context_void, uint32_t worker_index
     }
     /* Rows are independent and each output element accumulates in the serial
      * kernel's order, so the row split is bit-identical. */
-    lw_avx2_fma_packed_matmul_argmax_scores_f32(
+    context->kernel(
         context->input + (size_t)row_begin * context->inner_dimension,
         context->packed_weights, context->bias, context->best_indices + row_begin,
-        context->scores + row_begin, 1u, row_end - row_begin, context->inner_dimension,
+        context->scores + row_begin, row_end - row_begin, context->inner_dimension,
         context->columns);
 }
 
 void lw_ctc_head_argmax_scores_parallel_f32(lw_thread_pool* pool, uint32_t worker_count,
+                                            lw_rec_ctc_argmax_scores_fn kernel,
                                             const float* input, const float* packed_weights,
                                             const float* bias, uint32_t* best_indices,
                                             float* scores, uint32_t rows,
                                             uint32_t inner_dimension, uint32_t columns) {
     lw_ctc_head_argmax_context context;
     if (pool == NULL || worker_count <= 1u) {
-        lw_avx2_fma_packed_matmul_argmax_scores_f32(input, packed_weights, bias, best_indices,
-                                                    scores, 1u, rows, inner_dimension, columns);
+        kernel(input, packed_weights, bias, best_indices, scores, rows,
+               inner_dimension, columns);
         return;
     }
+    context.kernel = kernel;
     context.input = input;
     context.packed_weights = packed_weights;
     context.bias = bias;

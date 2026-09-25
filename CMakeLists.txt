@@ -347,7 +347,9 @@ if(LW_X64_REC_FAST_ENABLED OR LW_WASM_COMPILED_REC_ENABLED)
         src/simd/avx2_nhwc_convtranspose.c)
 endif()
 if(LW_WASM_COMPILED_REC_ENABLED)
-    list(APPEND LW_PPOCR_C_SOURCES src/simd/wasm128_nhwc_pointwise.c)
+    list(APPEND LW_PPOCR_C_SOURCES
+        src/simd/wasm128_nhwc_pointwise.c
+        src/simd/wasm128_packed_matmul.c)
 endif()
 if(MSVC AND MSVC_C_ARCHITECTURE_ID MATCHES "^(x64|X86)$")
     set_property(SOURCE src/simd/avx2_binary.c src/simd/avx2_conv1x1.c
@@ -1223,6 +1225,22 @@ endif()
 endif()
 
 if(BUILD_TESTING AND NOT EMSCRIPTEN)
+
+    add_executable(wasm-ctc-projection-driver
+        tests/test_wasm_ctc_projection.c
+        src/simd/wasm128_packed_matmul.c
+        src/kernels/packed_matmul.c)
+    target_include_directories(wasm-ctc-projection-driver PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels")
+    target_compile_features(wasm-ctc-projection-driver PRIVATE c_std_11)
+    if(MSVC)
+        target_compile_options(wasm-ctc-projection-driver PRIVATE /W4 /WX /utf-8)
+    else()
+        target_compile_options(wasm-ctc-projection-driver PRIVATE
+            -Wall -Wextra -Wpedantic -Werror)
+        target_link_libraries(wasm-ctc-projection-driver PRIVATE m)
+    endif()
+    add_test(NAME wasm_ctc_projection COMMAND wasm-ctc-projection-driver)
 
     add_executable(nhwc-depthwise-portable-driver
         tests/test_nhwc_depthwise_portable.c

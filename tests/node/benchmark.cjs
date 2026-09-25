@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-/* Same-process, warmed full-OCR comparison for canonical vs compiled WASM. */
+/* Same-runner, warmed full-OCR comparison for canonical vs compiled WASM. */
 "use strict";
 
 const crypto = require("node:crypto");
