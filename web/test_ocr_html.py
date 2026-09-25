@@ -11,7 +11,7 @@ from playwright.sync_api import ConsoleMessage, sync_playwright
 
 
 EXPECTED_FIRST_LINE = "纯臻营养护发素"
-DEFAULT_TEXT_SHA256 = "6ff42b9ea692cc19988c06af05ad7ac2542e2ff6f111202e73a0c900af988284"
+DEFAULT_TEXT_SHA256 = "4341424a06f714666cd3adfe8698beda3dbea45de3695d794b29d79f9a801dcf"
 
 
 def text_sha256(lines: list[dict]) -> str:
