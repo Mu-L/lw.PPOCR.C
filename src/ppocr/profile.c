@@ -10,11 +10,11 @@
 EM_JS(int, lw_node_profile_env_present, (const char* name), {
     return typeof process !== 'undefined' && process.env &&
            process.env[UTF8ToString(name)] !== undefined ? 1 : 0;
-});
+})
 EM_JS(int, lw_node_profile_env_is_one, (const char* name), {
     return typeof process !== 'undefined' && process.env &&
            process.env[UTF8ToString(name)] === '1' ? 1 : 0;
-});
+})
 #endif
 
 int lw_profile_env_present(const char* name) {
