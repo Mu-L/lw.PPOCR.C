@@ -393,6 +393,8 @@ def main() -> int:
         # A plain-text paste must pass through untouched. An image paste must
         # be handled by the real document paste listener, load only the first
         # image, and leave OCR for the explicit Run button/API call.
+        before_paste_snapshot = page.evaluate("window.__lwOcrTest.snapshot()")
+        assert before_paste_snapshot["prepared"], before_paste_snapshot
         text_paste = page.evaluate(
             """() => {
               const data = new DataTransfer();
@@ -408,8 +410,8 @@ def main() -> int:
         )
         assert text_paste["defaultPrevented"] is False
         text_snapshot = page.evaluate("window.__lwOcrTest.snapshot()")
-        assert text_snapshot["prepareCount"] == reset_snapshot["prepareCount"]
-        assert text_snapshot["runCount"] == reset_snapshot["runCount"]
+        assert text_snapshot["prepareCount"] == before_paste_snapshot["prepareCount"]
+        assert text_snapshot["runCount"] == before_paste_snapshot["runCount"]
 
         clipboard_bytes = list(sample.read_bytes())
         paste_snapshot = page.evaluate(
@@ -438,14 +440,14 @@ def main() -> int:
         pasted = page.evaluate("window.__lwOcrTest.snapshot()")
         assert pasted["prepared"] and pasted["sourceKind"] == "image", pasted
         assert not pasted["hasResults"] and not pasted["exportEnabled"], pasted
-        assert pasted["prepareCount"] == reset_snapshot["prepareCount"] + 1, pasted
-        assert pasted["runCount"] == reset_snapshot["runCount"], pasted
+        assert pasted["prepareCount"] == before_paste_snapshot["prepareCount"] + 1, pasted
+        assert pasted["runCount"] == before_paste_snapshot["runCount"], pasted
 
         pasted_result = page.evaluate("window.lwPpocrDemo.recognize()")
         assert pasted_result["source"].startswith("clipboard-")
         assert len(pasted_result["lines"]) == 16
         pasted_after_ocr = page.evaluate("window.__lwOcrTest.snapshot()")
-        assert pasted_after_ocr["runCount"] == reset_snapshot["runCount"] + 1
+        assert pasted_after_ocr["runCount"] == before_paste_snapshot["runCount"] + 1
 
         # Pasting a new image clears the previous OCR result immediately.
         page.evaluate(
