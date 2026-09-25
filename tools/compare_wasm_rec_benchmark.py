@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -15,11 +16,49 @@ def load(path: Path) -> dict:
     return value
 
 
+def print_compiled_profile(path: Path) -> None:
+    """Show stage shares from a separate, instrumented two-run OCR process."""
+    snapshots = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.startswith("X64REC width="):
+            continue
+        fields = dict((key, float(value)) for key, value in
+                      re.findall(r"([a-z]+)=([0-9]+(?:\.[0-9]+)?)", line))
+        if "total" in fields and "ctc" in fields:
+            snapshots.append(fields)
+    print()
+    print("### Compiled SIMD128 REC hotspot diagnostic")
+    print()
+    if not snapshots:
+        print("No per-line REC timings were captured; check the profile log artifact.")
+        return
+    print(f"{len(snapshots)} REC invocations across one warm-up and one measured "
+          "full OCR. These instrumented times are not part of the A/B latency above.")
+    print()
+    print("| Stage | Accumulated ms | Share of tracked REC time |")
+    print("| --- | ---: | ---: |")
+    totals = {key: sum(row.get(key, 0.0) for row in snapshots)
+              for key in ("total", "pw", "dense", "dw", "bin", "unary",
+                          "reduce", "pool", "transpose", "matmul", "ctc")}
+    tracked = totals["total"] + totals["ctc"]
+    labels = {"pw": "Pointwise", "dense": "Dense", "dw": "Depthwise",
+              "bin": "Binary", "unary": "Unary", "reduce": "Reduce",
+              "pool": "Pool", "transpose": "Transpose", "matmul": "MatMul",
+              "ctc": "CTC"}
+    stages = [(label, totals[key]) for key, label in labels.items()]
+    other = max(0.0, totals["total"] - sum(totals[key] for key in labels if key != "ctc"))
+    stages.append(("Other backbone", other))
+    for label, milliseconds in sorted(stages, key=lambda item: item[1], reverse=True):
+        print(f"| {label} | {milliseconds:.3f} | "
+              f"{milliseconds / tracked * 100.0 if tracked else 0.0:.1f}% |")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--canonical", type=Path, required=True)
     parser.add_argument("--scalar", type=Path, required=True)
     parser.add_argument("--compiled", type=Path, required=True)
+    parser.add_argument("--profile-log", type=Path)
     parser.add_argument("--expected-text-sha256", required=True)
     args = parser.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
@@ -92,6 +131,8 @@ def main() -> int:
     else:
         print("**Text contract: PASS.** All three outputs match the golden checksum.")
     print("Latency and memory are informational, not hosted-runner pass/fail gates.")
+    if args.profile_log is not None:
+        print_compiled_profile(args.profile_log)
     return 1 if issues else 0
 
 

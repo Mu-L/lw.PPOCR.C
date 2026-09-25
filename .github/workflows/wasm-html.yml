@@ -196,6 +196,13 @@ jobs:
             --sample build-wasm/models/sample.ppm \
             --iterations 5 2> build-wasm/rec-benchmark-compiled-scalar.log \
             | tee build-wasm/rec-benchmark-compiled-scalar.json
+          LW_X64_REC_PROFILE=1 node tests/node/benchmark.cjs \
+            --package "${compiled_package}" \
+            --sample build-wasm/models/sample.ppm \
+            --expected-text-sha256 "${expected_text_sha256}" \
+            --iterations 1 \
+            > build-wasm/rec-profile-compiled.json \
+            2> build-wasm/rec-profile-compiled.log
           cat build-wasm/rec-benchmark-compiled.log
           cat build-wasm/rec-benchmark-compiled-scalar.log
           set +e
@@ -203,6 +210,7 @@ jobs:
             --canonical build-wasm/rec-benchmark-canonical.json \
             --scalar build-wasm/rec-benchmark-compiled-scalar.json \
             --compiled build-wasm/rec-benchmark-compiled.json \
+            --profile-log build-wasm/rec-profile-compiled.log \
             --expected-text-sha256 "${expected_text_sha256}" \
             | tee build-wasm/rec-benchmark-summary.md
           report_status=${PIPESTATUS[0]}
@@ -313,6 +321,8 @@ jobs:
             build-wasm/rec-benchmark-compiled.log
             build-wasm/rec-benchmark-compiled-scalar.json
             build-wasm/rec-benchmark-compiled-scalar.log
+            build-wasm/rec-profile-compiled.json
+            build-wasm/rec-profile-compiled.log
             build-wasm/rec-benchmark-summary.md
           if-no-files-found: warn
           retention-days: 14

@@ -861,6 +861,11 @@ if(EMSCRIPTEN)
         target_compile_options(lw_ppocr_node PRIVATE -msimd128 -msse2)
         target_link_options(lw_ppocr_node PRIVATE -msimd128)
     endif()
+    if(LW_WASM_COMPILED_REC_ENABLED)
+        # Only the experimental Node package accepts the C profiler switch.
+        # The browser SDK and canonical Node package keep their normal env policy.
+        target_link_options(lw_ppocr_node PRIVATE "-sNODE_HOST_ENV=1")
+    endif()
     target_link_options(lw_ppocr_node PRIVATE
         -O3
         "-sMODULARIZE=1" "-sEXPORT_NAME=LwPpocrModule" "-sSINGLE_FILE=1"

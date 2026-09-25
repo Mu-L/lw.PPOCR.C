@@ -43,6 +43,12 @@ measurements, including process RSS and WASM heap. The benchmark records all
 three OCR texts before the reporter checks parity and the checked-in golden
 checksum. A mismatch still fails CI, but the measurements and differing text
 are preserved in the job summary instead of being lost at the first run.
+After the uninstrumented A/B, CI also runs compiled SIMD128 in a separate
+profile process and summarizes accumulated REC stage times (pointwise, dense,
+depthwise, CTC, etc.). Those instrumented timings identify hotspots but must
+not be compared to the full-OCR A/B latency. Only the experimental Node package
+accepts `LW_X64_REC_PROFILE` from its host environment; browser and canonical
+Node packages do not change their environment policy.
 The CI log must also confirm `widths=5/5` and `ctc=simd128`, so matching
 text cannot pass by silently using only the canonical executor.
 
