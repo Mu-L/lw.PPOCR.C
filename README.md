@@ -99,18 +99,26 @@ targeted x64 optimization.
 
 ### Performance snapshot
 
-On the bundled 500×500 sample image, a Windows x64 release build measured the
-following native baseline with `REC target_width = 320`:
+A [three-model x64 CI comparison from 2026-09-25](https://github.com/lxw112190/lw.PPOCR.C/actions/runs/36099882256)
+measured native full OCR on the bundled 500×500 sample at maximum
+`REC target_width = 960` (adaptive widths up to 960). The candidate was
+`d6e180c` on a Windows Server 2022 runner with four logical CPUs on an
+AMD EPYC 7763.
+Each case used two warm-ups, five measured calls, and three paired fresh-process
+rounds. The table reports medians of the candidate's per-process OCR means and
+process peak working sets:
 
-| Full OCR mode | Mean latency |
-|---|---:|
-| 1 worker | 209.27 ms |
-| 4 workers | 98.47 ms |
+| Model | 1 worker | 4 workers | Peak WS, 1 worker | Peak WS, 4 workers |
+|---|---:|---:|---:|---:|
+| Tiny | 207.76 ms | 144.72 ms | 99.8 MiB | 117.2 MiB |
+| Small | 770.33 ms | 597.77 ms | 275.1 MiB | 311.0 MiB |
+| Medium | 3,021.26 ms | 2,704.40 ms | 1,077.8 MiB | 1,095.6 MiB |
 
-Four workers provide about **2.13×** throughput acceleration for this sample.
-Results vary with CPU, compiler, image content, and system load. DET now uses a
-separate CPU-topology-aware intra-op budget, capped at eight physical cores,
-before the independently configured CLS/REC line workers begin. This keeps
+Peak WS includes model initialization and the benchmark's standalone detector
+handle. These are informational hosted-runner measurements, not portable latency
+or memory guarantees; compare revisions only within the same paired CI run.
+DET uses a separate CPU-topology-aware intra-op budget, capped at eight
+physical cores, before the independently configured CLS/REC line workers begin. This keeps
 `worker_count` focused on line-level memory and latency trade-offs.
 
 Long-text clients such as the C full-OCR demo, offline HTML, Java/JNI, and C#

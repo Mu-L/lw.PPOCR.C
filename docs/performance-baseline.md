@@ -46,7 +46,7 @@ crop/CLS/REC remainder, line count, selected worker count and REC width,
 throughput, and RSS. Every warm-up and measured call must return identical
 packed UTF-8 text.
 
-The current fixed-pool DET plus line-worker implementation was measured on the
+An earlier fixed-pool DET plus line-worker implementation was measured on the
 same local Windows x64 host in five independent processes. Each process used
 three warm-ups and twenty measured calls on the bundled 500x500/16-line fixture;
 the table reports the median process result:
@@ -60,10 +60,12 @@ The four-worker configuration reduced complete OCR latency by 58.51% and ran
 2.41x as fast as one worker on this host. This is a local engineering result,
 not a portable latency guarantee.
 
-## PP-OCRv6 Tiny/Small/Medium 960 baseline
+## Historical local PP-OCRv6 Tiny/Small/Medium 960 baseline
 
-This is the current model-selection and optimization baseline for the complete
-DET+CLS+REC path. All three profiles used the project test image
+This earlier local measurement predates the current x64 backend. For a newer
+three-model 960-width snapshot, see the
+[README performance snapshot](../README.md#performance-snapshot) and its linked
+paired CI run. All three historical profiles used the project test image
 `build/models/sample.ppm`, `REC width=960`, one warm-up, and three measured
 iterations through the same `lw-ocr-benchmark` executable on Windows x64 AVX2.
 Small and Medium reused the shared Tiny CLS asset and the shared
@@ -76,10 +78,10 @@ Small and Medium reused the shared Tiny CLS asset and the shared
 | Medium | 7,797.50 ms | 3,904.37 ms | 649.9 MiB | 1,396.6 MiB |
 
 Relative to Tiny, Small is about 4.20x/4.58x slower and Medium about
-21.95x/25.28x slower for one/four workers. Medium's detector alone accounts
-for roughly 4.46 seconds in this run, so Medium optimization should start with
-DET profiling. The full JSON reports and the three-model summary remain local
-under `build-local-data/`; this table is the versioned reference point, not a
+21.95x/25.28x slower for one/four workers. Medium's detector alone accounted
+for roughly 4.46 seconds in that run; this is not a current hotspot claim.
+The full JSON reports and the three-model summary remain local under
+`build-local-data/`; this table is a historical local reference, not a
 cross-machine performance promise or a release gate.
 
 ## REC worker immutable-resource sharing

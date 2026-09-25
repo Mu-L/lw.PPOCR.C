@@ -107,14 +107,29 @@ amd64 的 SSE2/AVX2 性能数据，LoongArch 性能仍需客户实体机验证�
 [`Windows x64 OCR 性能分析`](docs/engine-comparison.md)，在 AVX2 runner 上采集
 DET/CLS/REC 分阶段、算子、REC 宽度和 RSS，作为定向 x64 优化前的基线。
 
-## 性能口径说明
+## 性能快照与口径
 
-README 英文版中的原生性能快照使用 `REC target_width = 320`。为保证新闻正文等长文字行的
-识别精度，C 完整 OCR Demo、离线 HTML、Java/JNI 和 C# Demo 使用 `REC target_width = 960`
-作为最大宽度。完整 OCR 现在会按文字行宽高比自动选择 192/320/480/640/960，按宽度
-排序后成批执行，并且每个 worker 最多只保留两个具体宽度的 REC Session；独立 REC API
-和公共 C ABI 默认值现在都是 960，如需复现旧的低延迟配置可显式设置为 320。本机
-fixed-960 与 adaptive-960 对比中，16 行样本单工作器降低 31.09%，四工作器降低 17.39%；
+2026-09-25 的[三模型 x64 CI 对照](https://github.com/lxw112190/lw.PPOCR.C/actions/runs/36099882256)
+在项目自带的 500×500 样例图上，使用最大 `REC target_width = 960` 测量完整原生 OCR。
+候选提交为 `d6e180c`；Windows Server 2022 runner 使用 AMD EPYC 7763 的 4 个逻辑 CPU。
+每组预热 2 次、测量 5 次，独立进程配对重复 3 轮。下表为候选版本各进程 OCR 平均耗时
+与进程峰值工作集的中位数：
+
+| 模型 | 1 worker | 4 workers | 1 worker 峰值工作集 | 4 workers 峰值工作集 |
+|---|---:|---:|---:|---:|
+| Tiny | 207.76 ms | 144.72 ms | 99.8 MiB | 117.2 MiB |
+| Small | 770.33 ms | 597.77 ms | 275.1 MiB | 311.0 MiB |
+| Medium | 3,021.26 ms | 2,704.40 ms | 1,077.8 MiB | 1,095.6 MiB |
+
+峰值工作集包含模型初始化和 benchmark 额外创建的 DET handle；这是 CI runner 上的参考值，
+不是跨机器的耗时或内存保证。不同提交只应在同一次配对 CI 中比较。
+
+为保证新闻正文等长文字行的识别精度，C 完整 OCR Demo、离线 HTML、Java/JNI 和 C# Demo
+使用 `REC target_width = 960` 作为最大宽度。完整 OCR 会按文字行宽高比自动选择
+192/320/480/640/960，按宽度排序后成批执行，并且每个 worker 最多只保留两个具体宽度的
+REC Session；独立 REC API 和公共 C ABI 默认值也是 960，如需复现旧的低延迟配置可显式
+设置为 320。早期本机 fixed-960 与 adaptive-960 对比中，16 行样本单工作器降低 31.09%，
+四工作器降低 17.39%；
 长文字占比较高的文章样本分别降低 13.38% 和 5.61%，两组测试的 OCR 文本校验值均一致。
 
 ## 目录说明
