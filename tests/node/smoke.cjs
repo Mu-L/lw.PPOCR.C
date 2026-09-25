@@ -205,7 +205,11 @@ async function main() {
   }));
 }
 
-main().catch(error => {
-  console.error(error && error.stack ? error.stack : String(error));
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch(error => {
+    console.error(error && error.stack ? error.stack : String(error));
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {createRuntime, readPpm, runOcr, verifyPackage};

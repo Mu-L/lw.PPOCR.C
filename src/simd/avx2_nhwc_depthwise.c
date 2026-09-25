@@ -3,14 +3,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+#if !defined(LW_NHWC_FORCE_PORTABLE) && \
+    (defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__))
 #include <immintrin.h>
 #define LW_DW_X86 1
 #else
 #define LW_DW_X86 0
 #endif
 
-#if defined(__GNUC__) || defined(__clang__)
+#if LW_DW_X86 && (defined(__GNUC__) || defined(__clang__))
 #define LW_DW_TARGET __attribute__((target("avx2,fma")))
 #else
 #define LW_DW_TARGET
@@ -171,11 +172,48 @@ static lw_status depthwise_execute(const float* input, const float* packed_weigh
     }
     return LW_STATUS_OK;
 #else
-    (void)bias;
-    (void)output;
-    (void)packed_weights;
-    (void)stats;
-    return LW_STATUS_UNSUPPORTED;
+    /* Physical NHWC fallback for non-x86 compiled backends. Preserve the
+     * packed 32-channel layout and the per-channel tap accumulation order. */
+    for (uint32_t batch = 0u; batch < desc->batch; ++batch) {
+        const float* input_batch = input + (size_t)batch * desc->input_height *
+            desc->input_width * desc->channels;
+        float* output_batch = output + (size_t)batch * desc->output_height *
+            desc->output_width * desc->channels;
+        for (uint32_t oy = 0u; oy < desc->output_height; ++oy) {
+            int32_t iy0 = (int32_t)((uint64_t)(oy + desc->output_row_offset) *
+                desc->stride_h) - (int32_t)desc->pad_top;
+            for (uint32_t ox = 0u; ox < desc->output_width; ++ox) {
+                int32_t ix0 = (int32_t)((uint64_t)ox * desc->stride_w) -
+                    (int32_t)desc->pad_left;
+                for (uint32_t channel = 0u; channel < desc->channels; ++channel) {
+                    uint32_t block = channel / LW_NHWC_DEPTHWISE_BLOCK;
+                    uint32_t lane = channel % LW_NHWC_DEPTHWISE_BLOCK;
+                    float sum = bias == NULL ? 0.0f : bias[channel];
+                    for (uint32_t ky = 0u; ky < desc->kernel_h; ++ky) {
+                        int32_t iy = iy0 + (int32_t)ky;
+                        if (iy < 0 || iy >= (int32_t)desc->input_height) continue;
+                        for (uint32_t kx = 0u; kx < desc->kernel_w; ++kx) {
+                            int32_t ix = ix0 + (int32_t)kx;
+                            if (ix < 0 || ix >= (int32_t)desc->input_width) continue;
+                            size_t input_index = ((size_t)(uint32_t)iy * desc->input_width +
+                                (uint32_t)ix) * desc->channels + channel;
+                            size_t weight_index = ((size_t)block * desc->kernel_h *
+                                desc->kernel_w + (size_t)ky * desc->kernel_w + kx) *
+                                LW_NHWC_DEPTHWISE_BLOCK + lane;
+                            sum += input_batch[input_index] * packed_weights[weight_index];
+                        }
+                    }
+                    if (desc->post_bias != NULL) sum += desc->post_bias[channel];
+                    output_batch[((size_t)oy * desc->output_width + ox) *
+                        desc->channels + channel] = sum;
+                }
+                if (stats != NULL && stats->x1_invocations != UINT64_MAX) {
+                    ++stats->x1_invocations;
+                }
+            }
+        }
+    }
+    return LW_STATUS_OK;
 #endif
 }
 

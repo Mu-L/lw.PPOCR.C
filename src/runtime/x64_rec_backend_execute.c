@@ -1,5 +1,6 @@
 #include "x64_rec_backend_internal.h"
 #include "ctc_projection_internal.h"
+#include "rec_backend_kernels_internal.h"
 #include "operator_internal.h"
 #include "../simd/simd_kernels.h"
 
@@ -103,6 +104,11 @@ static void pointwise_run_range(const lw_rec_pointwise_shard* shard,
     if (ep.residual != NULL) {
         ep.residual += (size_t)pixel_begin * shard->output_channels;
     }
+#if defined(__EMSCRIPTEN__)
+    lw_rec_backend_kernels_current()->pointwise(
+        input, shard->packed_weights, &ep, output, pixel_count,
+        shard->input_channels, shard->output_channels);
+#else
     switch (shard->kernel) {
     case LW_X64_REC_PW_4X16:
         lw_avx2_fma_nhwc_pointwise_4x16_f32(input, shard->packed_weights, &ep, output,
@@ -125,6 +131,7 @@ static void pointwise_run_range(const lw_rec_pointwise_shard* shard,
                                        shard->output_channels);
         break;
     }
+#endif
 }
 
 /* Shard begins use 12-pixel blocks: the kernel tile widths (2, 3, 4, 6) all
@@ -532,6 +539,11 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
                                    pointwise_shard_entry, &shard);
                 return LW_STATUS_OK;
             }
+#if defined(__EMSCRIPTEN__)
+            lw_rec_backend_kernels_current()->pointwise(
+                input, op->data.conv.packed_weights, &ep, output, pixels,
+                op->data.conv.input_channels, op->data.conv.output_channels);
+#else
             switch (op->data.conv.pointwise_kernel) {
             case LW_X64_REC_PW_4X16:
                 lw_avx2_fma_nhwc_pointwise_4x16_f32(
@@ -554,6 +566,7 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
                     op->data.conv.input_channels, op->data.conv.output_channels);
                 break;
             }
+#endif
         }
         return LW_STATUS_OK;
     }
@@ -625,7 +638,11 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
                 }
             }
         }
+#if defined(__EMSCRIPTEN__)
+        status = lw_rec_backend_kernels_current()->dense(
+#else
         status = lw_avx2_fma_nhwc_dense_f32(
+#endif
             input, op->data.conv.packed_weights, &ep, output, &desc,
             instance->scratch, op->data.conv.scratch_bytes);
         if (status == LW_STATUS_OK) return LW_STATUS_OK;
@@ -687,7 +704,11 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
                 return LW_STATUS_OK;
             }
         }
+#if defined(__EMSCRIPTEN__)
+        status = lw_rec_backend_kernels_current()->depthwise(input, op->data.conv.packed_weights,
+#else
         status = lw_avx2_fma_nhwc_depthwise_f32(input, op->data.conv.packed_weights,
+#endif
                                                  op->data.conv.bias, output, &desc);
         if (status == LW_STATUS_OK) return LW_STATUS_OK;
         if (desc.post_bias != NULL) {

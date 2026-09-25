@@ -321,7 +321,11 @@ lw_status lw_detector_create(const char* model_path_utf8, const lw_detector_opti
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
     /* Promoted default: the sharded NHWC backend is on; failures inside
      * detector_try_backend fall back to the canonical executor. */
+#if defined(__EMSCRIPTEN__)
+    detector->x64_backend_enabled = 0u;
+#else
     detector->x64_backend_enabled = 1u;
+#endif
 #endif
     status = validate_options(options, &detector->info, &model_options, &detector->session_options,
                               error);

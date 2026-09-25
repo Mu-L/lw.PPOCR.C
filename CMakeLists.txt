@@ -10,6 +10,8 @@ option(LW_RUNTIME_ONLY
     "Build only the dependency-free native runtime for an embedding target" OFF)
 option(LW_WASM_SIMD128
     "Enable portable WebAssembly SIMD128 for the standalone OCR HTML" ON)
+option(LW_WASM_COMPILED_REC
+    "Experimentally run WASM REC on the compiled physical backend" OFF)
 option(LW_WEB_LEGACY
     "Build the Tiny scalar Web compatibility distribution" OFF)
 set(LW_WEB_MIN_CHROME_VERSION "70" CACHE STRING
@@ -312,10 +314,18 @@ set(LW_PPOCR_C_SOURCES
     src/simd/wasm128_erf.c)
 
 set(LW_X64_REC_FAST_ENABLED OFF)
+set(LW_WASM_COMPILED_REC_ENABLED OFF)
 if(LW_EXPERIMENTAL_AVX2_FAST_PATH AND NOT EMSCRIPTEN AND
    (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|x64|X86)$" OR
     MSVC_C_ARCHITECTURE_ID MATCHES "^(x64|X86)$"))
     set(LW_X64_REC_FAST_ENABLED ON)
+endif()
+if(EMSCRIPTEN AND LW_WASM_SIMD128 AND LW_WASM_COMPILED_REC)
+    set(LW_WASM_COMPILED_REC_ENABLED ON)
+elseif(EMSCRIPTEN AND LW_WASM_COMPILED_REC)
+    message(FATAL_ERROR "LW_WASM_COMPILED_REC requires LW_WASM_SIMD128=ON")
+endif()
+if(LW_X64_REC_FAST_ENABLED OR LW_WASM_COMPILED_REC_ENABLED)
     list(APPEND LW_PPOCR_C_SOURCES
         src/runtime/layout_planner.c
         src/runtime/x64_rec_fast_plan.c
@@ -323,6 +333,7 @@ if(LW_EXPERIMENTAL_AVX2_FAST_PATH AND NOT EMSCRIPTEN AND
         src/runtime/x64_rec_backend_compile.c
         src/runtime/x64_rec_backend_execute.c
         src/runtime/x64_rec_backend_arena.c
+        src/runtime/rec_backend_kernels.c
         src/runtime/x64_det_backend_compile.c
         src/runtime/x64_det_backend_execute.c
         src/runtime/ctc_projection_internal.c
@@ -334,6 +345,9 @@ if(LW_EXPERIMENTAL_AVX2_FAST_PATH AND NOT EMSCRIPTEN AND
         src/simd/avx2_nhwc_support.c
         src/simd/avx2_nhwc_dense.c
         src/simd/avx2_nhwc_convtranspose.c)
+endif()
+if(LW_WASM_COMPILED_REC_ENABLED)
+    list(APPEND LW_PPOCR_C_SOURCES src/simd/wasm128_nhwc_pointwise.c)
 endif()
 if(MSVC AND MSVC_C_ARCHITECTURE_ID MATCHES "^(x64|X86)$")
     set_property(SOURCE src/simd/avx2_binary.c src/simd/avx2_conv1x1.c
@@ -422,7 +436,7 @@ set_target_properties(lw_ppocr_c PROPERTIES
     OUTPUT_NAME lw_ppocr_c_static
     POSITION_INDEPENDENT_CODE ON)
 lw_configure_runtime_target(lw_ppocr_c)
-if(LW_X64_REC_FAST_ENABLED)
+if(LW_X64_REC_FAST_ENABLED OR LW_WASM_COMPILED_REC_ENABLED)
     target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
     if(MSVC)
         set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c src/simd/avx2_nhwc_depthwise.c src/simd/avx2_nhwc_support.c src/simd/avx2_nhwc_convtranspose.c APPEND PROPERTY
@@ -1209,6 +1223,23 @@ endif()
 endif()
 
 if(BUILD_TESTING AND NOT EMSCRIPTEN)
+
+    add_executable(nhwc-depthwise-portable-driver
+        tests/test_nhwc_depthwise_portable.c
+        src/simd/avx2_nhwc_depthwise.c)
+    target_include_directories(nhwc-depthwise-portable-driver PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels")
+    target_compile_features(nhwc-depthwise-portable-driver PRIVATE c_std_11)
+    target_compile_definitions(nhwc-depthwise-portable-driver PRIVATE
+        LW_NHWC_FORCE_PORTABLE=1)
+    if(MSVC)
+        target_compile_options(nhwc-depthwise-portable-driver PRIVATE /W4 /WX /utf-8)
+    else()
+        target_compile_options(nhwc-depthwise-portable-driver PRIVATE
+            -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(NAME nhwc_depthwise_portable COMMAND nhwc-depthwise-portable-driver)
 
     add_test(
         NAME source_final_newline_contract

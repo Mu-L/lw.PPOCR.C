@@ -12,7 +12,7 @@
 #define LW_NHWC_SUPPORT_X86 0
 #endif
 
-#if defined(__GNUC__) || defined(__clang__)
+#if LW_NHWC_SUPPORT_X86 && (defined(__GNUC__) || defined(__clang__))
 #define LW_NHWC_SUPPORT_TARGET __attribute__((target("avx2,fma")))
 #else
 #define LW_NHWC_SUPPORT_TARGET

@@ -12,9 +12,18 @@ on:
         required: false
         default: false
         type: boolean
+      compiled_rec:
+        description: "Test the experimental compiled REC backend in WASM"
+        required: false
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       build_web_variants:
+        required: false
+        default: false
+        type: boolean
+      compiled_rec:
         required: false
         default: false
         type: boolean
@@ -65,6 +74,7 @@ jobs:
           -DLW_BUILD_HTTP_DEMO=OFF
           -DLW_BUILD_CSHARP_DEMOS=OFF
           -DBUILD_TESTING=OFF
+          -DLW_WASM_COMPILED_REC=${{ inputs.compiled_rec || false }}
           -DLW_BUILD_WEB_MODEL_VARIANTS=${{ inputs.build_web_variants || false }}
 
       - name: Build browser and Node WASM distributions
@@ -134,6 +144,40 @@ jobs:
           --html build-wasm/ocr-demo.html
           --sample models/ppocrv6-tiny/sample.jpg
           --golden ci/web-ppocrv6-tiny.json
+
+      - name: Compare compiled REC with canonical WASM full OCR
+        if: inputs.compiled_rec == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          emcmake cmake -S . -B build-wasm-canonical -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLW_BUILD_HTTP_DEMO=OFF \
+            -DLW_BUILD_CSHARP_DEMOS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DLW_WEB_PDF=OFF \
+            -DLW_WASM_COMPILED_REC=OFF
+          cmake --build build-wasm-canonical --target lw-node-wasm-package --parallel
+          expected_text_sha256="$(node -p "require('./ci/web-ppocrv6-tiny.json').expected_text_sha256")"
+          node tests/node/benchmark.cjs \
+            --package build-wasm-canonical/node-wasm \
+            --sample build-wasm/models/sample.ppm \
+            --expected-text-sha256 "${expected_text_sha256}" \
+            --iterations 5 | tee build-wasm/rec-benchmark-canonical.json
+          node tests/node/benchmark.cjs \
+            --package build-wasm/node-wasm \
+            --sample build-wasm/models/sample.ppm \
+            --expected-text-sha256 "${expected_text_sha256}" \
+            --iterations 5 2> build-wasm/rec-benchmark-compiled.log \
+            | tee build-wasm/rec-benchmark-compiled.json
+          cat build-wasm/rec-benchmark-compiled.log
+          grep -q 'LW_WASM_COMPILED_REC widths=5/5' \
+            build-wasm/rec-benchmark-compiled.log
+          python tools/compare_wasm_rec_benchmark.py \
+            --canonical build-wasm/rec-benchmark-canonical.json \
+            --compiled build-wasm/rec-benchmark-compiled.json \
+            | tee build-wasm/rec-benchmark-summary.md
+          cat build-wasm/rec-benchmark-summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run browser fallback simulation test
         run: >-
@@ -216,6 +260,19 @@ jobs:
         with:
           name: web-medium-report-${{ github.sha }}
           path: build-wasm/web-medium-report.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload compiled REC comparison
+        if: inputs.compiled_rec == true
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-compiled-rec-comparison-${{ github.sha }}
+          path: |
+            build-wasm/rec-benchmark-canonical.json
+            build-wasm/rec-benchmark-compiled.json
+            build-wasm/rec-benchmark-compiled.log
+            build-wasm/rec-benchmark-summary.md
           if-no-files-found: error
           retention-days: 14
 

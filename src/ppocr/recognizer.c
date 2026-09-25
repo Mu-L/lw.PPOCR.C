@@ -18,6 +18,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#if defined(__EMSCRIPTEN__) && defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+#include <stdio.h>
+#endif
 #if defined(_MSC_VER)
 #include <malloc.h>
 #endif
@@ -879,9 +882,13 @@ static lw_x64_rec_backend_slot* recognizer_backend_slot(lw_recognizer* recognize
 /* The local rotated A/B benchmark selects NHWC for all five adaptive widths.
  * A failed compile or instance allocation leaves the canonical path available. */
 static void recognizer_try_backends(lw_recognizer* recognizer) {
+#if !defined(__EMSCRIPTEN__)
     lw_cpu_capabilities cpu = lw_get_cpu_capabilities();
+#endif
     uint32_t index;
+#if !defined(__EMSCRIPTEN__)
     if (!lw_simd_level_is_avx2(cpu.simd) || !cpu.has_avx2_fma) return;
+#endif
     for (index = 0u; index < LW_REC_RESIDENT_WIDTH_COUNT; ++index) {
         lw_x64_rec_backend_slot* slot = &recognizer->x64_slots[index];
         lw_error backend_error;
@@ -900,6 +907,16 @@ static void recognizer_try_backends(lw_recognizer* recognizer) {
         }
     }
     recognizer_create_slot_instances(recognizer);
+#if defined(__EMSCRIPTEN__)
+    {
+        uint32_t compiled = 0u;
+        for (index = 0u; index < LW_REC_RESIDENT_WIDTH_COUNT; ++index) {
+            if (recognizer->x64_slots[index].instance != NULL) ++compiled;
+        }
+        fprintf(stderr, "LW_WASM_COMPILED_REC widths=%u/%u\n",
+                compiled, LW_REC_RESIDENT_WIDTH_COUNT);
+    }
+#endif
 }
 
 static void recognizer_release_backends(lw_recognizer* recognizer) {
