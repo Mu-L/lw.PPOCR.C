@@ -391,8 +391,9 @@ jobs:
           unzip -q "${archive}" -d node-package
           package_dir="$(find node-package -mindepth 1 -maxdepth 1 -type d -name '*-node-wasm' -print -quit)"
           test -n "${package_dir}"
+          expected_text_sha256="$(node -p "require('./ci/web-ppocrv6-tiny.json').expected_text_sha256")"
           node tests/node/smoke.cjs \
             --package "${package_dir}" \
             --sample node-artifacts/sample.ppm \
             --expected-backend wasm128 \
-            --expected-text-sha256 6ff42b9ea692cc19988c06af05ad7ac2542e2ff6f111202e73a0c900af988284
+            --expected-text-sha256 "${expected_text_sha256}"
