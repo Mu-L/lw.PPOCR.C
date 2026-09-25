@@ -168,6 +168,19 @@ jobs:
             fi
           }
           trap print_benchmark_logs_on_failure EXIT
+          diagnose_compiled_det() {
+            local label="$1"
+            local package="$2"
+            echo "::group::compiled DET diagnostic: ${label}"
+            LW_WASM_DET_DEBUG=1 node tests/node/benchmark.cjs \
+              --package "${package}" \
+              --sample build-wasm/models/sample.ppm \
+              --iterations 1 \
+              > "build-wasm/rec-det-debug-${label}.json" \
+              2> "build-wasm/rec-det-debug-${label}.log" || true
+            cat "build-wasm/rec-det-debug-${label}.log"
+            echo '::endgroup::'
+          }
           if [[ "${{ inputs.compiled_rec || false }}" == "true" ]]; then
             canonical_package=build-wasm-canonical/node-wasm
             compiled_package=build-wasm/node-wasm
@@ -202,16 +215,23 @@ jobs:
             --package "${canonical_package}" \
             --sample build-wasm/models/sample.ppm \
             --iterations 5 | tee build-wasm/rec-benchmark-canonical.json
-          node tests/node/benchmark.cjs \
-            --package "${compiled_package}" \
-            --sample build-wasm/models/sample.ppm \
-            --iterations 5 2> build-wasm/rec-benchmark-compiled.log \
-            | tee build-wasm/rec-benchmark-compiled.json
-          node tests/node/benchmark.cjs \
+          if ! node tests/node/benchmark.cjs \
             --package build-wasm-compiled-scalar/node-wasm \
             --sample build-wasm/models/sample.ppm \
             --iterations 5 2> build-wasm/rec-benchmark-compiled-scalar.log \
-            | tee build-wasm/rec-benchmark-compiled-scalar.json
+            | tee build-wasm/rec-benchmark-compiled-scalar.json; then
+            diagnose_compiled_det scalar build-wasm-compiled-scalar/node-wasm
+            diagnose_compiled_det simd128 "${compiled_package}"
+            exit 1
+          fi
+          if ! node tests/node/benchmark.cjs \
+            --package "${compiled_package}" \
+            --sample build-wasm/models/sample.ppm \
+            --iterations 5 2> build-wasm/rec-benchmark-compiled.log \
+            | tee build-wasm/rec-benchmark-compiled.json; then
+            diagnose_compiled_det simd128 "${compiled_package}"
+            exit 1
+          fi
           LW_X64_REC_PROFILE=1 LW_WASM_OCR_PROFILE=1 LW_REC_MEMORY_PROFILE=1 node tests/node/benchmark.cjs \
             --package "${compiled_package}" \
             --sample build-wasm/models/sample.ppm \
@@ -424,6 +444,8 @@ jobs:
             build-wasm/rec-profile-compiled.log
             build-wasm/rec-profile-summary.json
             build-wasm/rec-benchmark-summary.md
+            build-wasm/rec-det-debug-*.json
+            build-wasm/rec-det-debug-*.log
             build-wasm/wasm-small-*.json
             build-wasm/wasm-small-*.log
             build-wasm/wasm-small-summary.md

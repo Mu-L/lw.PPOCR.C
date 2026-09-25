@@ -60,6 +60,36 @@ static void clear_result(lw_detection_result* result) {
     result->struct_size = (uint32_t)sizeof(*result);
 }
 
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_COMPILED_DET)
+/* CI-only diagnostics for the compiled DET path. Never scan tensors during
+ * ordinary benchmark measurements or in the browser. */
+static void detector_debug_tensor(const char* stage, const float* values, uint64_t count) {
+    float minimum = INFINITY;
+    float maximum = -INFINITY;
+    uint64_t finite_count = 0u;
+    uint64_t above_threshold = 0u;
+    uint64_t index;
+    for (index = 0u; index < count; ++index) {
+        float value = values[index];
+        if (!isfinite(value)) continue;
+        ++finite_count;
+        if (value < minimum) minimum = value;
+        if (value > maximum) maximum = value;
+        if (value > 0.3f) ++above_threshold;
+    }
+    if (finite_count == 0u) {
+        minimum = 0.0f;
+        maximum = 0.0f;
+    }
+    (void)fprintf(stderr,
+                  "LW_WASM_DET_DEBUG stage=%s count=%llu finite=%llu above_0.3=%llu "
+                  "min=%.6g max=%.6g first=%.6g\n",
+                  stage, (unsigned long long)count, (unsigned long long)finite_count,
+                  (unsigned long long)above_threshold, (double)minimum, (double)maximum,
+                  count == 0u ? 0.0 : (double)values[0]);
+}
+#endif
+
 void lw_detector_options_init(lw_detector_options* options) {
     lw_model_options model_options;
     lw_session_options session_options;
@@ -558,6 +588,20 @@ static lw_status detector_detect_bgr_u8_impl(
         (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
         return status;
     }
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_COMPILED_DET)
+    if (lw_profile_env_is_one("LW_WASM_DET_DEBUG")) {
+        if (direct_nhwc_input != 0u) {
+            uint64_t backend_input_count = 0u;
+            const float* backend_input = lw_x64_det_instance_input(
+                detector->x64_instance, &backend_input_count);
+            if (backend_input != NULL)
+                detector_debug_tensor("input_nhwc", backend_input, backend_input_count);
+        } else {
+            detector_debug_tensor("input_nchw", detector->input,
+                                  detector->input_element_count);
+        }
+    }
+#endif
     lw_pipeline_profile_add_elapsed(profile == NULL ? NULL : &profile->preprocess_nanoseconds,
                                     started, profile);
     started = lw_pipeline_profile_now(profile);
@@ -603,6 +647,11 @@ static lw_status detector_detect_bgr_u8_impl(
         (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
         return status;
     }
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_COMPILED_DET)
+    if (lw_profile_env_is_one("LW_WASM_DET_DEBUG"))
+        detector_debug_tensor("probabilities", detector->probabilities,
+                              detector->probability_element_count);
+#endif
     started = lw_pipeline_profile_now(profile);
     status = lw_db_postprocess_f32_ws(detector->probabilities, resized_width, resized_height,
                                       detector->info.bitmap_threshold, detector->info.box_threshold,
