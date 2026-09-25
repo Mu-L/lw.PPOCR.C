@@ -224,8 +224,20 @@ void lw_avx2_fma_packed_matmul_argmax_scores_f32(
                         accumulators[7] = _mm256_fmadd_ps(input_value, weight_high, accumulators[7]);
                     }
                     if (bias != NULL) {
-                        const __m256 bias_low = _mm256_loadu_ps(bias + column_base);
-                        const __m256 bias_high = _mm256_loadu_ps(bias + column_base + 8u);
+                        __m256 bias_low;
+                        __m256 bias_high;
+                        if (full_panel) {
+                            bias_low = _mm256_loadu_ps(bias + column_base);
+                            bias_high = _mm256_loadu_ps(bias + column_base + 8u);
+                        } else {
+                            float bias_values[LW_PACKED_MATMUL_COLUMN_TILE] = {0.0f};
+                            uint32_t lane;
+                            for (lane = 0u; lane < valid_columns; ++lane) {
+                                bias_values[lane] = bias[column_base + lane];
+                            }
+                            bias_low = _mm256_loadu_ps(bias_values);
+                            bias_high = _mm256_loadu_ps(bias_values + 8u);
+                        }
                         for (current_row = 0u; current_row < 4u; ++current_row) {
                             accumulators[current_row * 2u] =
                                 _mm256_add_ps(accumulators[current_row * 2u], bias_low);
