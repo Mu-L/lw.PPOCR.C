@@ -37,7 +37,7 @@ static float max_difference(const float* a, const float* b, uint64_t count) {
 }
 static double measure_nhwc(const lw_x64_rec_op* op, const float* input, float* output,
                            uint32_t pixels, uint32_t ic, uint32_t oc, uint32_t iterations) {
-    lw_nhwc_epilogue ep = { op->data.conv.bias, NULL, LW_NHWC_ACT_NONE, 0u, 0.0f, 0.0f };
+    lw_nhwc_epilogue ep = { op->data.conv.bias, NULL, LW_NHWC_ACT_NONE, 0u, 0.0f, 0.0f, NULL };
     for (uint32_t i = 0u; i < 2u; ++i)
         lw_avx2_fma_nhwc_pointwise_f32(input, op->data.conv.packed_weights, &ep, output, pixels, ic, oc);
     uint64_t start = clock_ns();
@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
         }
         fill_input(nhwc_input, count);
         fill_input(nchw_input, count);
-        lw_nhwc_epilogue ep = { nhwc_op->data.conv.bias, NULL, LW_NHWC_ACT_NONE, 0u, 0.0f, 0.0f };
+        lw_nhwc_epilogue ep = { nhwc_op->data.conv.bias, NULL, LW_NHWC_ACT_NONE, 0u, 0.0f, 0.0f, NULL };
         lw_avx2_fma_nhwc_pointwise_f32(nhwc_input, nhwc_op->data.conv.packed_weights, &ep, nhwc_baseline, pixels, ic, oc);
         int32_t input_dimensions[4] = { 1, (int32_t)ic, (int32_t)h, (int32_t)w };
         int32_t output_dimensions[4] = { 1, (int32_t)oc, (int32_t)h, (int32_t)w };

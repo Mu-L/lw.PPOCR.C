@@ -215,8 +215,9 @@ int main(void) {
             lw_nhwc_dense_desc desc = {batch, test->input_channels, test->input_height,
                 test->input_width, test->output_channels, output_height, output_width,
                 test->kernel_h, test->kernel_w, test->stride_h, test->stride_w,
-                test->pad_top, test->pad_left, test->pad_bottom, test->pad_right, dense_kc_values[kc_index]};
-            lw_nhwc_epilogue epilogue = {bias, NULL, LW_NHWC_ACT_RELU, 0u, 0.0f, 0.0f};
+                test->pad_top, test->pad_left, test->pad_bottom, test->pad_right,
+                dense_kc_values[kc_index], 0u};
+            lw_nhwc_epilogue epilogue = {bias, NULL, LW_NHWC_ACT_RELU, 0u, 0.0f, 0.0f, NULL};
             uint64_t scratch_bytes = 0u;
             if (!lw_nhwc_dense_scratch_bytes(&desc, &scratch_bytes)) return 1;
             void* scratch = malloc((size_t)scratch_bytes);
@@ -240,8 +241,8 @@ int main(void) {
             lw_nhwc_dense_desc desc = {batch, test->input_channels, test->input_height,
                 test->input_width, test->output_channels, output_height, output_width,
                 test->kernel_h, test->kernel_w, test->stride_h, test->stride_w,
-                test->pad_top, test->pad_left, test->pad_bottom, test->pad_right, 512u};
-            lw_nhwc_epilogue epilogue = {bias, NULL, LW_NHWC_ACT_HARDSWISH, 0u, 0.0f, 0.0f};
+                test->pad_top, test->pad_left, test->pad_bottom, test->pad_right, 512u, 0u};
+            lw_nhwc_epilogue epilogue = {bias, NULL, LW_NHWC_ACT_HARDSWISH, 0u, 0.0f, 0.0f, NULL};
             uint64_t scratch_bytes = 0u;
             void* scratch;
             uint64_t i;
@@ -276,8 +277,8 @@ int main(void) {
             lw_nhwc_dense_desc desc = {batch, test->input_channels, test->input_height,
                 test->input_width, test->output_channels, output_height, output_width,
                 test->kernel_h, test->kernel_w, test->stride_h, test->stride_w,
-                test->pad_top, test->pad_left, test->pad_bottom, test->pad_right, 512u};
-            lw_nhwc_epilogue epilogue = {bias, NULL, LW_NHWC_ACT_RELU, 0u, 0.0f, 0.0f};
+                test->pad_top, test->pad_left, test->pad_bottom, test->pad_right, 512u, 0u};
+            lw_nhwc_epilogue epilogue = {bias, NULL, LW_NHWC_ACT_RELU, 0u, 0.0f, 0.0f, NULL};
             uint64_t scratch_bytes = 0u;
             double scalar_samples[5];
             double dense_samples[5];

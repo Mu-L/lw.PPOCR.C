@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
         }
         fill_input(input, input_count);
         lw_nhwc_epilogue epilogue = {
-            op->data.conv.bias, NULL, op->data.conv.activation, 0u, 0.0f, 0.0f
+            op->data.conv.bias, NULL, op->data.conv.activation, 0u, 0.0f, 0.0f, NULL
         };
         timings[0] = measure(0u, input, op->data.conv.packed_weights, &epilogue, baseline,
                              pixels, input_channels, output_channels, iterations);
