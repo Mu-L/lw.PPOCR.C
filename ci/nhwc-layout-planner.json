@@ -10,8 +10,8 @@
     "tiny": {
       "tensor_count": 274,
       "node_count": 159,
-      "nhwc_nodes": 118,
-      "nchw_nodes": 41,
+      "nhwc_nodes": 127,
+      "nchw_nodes": 32,
       "conversions": 4,
       "islands": 8,
       "width": 960
@@ -19,8 +19,8 @@
     "small": {
       "tensor_count": 563,
       "node_count": 336,
-      "nhwc_nodes": 188,
-      "nchw_nodes": 148,
+      "nhwc_nodes": 206,
+      "nchw_nodes": 130,
       "conversions": 4,
       "islands": 12,
       "width": 960

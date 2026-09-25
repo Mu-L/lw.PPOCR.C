@@ -122,7 +122,7 @@ def main() -> int:
     if not model.is_file():
         raise FileNotFoundError(f"layout snapshot model not found: {model}")
     driver = executable(build_dir, "layout-plan-driver")
-    command = [str(driver), str(model), "960"]
+    command = [str(driver), str(model), "48", "960"]
     if args.direct_input:
         command.append("direct-nhwc")
     completed = subprocess.run(

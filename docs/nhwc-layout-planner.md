@@ -23,8 +23,8 @@ converted Small/Medium validation models are:
 
 | Variant | Tensors | Nodes | NHWC nodes | NCHW nodes | Islands | Conversions |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Tiny | 274 | 159 | 118 | 41 | 8 | 4 |
-| Small | 563 | 336 | 188 | 148 | 12 | 4 |
+| Tiny | 274 | 159 | 127 | 32 | 8 | 4 |
+| Small | 563 | 336 | 206 | 130 | 12 | 4 |
 | Medium | 595 | 355 | 221 | 134 | 14 | 4 |
 
 The Small and Medium workflows reuse the `converted-runtime/rec.lwm` produced

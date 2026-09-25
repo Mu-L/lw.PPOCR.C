@@ -164,7 +164,13 @@ int main(int argc, char** argv) {
         return 2;
     }
     model_path = argv[1];
-    if (argc == 4 && strcmp(argv[3], "direct-nhwc") == 0) {
+    if (argc == 3) {
+        /* Backward-compatible width-only form: model.lwm <width>. */
+        if (!parse_width(argv[2], &width)) {
+            fprintf(stderr, "invalid width: %s\n", argv[2]);
+            return 2;
+        }
+    } else if (argc == 4 && strcmp(argv[3], "direct-nhwc") == 0) {
         /* Backward-compatible two-arg form: model.lwm <width> direct-nhwc. */
         if (!parse_width(argv[2], &width)) {
             fprintf(stderr, "invalid width: %s\n", argv[2]);
@@ -176,7 +182,7 @@ int main(int argc, char** argv) {
             fprintf(stderr, "invalid height: %s\n", argv[2]);
             return 2;
         }
-        if (argc >= 3 && !parse_width(argv[3], &width)) {
+        if (argc >= 4 && !parse_width(argv[3], &width)) {
             fprintf(stderr, "invalid width: %s\n", argv[3]);
             return 2;
         }

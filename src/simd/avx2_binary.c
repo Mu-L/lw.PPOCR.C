@@ -144,6 +144,9 @@ void lw_avx2_binary_channel_f32(lw_scalar_binary_op operation, const float* full
 }
 
 
+#if LW_COMPILES_AVX2_BINARY && (defined(__GNUC__) || defined(__clang__))
+__attribute__((target("avx2,no-fma")))
+#endif
 void lw_avx2_binary_channel_nchw_f32(lw_scalar_binary_op operation, const float* full,
                                      const float* channel, float* output, uint64_t spatial,
                                      uint32_t channels, int broadcast_is_left) {
