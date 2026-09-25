@@ -455,9 +455,11 @@ void lw_avx2_fma_nhwc_pointwise_grouped_f32(const float* input,
                                              uint32_t input_channels,
                                              uint32_t output_channels,
                                              uint32_t group_tiles) {
+#if defined(LW_NHWC_X86)
     const float* bias = epilogue == NULL ? NULL : epilogue->bias;
     const float* residual = epilogue == NULL ? NULL : epilogue->residual;
     const float* post_bias = epilogue == NULL ? NULL : epilogue->post_bias;
+#endif
     uint16_t activation = epilogue == NULL ? LW_NHWC_ACT_NONE : epilogue->activation;
 
     if (input == NULL || packed_weights == NULL || output == NULL ||
@@ -730,6 +732,7 @@ static void lw_avx2_fma_nhwc_pointwise_32x_f32(const float* input,
         }
     }
 #else
+    (void)row_tile;
     lw_avx2_fma_nhwc_pointwise_f32(input, packed_weights, epilogue, output,
                                    pixels, input_channels, output_channels);
 #endif

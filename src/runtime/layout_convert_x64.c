@@ -9,7 +9,7 @@
 #define LW_CONVERT_X86 0
 #endif
 
-#if defined(__GNUC__) || defined(__clang__)
+#if LW_CONVERT_X86 && (defined(__GNUC__) || defined(__clang__))
 #define LW_CONVERT_TARGET __attribute__((target("avx2,fma")))
 #else
 #define LW_CONVERT_TARGET
