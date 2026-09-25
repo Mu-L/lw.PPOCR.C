@@ -34,6 +34,7 @@ void lw_avx2_ctc_emitted_softmax_contiguous_f32(const float* input,
                                                 float* emitted_probabilities,
                                                 uint64_t row_count, uint64_t axis_count);
 void lw_wasm128_erf_f32(const float* input, float* output, uint64_t element_count);
+void lw_wasm128_gelu_f32(const float* input, float* output, uint64_t element_count);
 
 void lw_sse2_matmul_shared_f32(const float* input, const float* weights, float* output,
                                uint32_t batch_count, uint32_t rows, uint32_t inner_dimension,

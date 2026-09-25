@@ -1,4 +1,5 @@
 #include "nhwc_internal.h"
+#include "simd_kernels.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -72,18 +73,34 @@ void lw_wasm128_nhwc_pointwise_4x16_f32(const float* input,
                 for (uint32_t group = 0u; group < 4u; ++group) {
                     wasm_v128_store(sums + group * 4u, accumulators[row][group]);
                 }
-                for (uint32_t lane = 0u; lane < lanes; ++lane) {
-                    float value = sums[lane];
-                    if (epilogue != NULL) {
+                if (epilogue != NULL && epilogue->activation == LW_NHWC_ACT_GELU) {
+                    for (uint32_t lane = 0u; lane < lanes; ++lane) {
                         if (epilogue->post_bias != NULL) {
-                            value += epilogue->post_bias[oc + lane];
+                            sums[lane] += epilogue->post_bias[oc + lane];
                         }
                         if (epilogue->residual != NULL) {
-                            value += epilogue->residual[output_base + lane];
+                            sums[lane] += epilogue->residual[output_base + lane];
                         }
-                        value = apply_activation(value, epilogue->activation);
                     }
-                    output[output_base + lane] = value;
+                    /* The OC16 tile is fully initialized, including padded lanes. */
+                    lw_wasm128_gelu_f32(sums, sums, LW_NHWC_OC_BLOCK);
+                    for (uint32_t lane = 0u; lane < lanes; ++lane) {
+                        output[output_base + lane] = sums[lane];
+                    }
+                } else {
+                    for (uint32_t lane = 0u; lane < lanes; ++lane) {
+                        float value = sums[lane];
+                        if (epilogue != NULL) {
+                            if (epilogue->post_bias != NULL) {
+                                value += epilogue->post_bias[oc + lane];
+                            }
+                            if (epilogue->residual != NULL) {
+                                value += epilogue->residual[output_base + lane];
+                            }
+                            value = apply_activation(value, epilogue->activation);
+                        }
+                        output[output_base + lane] = value;
+                    }
                 }
             }
         }

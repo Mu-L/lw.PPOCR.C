@@ -846,9 +846,22 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         input = offset_ptr(instance, op->data.unary.input_offset); output = offset_ptr(instance, op->data.unary.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
         if (op->kind == LW_X64_REC_OP_RELU) lw_avx2_relu_contiguous_f32(input, output, op->data.unary.element_count);
-        else if (op->kind == LW_X64_REC_OP_ERF) lw_avx2_erf_f32(input, output, op->data.unary.element_count);
-        else if (op->kind == LW_X64_REC_OP_GELU) lw_avx2_gelu_f32(input, output, op->data.unary.element_count);
-        else lw_avx2_hard_sigmoid_contiguous_f32(input, output, op->data.unary.element_count, op->data.unary.alpha, op->data.unary.beta);
+        else if (op->kind == LW_X64_REC_OP_ERF) {
+#if defined(__EMSCRIPTEN__)
+            lw_wasm128_erf_f32(input, output, op->data.unary.element_count);
+#else
+            lw_avx2_erf_f32(input, output, op->data.unary.element_count);
+#endif
+        } else if (op->kind == LW_X64_REC_OP_GELU) {
+#if defined(__EMSCRIPTEN__)
+            lw_wasm128_gelu_f32(input, output, op->data.unary.element_count);
+#else
+            lw_avx2_gelu_f32(input, output, op->data.unary.element_count);
+#endif
+        } else {
+            lw_avx2_hard_sigmoid_contiguous_f32(input, output,
+                op->data.unary.element_count, op->data.unary.alpha, op->data.unary.beta);
+        }
         return LW_STATUS_OK;
     case LW_X64_REC_OP_SIGMOID:
         /* Canonical scalar sigmoid: identical expf evaluation order, so

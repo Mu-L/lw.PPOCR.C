@@ -17,6 +17,11 @@ Depthwise uses four-channel SIMD128 groups with the same OC32 packed weights
 and tap order, including border and row-shard cases. Neither kernel changes
 the public C ABI. The pack format remains OC16. Only the NHWC compiled layout
 is supported on WASM; NCHW-only x64 kernels are not linked into its executor.
+The compiled pointwise GELU epilogue and standalone Erf/GELU physical ops now
+reuse the canonical SIMD128 Erf polynomial instead of per-element `erff`.
+This is an experimental latency candidate, not a claimed speedup; the
+three-way full-OCR CI comparison must establish its end-to-end effect while
+the checked-in text checksum remains unchanged.
 The CLS backbone attempts the
 same compiler; unsupported CLS graphs fall back to the
 normal session. DET remains on the existing WASM executor.
