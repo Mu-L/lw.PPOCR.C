@@ -195,6 +195,9 @@ lw_status lw_avx2_fma_nhwc_convtranspose2x2_s2_f32(
 #endif
 }
 
+#if LW_CT_X86
+LW_CT_TARGET
+#endif
 lw_status lw_avx2_fma_nhwc_convtranspose2x2_s2_c1_f32(
     const float* input, const float* weights, const lw_nhwc_epilogue* epilogue,
     float* output, const lw_nhwc_convtranspose_desc* desc) {
