@@ -8,6 +8,7 @@
 
 #if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_SIMD_KERNELS)
 #include <wasm_simd128.h>
+#include "wasm128_epilogue_internal.h"
 #define LW_DENSE_WASM128 1
 #else
 #define LW_DENSE_WASM128 0
@@ -378,19 +379,30 @@ static void dense_tile_wasm128(const float* const* row_ptrs, uint32_t rows,
         return;
     }
     for (uint32_t row = 0u; row < rows; ++row) {
-        float values[LW_NHWC_OC_BLOCK];
         float* destination = output + (size_t)row * output_stride;
         const float* residual = epilogue == NULL || epilogue->residual == NULL
             ? NULL : epilogue->residual + (size_t)row * output_stride;
-        for (uint32_t lane = 0u; lane < LW_NHWC_OC_BLOCK / 4u; ++lane) {
-            wasm_v128_store(values + lane * 4u, sums[row][lane]);
-        }
-        for (uint32_t lane = 0u; lane < block_channels; ++lane) {
-            float value = values[lane];
-            if (epilogue != NULL && epilogue->post_bias != NULL) value += epilogue->post_bias[lane];
-            if (residual != NULL) value += residual[lane];
-            destination[lane] = dense_apply_activation(value,
-                epilogue == NULL ? LW_NHWC_ACT_NONE : epilogue->activation);
+        if (block_channels == LW_NHWC_OC_BLOCK) {
+            v128_t values[4] = {
+                sums[row][0], sums[row][1], sums[row][2], sums[row][3]
+            };
+            lw_wasm128_apply_epilogue_oc16(values, epilogue, 0u, residual, 0);
+            for (uint32_t group = 0u; group < 4u; ++group) {
+                wasm_v128_store(destination + group * 4u, values[group]);
+            }
+        } else {
+            float values[LW_NHWC_OC_BLOCK];
+            for (uint32_t group = 0u; group < 4u; ++group) {
+                wasm_v128_store(values + group * 4u, sums[row][group]);
+            }
+            for (uint32_t lane = 0u; lane < block_channels; ++lane) {
+                float value = values[lane];
+                if (epilogue != NULL && epilogue->post_bias != NULL)
+                    value += epilogue->post_bias[lane];
+                if (residual != NULL) value += residual[lane];
+                destination[lane] = dense_apply_activation(value,
+                    epilogue == NULL ? LW_NHWC_ACT_NONE : epilogue->activation);
+            }
         }
     }
 }

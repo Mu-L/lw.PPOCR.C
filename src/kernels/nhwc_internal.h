@@ -234,6 +234,12 @@ int lw_nhwc_convtranspose_packed_weight_count(uint32_t input_channels,
                                               uint64_t* element_count);
 void lw_pack_nhwc_convtranspose2x2_f32(const float* weights, uint32_t input_channels,
                                        uint32_t output_channels, float* packed_weights);
+lw_status lw_wasm128_nhwc_convtranspose2x2_s2_f32(
+    const float* input, const float* packed_weights, const lw_nhwc_epilogue* epilogue,
+    float* output, const lw_nhwc_convtranspose_desc* desc);
+lw_status lw_wasm128_nhwc_convtranspose2x2_s2_c1_f32(
+    const float* input, const float* weights, const lw_nhwc_epilogue* epilogue,
+    float* output, const lw_nhwc_convtranspose_desc* desc);
 lw_status lw_avx2_fma_nhwc_convtranspose2x2_s2_f32(
     const float* input, const float* packed_weights, const lw_nhwc_epilogue* epilogue,
     float* output, const lw_nhwc_convtranspose_desc* desc);

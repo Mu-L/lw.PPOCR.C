@@ -1,5 +1,6 @@
 #include "nhwc_internal.h"
 #include "simd_kernels.h"
+#include "wasm128_epilogue_internal.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -68,26 +69,35 @@ void lw_wasm128_nhwc_pointwise_4x16_f32(const float* input,
                 }
             }
             for (uint32_t row = 0u; row < rows; ++row) {
-                float sums[LW_NHWC_OC_BLOCK];
                 size_t output_base = (size_t)(pixel + row) * output_channels + oc;
-                for (uint32_t group = 0u; group < 4u; ++group) {
-                    wasm_v128_store(sums + group * 4u, accumulators[row][group]);
-                }
-                if (epilogue != NULL && epilogue->activation == LW_NHWC_ACT_GELU) {
-                    for (uint32_t lane = 0u; lane < lanes; ++lane) {
-                        if (epilogue->post_bias != NULL) {
-                            sums[lane] += epilogue->post_bias[oc + lane];
-                        }
-                        if (epilogue->residual != NULL) {
-                            sums[lane] += epilogue->residual[output_base + lane];
-                        }
-                    }
-                    /* The OC16 tile is fully initialized, including padded lanes. */
-                    lw_wasm128_gelu_f32(sums, sums, LW_NHWC_OC_BLOCK);
-                    for (uint32_t lane = 0u; lane < lanes; ++lane) {
-                        output[output_base + lane] = sums[lane];
+                if (lanes == LW_NHWC_OC_BLOCK) {
+                    v128_t values[4] = {
+                        accumulators[row][0], accumulators[row][1],
+                        accumulators[row][2], accumulators[row][3]
+                    };
+                    const float* residual = epilogue == NULL || epilogue->residual == NULL
+                        ? NULL : epilogue->residual + output_base;
+                    lw_wasm128_apply_epilogue_oc16(values, epilogue, oc, residual, 1);
+                    for (uint32_t group = 0u; group < 4u; ++group) {
+                        wasm_v128_store(output + output_base + group * 4u, values[group]);
                     }
                 } else {
+                    float sums[LW_NHWC_OC_BLOCK];
+                    for (uint32_t group = 0u; group < 4u; ++group) {
+                        wasm_v128_store(sums + group * 4u, accumulators[row][group]);
+                    }
+                    if (epilogue != NULL && epilogue->activation == LW_NHWC_ACT_GELU) {
+                        for (uint32_t lane = 0u; lane < lanes; ++lane) {
+                            if (epilogue->post_bias != NULL)
+                                sums[lane] += epilogue->post_bias[oc + lane];
+                            if (epilogue->residual != NULL)
+                                sums[lane] += epilogue->residual[output_base + lane];
+                        }
+                        lw_wasm128_gelu_f32(sums, sums, LW_NHWC_OC_BLOCK);
+                        for (uint32_t lane = 0u; lane < lanes; ++lane)
+                            output[output_base + lane] = sums[lane];
+                        continue;
+                    }
                     for (uint32_t lane = 0u; lane < lanes; ++lane) {
                         float value = sums[lane];
                         if (epilogue != NULL) {

@@ -1,4 +1,4 @@
-# Experimental WASM compiled REC
+# Experimental WASM compiled OCR
 
 The browser and Node/WASM distributions still use the established executor by
 default. `LW_WASM_COMPILED_REC=ON` is an opt-in experiment for the SIMD128 build;
@@ -12,7 +12,8 @@ Dense and depthwise now have SIMD128 physical kernels, selected by the
 Turning the option `OFF` preserves the portable physical kernels for an
 equal-plan A/B without changing the model pack, lifetime plan, or CTC path.
 Dense uses four SIMD128 vectors per OC16 block and retains the existing
-six-pixel tile, K blocking, partial sums, and scalar epilogue semantics.
+six-pixel tile, K blocking, and partial sums. Full OC16 blocks now apply
+bias/residual/activation in SIMD128; tails keep the prior scalar path.
 Depthwise uses four-channel SIMD128 groups with the same OC32 packed weights
 and tap order, including border and row-shard cases. Neither kernel changes
 the public C ABI. The pack format remains OC16. Only the NHWC compiled layout
@@ -22,9 +23,15 @@ reuse the canonical SIMD128 Erf polynomial instead of per-element `erff`.
 This is an experimental latency candidate, not a claimed speedup; the
 three-way full-OCR CI comparison must establish its end-to-end effect while
 the checked-in text checksum remains unchanged.
-The CLS backbone attempts the
-same compiler; unsupported CLS graphs fall back to the
-normal session. DET remains on the existing WASM executor.
+The CLS backbone attempts the same compiler; its fixed-point preprocessor
+writes directly into the compiled NHWC input when available. Unsupported CLS
+graphs still fall back to the normal session. In an experimental compiled REC
+build, `LW_WASM_COMPILED_DET=ON` (default) additionally attempts NHWC compiled
+DET when fixed-point DET preprocessing is enabled. DET Pointwise and
+ConvTranspose use SIMD128 kernels; the fixed-point preprocessor writes NHWC
+directly to the backend input. If DET compilation fails, the canonical DET
+executor is used. The `LW_WASM_COMPILED_DET` option can be turned off for a
+REC/CLS-only comparison. The normal browser/Node release build is unaffected.
 
 There is no pthread requirement, fast-math flag, or relaxed-SIMD dependency.
 The option requires `LW_WASM_SIMD128=ON`.
@@ -49,11 +56,15 @@ depthwise, CTC, etc.). Those instrumented timings identify hotspots but must
 not be compared to the full-OCR A/B latency. Only the experimental Node package
 accepts `LW_X64_REC_PROFILE` from its host environment; browser and canonical
 Node packages do not change their environment policy.
-The CI log must also confirm `widths=5/5` and `ctc=simd128`, so matching
-text cannot pass by silently using only the canonical executor.
+The CI log must also confirm `widths=5/5`, `ctc=simd128`, and a compiled NHWC
+DET marker for the sample's 512x512 resized input. This prevents a successful
+32x32 initialization compile from hiding a fallback on the measured image.
+The compiled-scalar control keeps existing SIMD128 Pointwise/CTC (and DET
+ConvTranspose) kernels; it only disables the optional SIMD128 Dense,
+Depthwise, and common-op dispatch. It is not a wholly scalar runtime.
 
-This does **not** yet establish 100% compiled coverage, a REC-only benchmark,
-or a performance win. Keep `LW_WASM_COMPILED_REC` off for releases until CI confirms the
-five-width text contract, no canonical fallbacks in the intended model, and
-end-to-end latency/memory improvements. Further WASM-specific CLS and DET
-tuning are separate follow-up work.
+This does **not** yet establish a performance win or complete coverage across
+Tiny, Small, and Medium. Keep `LW_WASM_COMPILED_REC` off for releases until CI
+confirms exact text, backend coverage, and end-to-end latency/memory improvement
+on all intended model packs. The local native tests do not substitute for an
+Emscripten build and the remote WASM comparison.

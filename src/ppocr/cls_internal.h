@@ -34,6 +34,14 @@ lw_status lw_cls_preprocess_bgr_u8_fixed(
     uint64_t output_element_count, uint32_t* resized_width,
     lw_cls_preprocess_workspace* workspace);
 
+/* Same fixed-point samples and LUT as the NCHW variant, directly interleaved
+ * into the compiled backend's NHWC input arena. */
+lw_status lw_cls_preprocess_bgr_u8_fixed_nhwc(
+    const uint8_t* source, uint64_t source_byte_count, uint32_t source_width,
+    uint32_t source_height, uint32_t source_stride, float* output,
+    uint64_t output_element_count, uint32_t* resized_width,
+    lw_cls_preprocess_workspace* workspace);
+
 void lw_cls_preprocess_workspace_init(lw_cls_preprocess_workspace* workspace);
 void lw_cls_preprocess_workspace_free(lw_cls_preprocess_workspace* workspace);
 

@@ -729,8 +729,13 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         } else if (op->data.affine.channel_major) {
             scalar_nhwc_batch_norm(&op->data.affine, input, output);
         } else {
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_SIMD_KERNELS)
+            lw_wasm128_affine_nhwc_f32(input, op->data.affine.mul, op->data.affine.add,
+                                       output, op->data.affine.pixels, op->data.affine.channels);
+#else
             lw_avx2_nhwc_affine_f32(input, op->data.affine.mul, op->data.affine.add,
                                     output, op->data.affine.pixels, op->data.affine.channels);
+#endif
         }
         return LW_STATUS_OK;
     case LW_X64_REC_OP_ADD: case LW_X64_REC_OP_MUL: case LW_X64_REC_OP_DIV:
@@ -761,13 +766,23 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
             float* full = offset_ptr(instance, op->data.binary.right_offset);
             float* channel = op->data.binary.left_constant != NULL ? (float*)(uintptr_t)op->data.binary.left_constant : offset_ptr(instance, op->data.binary.left_offset);
             if (full == NULL || channel == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_SIMD_KERNELS)
+            lw_wasm128_binary_channel_nhwc_f32(binary_operation(op->data.binary.operation),
+                full, channel, output, op->data.binary.pixels, op->data.binary.channels, 1);
+#else
             lw_avx2_binary_channel_f32(binary_operation(op->data.binary.operation), full, channel, output, op->data.binary.pixels, op->data.binary.channels, 1);
+#endif
             return LW_STATUS_OK;
         }
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
         if (op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_RIGHT_SCALAR && op->data.binary.right_constant != NULL) {
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_SIMD_KERNELS)
+            lw_wasm128_binary_scalar_f32(binary_operation(op->data.binary.operation), input,
+                op->data.binary.right_constant[0], output, op->data.binary.element_count, 0);
+#else
             lw_avx2_binary_right_scalar_f32(binary_operation(op->data.binary.operation), input,
                                              op->data.binary.right_constant[0], output, op->data.binary.element_count);
+#endif
             return LW_STATUS_OK;
         }
         if (op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_SAME) {
@@ -803,13 +818,23 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
                 }
                 return LW_STATUS_OK;
             }
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_SIMD_KERNELS)
+            lw_wasm128_binary_contiguous_f32(binary_operation(op->data.binary.operation),
+                input, right, output, op->data.binary.element_count);
+#else
             lw_avx2_binary_contiguous_f32(binary_operation(op->data.binary.operation), input, right, output, op->data.binary.element_count);
+#endif
             return LW_STATUS_OK;
         }
         if (op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_RIGHT_CHANNEL) {
             float* channel = op->data.binary.right_constant != NULL ? (float*)(uintptr_t)op->data.binary.right_constant : offset_ptr(instance, op->data.binary.right_offset);
             if (channel == NULL) return LW_STATUS_INVALID_ARGUMENT;
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_SIMD_KERNELS)
+            lw_wasm128_binary_channel_nhwc_f32(binary_operation(op->data.binary.operation),
+                input, channel, output, op->data.binary.pixels, op->data.binary.channels, 0);
+#else
             lw_avx2_binary_channel_f32(binary_operation(op->data.binary.operation), input, channel, output, op->data.binary.pixels, op->data.binary.channels, 0);
+#endif
             return LW_STATUS_OK;
         }
         if (op->data.binary.broadcast_kind == LW_X64_REC_BROADCAST_RIGHT_PIXEL_SCALAR) {
@@ -819,9 +844,16 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
             uint32_t pixel;
             if (input == NULL || output == NULL || pixel_scalars == NULL) return LW_STATUS_INVALID_ARGUMENT;
             for (pixel = 0u; pixel < op->data.binary.pixels; ++pixel) {
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_SIMD_KERNELS)
+                lw_wasm128_binary_scalar_f32(binary_operation(op->data.binary.operation),
+                    input + (size_t)pixel * op->data.binary.channels, pixel_scalars[pixel],
+                    output + (size_t)pixel * op->data.binary.channels,
+                    op->data.binary.channels, 0);
+#else
                 lw_avx2_binary_right_scalar_f32(binary_operation(op->data.binary.operation),
                     input + (size_t)pixel * op->data.binary.channels, pixel_scalars[pixel],
                     output + (size_t)pixel * op->data.binary.channels, op->data.binary.channels);
+#endif
             }
             return LW_STATUS_OK;
         }
@@ -845,7 +877,13 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
     case LW_X64_REC_OP_RELU: case LW_X64_REC_OP_ERF: case LW_X64_REC_OP_GELU: case LW_X64_REC_OP_HARD_SIGMOID:
         input = offset_ptr(instance, op->data.unary.input_offset); output = offset_ptr(instance, op->data.unary.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
-        if (op->kind == LW_X64_REC_OP_RELU) lw_avx2_relu_contiguous_f32(input, output, op->data.unary.element_count);
+        if (op->kind == LW_X64_REC_OP_RELU) {
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_SIMD_KERNELS)
+            lw_wasm128_relu_f32(input, output, op->data.unary.element_count);
+#else
+            lw_avx2_relu_contiguous_f32(input, output, op->data.unary.element_count);
+#endif
+        }
         else if (op->kind == LW_X64_REC_OP_ERF) {
 #if defined(__EMSCRIPTEN__)
             lw_wasm128_erf_f32(input, output, op->data.unary.element_count);
@@ -933,9 +971,14 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
                 output[channel] = sum / (float)(op->data.reduce.height * op->data.reduce.width);
             }
         } else {
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_SIMD_KERNELS)
+            lw_wasm128_reduce_mean_hw_f32(input, output, op->data.reduce.batch,
+                op->data.reduce.height, op->data.reduce.width, op->data.reduce.channels);
+#else
             lw_avx2_nhwc_reduce_mean_hw_f32(input, output, op->data.reduce.batch,
                                              op->data.reduce.height, op->data.reduce.width,
                                              op->data.reduce.channels);
+#endif
         }
         return LW_STATUS_OK;
     case LW_X64_REC_OP_AVG_POOL: case LW_X64_REC_OP_MAX_POOL:
@@ -951,7 +994,22 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
                                                op->data.pool.strides, op->data.pool.pads, 0u,
                                                op->data.pool.count_include_pad);
         }
-        lw_avx2_nhwc_pool_f32(input, output, (uint32_t)op->data.pool.input_dimensions[0], (uint32_t)op->data.pool.input_dimensions[1], (uint32_t)op->data.pool.input_dimensions[2], (uint32_t)op->data.pool.output_dimensions[1], (uint32_t)op->data.pool.output_dimensions[2], (uint32_t)op->data.pool.input_dimensions[3], (uint32_t)op->data.pool.kernel[0], (uint32_t)op->data.pool.kernel[1], (uint32_t)op->data.pool.strides[0], (uint32_t)op->data.pool.strides[1], (uint32_t)op->data.pool.pads[0], (uint32_t)op->data.pool.pads[1], op->data.pool.count_include_pad, op->data.pool.is_max); return LW_STATUS_OK;
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_SIMD_KERNELS)
+        lw_wasm128_pool_nhwc_f32(input, output,
+#else
+        lw_avx2_nhwc_pool_f32(input, output,
+#endif
+            (uint32_t)op->data.pool.input_dimensions[0],
+            (uint32_t)op->data.pool.input_dimensions[1],
+            (uint32_t)op->data.pool.input_dimensions[2],
+            (uint32_t)op->data.pool.output_dimensions[1],
+            (uint32_t)op->data.pool.output_dimensions[2],
+            (uint32_t)op->data.pool.input_dimensions[3],
+            (uint32_t)op->data.pool.kernel[0], (uint32_t)op->data.pool.kernel[1],
+            (uint32_t)op->data.pool.strides[0], (uint32_t)op->data.pool.strides[1],
+            (uint32_t)op->data.pool.pads[0], (uint32_t)op->data.pool.pads[1],
+            op->data.pool.count_include_pad, op->data.pool.is_max);
+        return LW_STATUS_OK;
     case LW_X64_REC_OP_TRANSPOSE: {
         uint32_t rank = op->data.transpose.rank;
         uint32_t axis;
@@ -1018,7 +1076,13 @@ static lw_status execute_op(lw_x64_rec_instance* instance, const lw_x64_rec_op* 
         input = offset_ptr(instance, op->data.matmul.input_offset); output = offset_ptr(instance, op->data.matmul.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
         if (op->data.matmul.packed_weights != NULL) {
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_SIMD_KERNELS)
+            lw_wasm128_packed_matmul_shared_f32(input, op->data.matmul.packed_weights,
+                output, op->data.matmul.batch, op->data.matmul.rows,
+                op->data.matmul.inner, op->data.matmul.columns);
+#else
             lw_avx2_packed_matmul_shared_f32(input, op->data.matmul.packed_weights, output, op->data.matmul.batch, op->data.matmul.rows, op->data.matmul.inner, op->data.matmul.columns);
+#endif
             return LW_STATUS_OK;
         }
         right = op->data.matmul.weights != NULL ? op->data.matmul.weights : (const float*)offset_ptr(instance, op->data.matmul.weights_offset);

@@ -1320,6 +1320,15 @@ lw_x64_det_compile_result lw_x64_det_backend_compile_ex(
     program->input_width = width;
     program->backend_layout = (uint8_t)strategy;
     program->value_count = info.tensor_count;
+#if defined(__EMSCRIPTEN__) && defined(__wasm_simd128__)
+    if (strategy != LW_X64_DET_COMPILE_NHWC) {
+        lw_session_free(session);
+        lw_x64_det_program_free(program);
+        lw_set_error(error, LW_STATUS_UNSUPPORTED,
+                     "WASM compiled DET supports NHWC layout only");
+        return LW_X64_DET_COMPILE_UNSUPPORTED;
+    }
+#else
     if (!lw_simd_level_is_avx2(program->cpu.simd) || !program->cpu.has_avx2_fma) {
         lw_session_free(session);
         lw_x64_det_program_free(program);
@@ -1327,6 +1336,7 @@ lw_x64_det_compile_result lw_x64_det_backend_compile_ex(
                      "standalone x64 DET backend requires AVX2 and FMA");
         return LW_X64_DET_COMPILE_UNSUPPORTED;
     }
+#endif
     program->effective_node_layout = (uint8_t*)calloc(info.node_count, sizeof(uint8_t));
     if (program->effective_node_layout == NULL) {
         lw_session_free(session);

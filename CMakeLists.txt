@@ -12,6 +12,8 @@ option(LW_WASM_SIMD128
     "Enable portable WebAssembly SIMD128 for the standalone OCR HTML" ON)
 option(LW_WASM_COMPILED_REC
     "Experimentally run WASM REC on the compiled physical backend" OFF)
+option(LW_WASM_COMPILED_DET
+    "Run WASM DET on the compiled NHWC backend when compiled REC is enabled" ON)
 option(LW_WASM_REC_SIMD_KERNELS
     "Use SIMD128 Dense and Depthwise kernels in experimental WASM compiled REC" ON)
 option(LW_WEB_LEGACY
@@ -351,6 +353,9 @@ endif()
 if(LW_WASM_COMPILED_REC_ENABLED)
     list(APPEND LW_PPOCR_C_SOURCES
         src/simd/wasm128_nhwc_pointwise.c
+        src/simd/wasm128_elementwise.c
+        src/simd/wasm128_matmul.c
+        src/simd/wasm128_nhwc_convtranspose.c
         src/simd/wasm128_packed_matmul.c)
 endif()
 if(MSVC AND MSVC_C_ARCHITECTURE_ID MATCHES "^(x64|X86)$")
@@ -444,6 +449,10 @@ if(LW_X64_REC_FAST_ENABLED OR LW_WASM_COMPILED_REC_ENABLED)
     target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
     if(LW_WASM_COMPILED_REC_ENABLED AND LW_WASM_REC_SIMD_KERNELS)
         target_compile_definitions(lw_ppocr_c PRIVATE LW_WASM_REC_SIMD_KERNELS=1)
+    endif()
+    if(LW_WASM_COMPILED_REC_ENABLED AND LW_WASM_COMPILED_DET AND
+       LW_EXPERIMENTAL_DET_FIXED_POINT_RESIZE)
+        target_compile_definitions(lw_ppocr_c PRIVATE LW_WASM_COMPILED_DET=1)
     endif()
     if(MSVC)
         set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c src/simd/avx2_nhwc_depthwise.c src/simd/avx2_nhwc_support.c src/simd/avx2_nhwc_convtranspose.c APPEND PROPERTY

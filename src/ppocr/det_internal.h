@@ -37,6 +37,12 @@ lw_status lw_det_preprocess_bgr_u8_fixed(
     uint32_t resized_height, float* output, uint64_t output_element_count,
     lw_det_preprocess_workspace* workspace, lw_thread_pool* pool,
     uint32_t intra_op_thread_count);
+lw_status lw_det_preprocess_bgr_u8_fixed_nhwc(
+    const uint8_t* source, uint64_t source_byte_count, uint32_t source_width,
+    uint32_t source_height, uint32_t source_stride, uint32_t resized_width,
+    uint32_t resized_height, float* output, uint64_t output_element_count,
+    lw_det_preprocess_workspace* workspace, lw_thread_pool* pool,
+    uint32_t intra_op_thread_count);
 
 void lw_det_preprocess_workspace_init(lw_det_preprocess_workspace* workspace);
 void lw_det_preprocess_workspace_free(lw_det_preprocess_workspace* workspace);

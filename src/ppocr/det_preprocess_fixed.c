@@ -30,6 +30,7 @@ typedef struct fixed_row_context {
     const float* lut;
     float* output;
     uint32_t plane;
+    uint8_t nhwc;
 } fixed_row_context;
 
 static const double det_mean[3] = {0.485, 0.456, 0.406};
@@ -71,7 +72,10 @@ static void fixed_row(const fixed_row_context* context, uint32_t oy, int32_t* ro
         for (channel = 0u; channel < 3u; ++channel) {
             int32_t value = lw_fixed_blend(row0[row_offset + channel], row1[row_offset + channel],
                                            beta0, beta1);
-            context->output[(size_t)channel * context->plane + destination + ox] =
+            size_t output_index = context->nhwc != 0u
+                ? ((size_t)destination + ox) * 3u + channel
+                : (size_t)channel * context->plane + destination + ox;
+            context->output[output_index] =
                 context->lut[(size_t)channel * 256u + (uint32_t)value];
         }
     }
@@ -136,12 +140,12 @@ static void build_normalized_lut(float* lut) {
     }
 }
 
-lw_status lw_det_preprocess_bgr_u8_fixed(
+static lw_status preprocess_fixed_impl(
     const uint8_t* source, uint64_t source_byte_count, uint32_t source_width,
     uint32_t source_height, uint32_t source_stride, uint32_t resized_width,
     uint32_t resized_height, float* output, uint64_t output_element_count,
     lw_det_preprocess_workspace* workspace, lw_thread_pool* pool,
-    uint32_t intra_op_thread_count) {
+    uint32_t intra_op_thread_count, uint8_t nhwc) {
     uint64_t row_bytes;
     uint64_t required_source_bytes;
     uint64_t plane;
@@ -197,6 +201,7 @@ lw_status lw_det_preprocess_bgr_u8_fixed(
     context.lut = lut;
     context.output = output;
     context.plane = (uint32_t)plane;
+    context.nhwc = nhwc;
     if (workers > 1u) {
         uint32_t worker;
         lw_thread_pool_run(pool, workers, fixed_row_worker, &context);
@@ -205,6 +210,28 @@ lw_status lw_det_preprocess_bgr_u8_fixed(
         fixed_row_worker(&context, 0u, 1u);
     }
     return LW_STATUS_OK;
+}
+
+lw_status lw_det_preprocess_bgr_u8_fixed(
+    const uint8_t* source, uint64_t source_byte_count, uint32_t source_width,
+    uint32_t source_height, uint32_t source_stride, uint32_t resized_width,
+    uint32_t resized_height, float* output, uint64_t output_element_count,
+    lw_det_preprocess_workspace* workspace, lw_thread_pool* pool,
+    uint32_t intra_op_thread_count) {
+    return preprocess_fixed_impl(source, source_byte_count, source_width,
+        source_height, source_stride, resized_width, resized_height, output,
+        output_element_count, workspace, pool, intra_op_thread_count, 0u);
+}
+
+lw_status lw_det_preprocess_bgr_u8_fixed_nhwc(
+    const uint8_t* source, uint64_t source_byte_count, uint32_t source_width,
+    uint32_t source_height, uint32_t source_stride, uint32_t resized_width,
+    uint32_t resized_height, float* output, uint64_t output_element_count,
+    lw_det_preprocess_workspace* workspace, lw_thread_pool* pool,
+    uint32_t intra_op_thread_count) {
+    return preprocess_fixed_impl(source, source_byte_count, source_width,
+        source_height, source_stride, resized_width, resized_height, output,
+        output_element_count, workspace, pool, intra_op_thread_count, 1u);
 }
 
 void lw_det_preprocess_workspace_free(lw_det_preprocess_workspace* workspace) {

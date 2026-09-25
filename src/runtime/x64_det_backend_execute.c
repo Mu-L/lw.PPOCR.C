@@ -2,6 +2,7 @@
 #include "lwm_read.h"
 #include "operator_internal.h"
 #include "parallel_internal.h"
+#include "rec_backend_kernels_internal.h"
 #include "../simd/simd_kernels.h"
 
 #include <stdint.h>
@@ -689,6 +690,11 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
             if (status != LW_STATUS_OK) return status;
             return LW_STATUS_OK;
         }
+#if defined(LW_WASM_COMPILED_DET)
+        lw_rec_backend_kernels_current()->pointwise(
+            input, op->data.conv.packed_weights, &ep, output, pixels,
+            op->data.conv.input_channels, op->data.conv.output_channels);
+#else
         switch (op->data.conv.pointwise_kernel) {
         case LW_X64_DET_PW_4X16:
             lw_avx2_fma_nhwc_pointwise_4x16_f32(
@@ -711,6 +717,7 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
                 op->data.conv.input_channels, op->data.conv.output_channels);
             break;
         }
+#endif
         return LW_STATUS_OK;
     }
     case LW_X64_DET_OP_DENSE: {
@@ -848,11 +855,21 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
             desc.output_height = (uint32_t)op->data.conv_transpose.output_dimensions[2];
             desc.output_width = (uint32_t)op->data.conv_transpose.output_dimensions[3];
             if (op->kind == LW_X64_DET_OP_CONV_TRANSPOSE_NHWC_C1) {
+#if defined(LW_WASM_COMPILED_DET)
+                return lw_wasm128_nhwc_convtranspose2x2_s2_c1_f32(
+                    input, op->data.conv_transpose.weights, &epilogue, output, &desc);
+#else
                 return lw_avx2_fma_nhwc_convtranspose2x2_s2_c1_f32(
                     input, op->data.conv_transpose.weights, &epilogue, output, &desc);
+#endif
             }
+#if defined(LW_WASM_COMPILED_DET)
+            return lw_wasm128_nhwc_convtranspose2x2_s2_f32(
+                input, op->data.conv_transpose.packed_weights, &epilogue, output, &desc);
+#else
             return lw_avx2_fma_nhwc_convtranspose2x2_s2_f32(
                 input, op->data.conv_transpose.packed_weights, &epilogue, output, &desc);
+#endif
         }
     case LW_X64_DET_OP_RESIZE_NCHW:
         input = offset_ptr(instance, op->data.resize.input_offset);
@@ -952,8 +969,14 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
         } else if (op->data.affine.channel_major) {
             scalar_nhwc_batch_norm(&op->data.affine, input, output);
         } else {
+#if defined(LW_WASM_COMPILED_DET) && defined(LW_WASM_REC_SIMD_KERNELS)
+            lw_wasm128_affine_nhwc_f32(input, op->data.affine.mul, op->data.affine.add,
+                                       output, op->data.affine.pixels,
+                                       op->data.affine.channels);
+#else
             lw_avx2_nhwc_affine_f32(input, op->data.affine.mul, op->data.affine.add,
                                     output, op->data.affine.pixels, op->data.affine.channels);
+#endif
         }
         return LW_STATUS_OK;
     case LW_X64_DET_OP_ADD: case LW_X64_DET_OP_MUL: case LW_X64_DET_OP_DIV:
@@ -994,8 +1017,14 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
                     op->data.binary.pixels, ch_threshold < 2u ? 2u : ch_threshold, 1);
                 if (sharded != LW_STATUS_UNSUPPORTED) return sharded;
             }
+#if defined(LW_WASM_COMPILED_DET) && defined(LW_WASM_REC_SIMD_KERNELS)
+            lw_wasm128_binary_channel_nhwc_f32(binary_operation(op->data.binary.operation),
+                full, channel, output, op->data.binary.pixels,
+                op->data.binary.channels, 1);
+#else
             lw_avx2_binary_channel_f32(binary_operation(op->data.binary.operation), full, channel,
                                        output, op->data.binary.pixels, op->data.binary.channels, 1);
+#endif
             return LW_STATUS_OK;
         }
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
@@ -1007,9 +1036,15 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
                     op->data.binary.element_count, LW_X64_DET_ELEMENTWISE_SHARD_ELEMS, 0);
                 if (sharded != LW_STATUS_UNSUPPORTED) return sharded;
             }
+#if defined(LW_WASM_COMPILED_DET) && defined(LW_WASM_REC_SIMD_KERNELS)
+            lw_wasm128_binary_scalar_f32(binary_operation(op->data.binary.operation), input,
+                op->data.binary.right_constant[0], output,
+                op->data.binary.element_count, 0);
+#else
             lw_avx2_binary_right_scalar_f32(binary_operation(op->data.binary.operation), input,
                                             op->data.binary.right_constant[0], output,
                                             op->data.binary.element_count);
+#endif
             return LW_STATUS_OK;
         }
         if (op->data.binary.broadcast_kind == LW_X64_DET_BROADCAST_SAME) {
@@ -1023,8 +1058,13 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
                     op->data.binary.element_count, LW_X64_DET_ELEMENTWISE_SHARD_ELEMS, 0);
                 if (sharded != LW_STATUS_UNSUPPORTED) return sharded;
             }
+#if defined(LW_WASM_COMPILED_DET) && defined(LW_WASM_REC_SIMD_KERNELS)
+            lw_wasm128_binary_contiguous_f32(binary_operation(op->data.binary.operation),
+                input, right, output, op->data.binary.element_count);
+#else
             lw_avx2_binary_contiguous_f32(binary_operation(op->data.binary.operation), input,
                                           right, output, op->data.binary.element_count);
+#endif
             return LW_STATUS_OK;
         }
         if (op->data.binary.broadcast_kind == LW_X64_DET_BROADCAST_RIGHT_CHANNEL) {
@@ -1040,8 +1080,14 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
                     op->data.binary.pixels, ch_threshold < 2u ? 2u : ch_threshold, 0);
                 if (sharded != LW_STATUS_UNSUPPORTED) return sharded;
             }
+#if defined(LW_WASM_COMPILED_DET) && defined(LW_WASM_REC_SIMD_KERNELS)
+            lw_wasm128_binary_channel_nhwc_f32(binary_operation(op->data.binary.operation),
+                input, channel, output, op->data.binary.pixels,
+                op->data.binary.channels, 0);
+#else
             lw_avx2_binary_channel_f32(binary_operation(op->data.binary.operation), input, channel,
                                        output, op->data.binary.pixels, op->data.binary.channels, 0);
+#endif
             return LW_STATUS_OK;
         }
         if (op->data.binary.right_constant != NULL && op->data.binary.channels > 1u) {
@@ -1066,7 +1112,11 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
         output = offset_ptr(instance, op->data.unary.output_offset);
         if (input == NULL || output == NULL) return LW_STATUS_INVALID_ARGUMENT;
         if (op->kind == LW_X64_DET_OP_RELU) {
+#if defined(LW_WASM_COMPILED_DET) && defined(LW_WASM_REC_SIMD_KERNELS)
+            lw_wasm128_relu_f32(input, output, op->data.unary.element_count);
+#else
             lw_avx2_relu_contiguous_f32(input, output, op->data.unary.element_count);
+#endif
         } else if (op->kind == LW_X64_DET_OP_ERF) {
             lw_avx2_erf_f32(input, output, op->data.unary.element_count);
         } else if (op->kind == LW_X64_DET_OP_GELU) {
@@ -1103,9 +1153,15 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
                 output[channel] = sum / (float)(op->data.reduce.height * op->data.reduce.width);
             }
         } else {
+#if defined(LW_WASM_COMPILED_DET) && defined(LW_WASM_REC_SIMD_KERNELS)
+            lw_wasm128_reduce_mean_hw_f32(input, output, op->data.reduce.batch,
+                op->data.reduce.height, op->data.reduce.width,
+                op->data.reduce.channels);
+#else
             lw_avx2_nhwc_reduce_mean_hw_f32(input, output, op->data.reduce.batch,
                                             op->data.reduce.height, op->data.reduce.width,
                                             op->data.reduce.channels);
+#endif
         }
         return LW_STATUS_OK;
     case LW_X64_DET_OP_AVG_POOL: case LW_X64_DET_OP_MAX_POOL:
@@ -1145,6 +1201,22 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
                 (uint64_t)op->data.pool.output_dimensions[1], 2u, 0);
             if (sharded != LW_STATUS_UNSUPPORTED) return sharded;
         }
+#if defined(LW_WASM_COMPILED_DET) && defined(LW_WASM_REC_SIMD_KERNELS)
+        lw_wasm128_pool_nhwc_f32(input, output,
+            (uint32_t)op->data.pool.input_dimensions[0],
+            (uint32_t)op->data.pool.input_dimensions[1],
+            (uint32_t)op->data.pool.input_dimensions[2],
+            (uint32_t)op->data.pool.output_dimensions[1],
+            (uint32_t)op->data.pool.output_dimensions[2],
+            (uint32_t)op->data.pool.input_dimensions[3],
+            (uint32_t)op->data.pool.kernel[0],
+            (uint32_t)op->data.pool.kernel[1],
+            (uint32_t)op->data.pool.strides[0],
+            (uint32_t)op->data.pool.strides[1],
+            (uint32_t)op->data.pool.pads[0],
+            (uint32_t)op->data.pool.pads[1],
+            op->data.pool.count_include_pad, op->data.pool.is_max);
+#else
         lw_avx2_nhwc_pool_f32(input, output, (uint32_t)op->data.pool.input_dimensions[0],
                               (uint32_t)op->data.pool.input_dimensions[1],
                               (uint32_t)op->data.pool.input_dimensions[2],
@@ -1155,6 +1227,7 @@ static lw_status execute_op(lw_x64_det_instance* instance, const lw_x64_det_op* 
                               (uint32_t)op->data.pool.strides[0], (uint32_t)op->data.pool.strides[1],
                               (uint32_t)op->data.pool.pads[0], (uint32_t)op->data.pool.pads[1],
                               op->data.pool.count_include_pad, op->data.pool.is_max);
+#endif
         return LW_STATUS_OK;
     default: return LW_STATUS_UNSUPPORTED;
     }

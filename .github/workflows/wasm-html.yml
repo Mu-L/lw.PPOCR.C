@@ -220,9 +220,17 @@ jobs:
             build-wasm/rec-benchmark-compiled.log
           grep -q 'LW_WASM_COMPILED_REC ctc=simd128' \
             build-wasm/rec-benchmark-compiled.log
+          grep -Eq 'LW_WASM_COMPILED_CLS layout=nhwc ops=[1-9][0-9]* unsupported=0' \
+            build-wasm/rec-benchmark-compiled.log
+          grep -Eq 'LW_WASM_COMPILED_DET input=512x512 layout=nhwc ops=[1-9][0-9]* unsupported=0 conversions=[0-9]+ direct_input=1' \
+            build-wasm/rec-benchmark-compiled.log
           grep -q 'LW_WASM_COMPILED_REC widths=5/5' \
             build-wasm/rec-benchmark-compiled-scalar.log
           grep -q 'LW_WASM_COMPILED_REC ctc=simd128' \
+            build-wasm/rec-benchmark-compiled-scalar.log
+          grep -Eq 'LW_WASM_COMPILED_CLS layout=nhwc ops=[1-9][0-9]* unsupported=0' \
+            build-wasm/rec-benchmark-compiled-scalar.log
+          grep -Eq 'LW_WASM_COMPILED_DET input=512x512 layout=nhwc ops=[1-9][0-9]* unsupported=0 conversions=[0-9]+ direct_input=1' \
             build-wasm/rec-benchmark-compiled-scalar.log
           exit "$report_status"
 

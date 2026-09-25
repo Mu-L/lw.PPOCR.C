@@ -69,12 +69,16 @@ static int run_preprocess(int argc, char** argv) {
     float height_ratio;
     uint64_t output_count;
     float* output = NULL;
+    float* fixed_nchw = NULL;
+    float* fixed_nhwc = NULL;
+    lw_det_preprocess_workspace fixed_workspace;
     lw_status status;
     int return_code = 1;
     if (argc != 8 || !parse_u32(argv[3], &width) || !parse_u32(argv[4], &height) ||
         !parse_u32(argv[5], &stride) || !parse_u32(argv[6], &limit) ||
         !read_file(argv[2], &source, &source_bytes))
         return 2;
+    lw_det_preprocess_workspace_init(&fixed_workspace);
     status = lw_det_compute_size(width, height, limit, &resized_width, &resized_height,
                                  &width_ratio, &height_ratio);
     if (status != LW_STATUS_OK)
@@ -83,8 +87,33 @@ static int run_preprocess(int argc, char** argv) {
     if (output_count > SIZE_MAX / sizeof(*output))
         goto cleanup;
     output = (float*)malloc((size_t)output_count * sizeof(*output));
-    if (output == NULL)
+    fixed_nchw = (float*)malloc((size_t)output_count * sizeof(*fixed_nchw));
+    fixed_nhwc = (float*)malloc((size_t)output_count * sizeof(*fixed_nhwc));
+    if (output == NULL || fixed_nchw == NULL || fixed_nhwc == NULL)
         goto cleanup;
+    status = lw_det_preprocess_bgr_u8_fixed(
+        source, source_bytes, width, height, stride, resized_width, resized_height,
+        fixed_nchw, output_count, &fixed_workspace, NULL, 1u);
+    if (status != LW_STATUS_OK) goto cleanup;
+    status = lw_det_preprocess_bgr_u8_fixed_nhwc(
+        source, source_bytes, width, height, stride, resized_width, resized_height,
+        fixed_nhwc, output_count, &fixed_workspace, NULL, 1u);
+    if (status != LW_STATUS_OK) goto cleanup;
+    for (uint32_t y = 0u; y < resized_height; ++y) {
+        for (uint32_t x = 0u; x < resized_width; ++x) {
+            for (uint32_t channel = 0u; channel < 3u; ++channel) {
+                size_t nchw_index = ((size_t)channel * resized_height + y) *
+                    resized_width + x;
+                size_t nhwc_index = ((size_t)y * resized_width + x) * 3u + channel;
+                if (memcmp(fixed_nchw + nchw_index, fixed_nhwc + nhwc_index,
+                           sizeof(float)) != 0) {
+                    fprintf(stderr, "DET fixed NHWC mismatch at %u,%u,%u\n",
+                            y, x, channel);
+                    goto cleanup;
+                }
+            }
+        }
+    }
     status = lw_det_preprocess_bgr_u8(source, source_bytes, width, height, stride, resized_width,
                                       resized_height, output, output_count - 1u);
     if (status != LW_STATUS_INVALID_SHAPE)
@@ -98,6 +127,9 @@ static int run_preprocess(int argc, char** argv) {
            (double)width_ratio, (double)height_ratio);
     return_code = 0;
 cleanup:
+    lw_det_preprocess_workspace_free(&fixed_workspace);
+    free(fixed_nhwc);
+    free(fixed_nchw);
     free(output);
     free(source);
     return return_code;

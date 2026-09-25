@@ -13,6 +13,7 @@
 #endif
 
 #include <math.h>
+#include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -206,6 +207,14 @@ lw_status lw_classifier_create(const char* model_path_utf8, const lw_classifier_
             classifier->x64_instance = NULL;
             classifier->x64_program = NULL;
         }
+#if defined(__EMSCRIPTEN__)
+        if (classifier->x64_program != NULL && classifier->x64_instance != NULL) {
+            (void)fprintf(stderr,
+                "LW_WASM_COMPILED_CLS layout=nhwc ops=%u unsupported=%u\n",
+                classifier->x64_program->op_count,
+                classifier->x64_program->unsupported_nodes);
+        }
+#endif
     }
 #endif
     *out_classifier = classifier;
@@ -254,6 +263,14 @@ static lw_status classifier_classify_bgr_u8_impl(lw_classifier* classifier, cons
     uint32_t result_size;
     uint64_t started;
     lw_status status;
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    uint64_t backend_input_count = 0u;
+    float* backend_input = classifier == NULL || classifier->x64_instance == NULL
+        ? NULL : lw_x64_rec_instance_input(classifier->x64_instance, &backend_input_count);
+#if defined(LW_EXPERIMENTAL_CLS_FIXED_POINT_RESIZE)
+    int direct_nhwc_input = 0;
+#endif
+#endif
     if (classifier == NULL || source == NULL || result == NULL ||
         result->struct_size < sizeof(uint32_t)) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT,
@@ -273,6 +290,15 @@ static lw_status classifier_classify_bgr_u8_impl(lw_classifier* classifier, cons
     }
     started = lw_pipeline_profile_now(profile);
 #if defined(LW_EXPERIMENTAL_CLS_FIXED_POINT_RESIZE)
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
+    if (backend_input != NULL && backend_input_count == classifier->input_element_count) {
+        status = lw_cls_preprocess_bgr_u8_fixed_nhwc(
+            source, source_byte_count, source_width, source_height, source_stride,
+            backend_input, backend_input_count, &resized_width,
+            &classifier->preprocess_workspace);
+        direct_nhwc_input = 1;
+    } else
+#endif
     status = lw_cls_preprocess_bgr_u8_fixed(source, source_byte_count, source_width,
                                             source_height, source_stride, classifier->input,
                                             classifier->input_element_count, &resized_width,
@@ -291,12 +317,11 @@ static lw_status classifier_classify_bgr_u8_impl(lw_classifier* classifier, cons
     started = lw_pipeline_profile_now(profile);
     status = LW_STATUS_UNSUPPORTED;
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
-    if (classifier->x64_instance != NULL) {
-        uint64_t backend_input_count = 0u;
-        float* backend_input =
-            lw_x64_rec_instance_input(classifier->x64_instance, &backend_input_count);
-        if (backend_input != NULL &&
-            backend_input_count == classifier->input_element_count) {
+    if (classifier->x64_instance != NULL && backend_input != NULL &&
+        backend_input_count == classifier->input_element_count) {
+#if defined(LW_EXPERIMENTAL_CLS_FIXED_POINT_RESIZE)
+        if (!direct_nhwc_input) {
+#endif
             /* NCHW planes -> interleaved NHWC; pure data movement, bit-exact. */
             const uint32_t height = LW_CLS_INPUT_HEIGHT;
             const uint32_t width = LW_CLS_INPUT_WIDTH;
@@ -311,20 +336,35 @@ static lw_status classifier_classify_bgr_u8_impl(lw_classifier* classifier, cons
                     }
                 }
             }
-            status = lw_x64_rec_instance_run(classifier->x64_instance, error);
-            if (status == LW_STATUS_OK) {
-                const lw_x64_rec_program* program = classifier->x64_program;
-                const float* probabilities =
-                    (const float*)(const void*)(classifier->x64_instance->arena +
-                                                (size_t)program->values[program->output_value]
-                                                    .offset);
-                classifier->probabilities[0] = probabilities[0];
-                classifier->probabilities[1] = probabilities[1];
-            }
+#if defined(LW_EXPERIMENTAL_CLS_FIXED_POINT_RESIZE)
+        }
+#endif
+        status = lw_x64_rec_instance_run(classifier->x64_instance, error);
+        if (status == LW_STATUS_OK) {
+            const lw_x64_rec_program* program = classifier->x64_program;
+            const float* probabilities =
+                (const float*)(const void*)(classifier->x64_instance->arena +
+                                            (size_t)program->values[program->output_value]
+                                                .offset);
+            classifier->probabilities[0] = probabilities[0];
+            classifier->probabilities[1] = probabilities[1];
         }
     }
 #endif
     if (status == LW_STATUS_UNSUPPORTED) {
+#if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH) && defined(LW_EXPERIMENTAL_CLS_FIXED_POINT_RESIZE)
+        if (direct_nhwc_input) {
+            /* Recreate canonical NCHW input before the session fallback. */
+            status = lw_cls_preprocess_bgr_u8_fixed(
+                source, source_byte_count, source_width, source_height, source_stride,
+                classifier->input, classifier->input_element_count, &resized_width,
+                &classifier->preprocess_workspace);
+            if (status != LW_STATUS_OK) {
+                lw_set_error(error, status, "CLS fallback preprocessing failed");
+                return status;
+            }
+        }
+#endif
         status = profile == NULL
                      ? lw_execute_session_f32(classifier->session, classifier->input,
                                               classifier->input_element_count,

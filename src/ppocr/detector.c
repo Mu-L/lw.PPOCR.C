@@ -18,6 +18,7 @@
 
 #include <limits.h>
 #include <math.h>
+#include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -188,6 +189,7 @@ static void detector_try_backend(lw_detector* detector, uint32_t width, uint32_t
         lw_x64_det_program_free(program);
         program = NULL;
         instance = NULL;
+#if !defined(__EMSCRIPTEN__)
         if (lw_x64_det_backend_compile_ex(detector->model, height, width,
                                           LW_X64_DET_COMPILE_NCHW, &program,
                                           &backend_error) == LW_X64_DET_COMPILE_OK &&
@@ -196,11 +198,20 @@ static void detector_try_backend(lw_detector* detector, uint32_t width, uint32_t
             program = NULL;
             instance = NULL;
         }
+#endif
     }
     lw_x64_det_program_free(detector->x64_program);
     lw_x64_det_instance_free(detector->x64_instance);
     detector->x64_program = program;
     detector->x64_instance = instance;
+#if defined(LW_WASM_COMPILED_DET)
+    if (program != NULL && instance != NULL) {
+        (void)fprintf(stderr,
+            "LW_WASM_COMPILED_DET input=%ux%u layout=nhwc ops=%u unsupported=%u conversions=%u direct_input=%u\n",
+            width, height, program->op_count, program->unsupported_nodes,
+            program->layout_conversions, program->direct_nhwc);
+    }
+#endif
 }
 
 void lw_detector_test_enable_x64_backend(lw_detector* detector) {
@@ -321,7 +332,7 @@ lw_status lw_detector_create(const char* model_path_utf8, const lw_detector_opti
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
     /* Promoted default: the sharded NHWC backend is on; failures inside
      * detector_try_backend fall back to the canonical executor. */
-#if defined(__EMSCRIPTEN__)
+#if defined(__EMSCRIPTEN__) && !defined(LW_WASM_COMPILED_DET)
     detector->x64_backend_enabled = 0u;
 #else
     detector->x64_backend_enabled = 1u;
@@ -427,6 +438,9 @@ static lw_status detector_detect_bgr_u8_impl(
     uint32_t result_size;
     uint64_t started;
     lw_status status;
+#if defined(LW_WASM_COMPILED_DET)
+    uint8_t direct_nhwc_input = 0u;
+#endif
     if (detector == NULL || source == NULL || result == NULL ||
         result->struct_size < sizeof(uint32_t) || (boxes == NULL && box_capacity != 0u)) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT,
@@ -460,6 +474,10 @@ static lw_status detector_detect_bgr_u8_impl(
         (void)lw_abi_copy_output_prefix(result, result_size, &output, sizeof(output));
         return status;
     }
+#if defined(LW_WASM_COMPILED_DET)
+    direct_nhwc_input = detector->x64_instance != NULL &&
+        detector->x64_program != NULL && detector->x64_program->direct_nhwc != 0u;
+#endif
 #if defined(LW_EXPERIMENTAL_DET_FIXED_POINT_RESIZE)
     {
         const uint8_t* preprocess_source = source;
@@ -499,6 +517,22 @@ static lw_status detector_detect_bgr_u8_impl(
             preprocess_stride = padded_width * 3u;
             preprocess_byte_count = padded_bytes;
         }
+#if defined(LW_WASM_COMPILED_DET)
+        if (direct_nhwc_input != 0u) {
+            uint64_t backend_input_count = 0u;
+            float* backend_input = lw_x64_det_instance_input(detector->x64_instance,
+                                                             &backend_input_count);
+            if (backend_input == NULL || backend_input_count != detector->input_element_count) {
+                status = LW_STATUS_INVALID_ARGUMENT;
+            } else {
+                status = lw_det_preprocess_bgr_u8_fixed_nhwc(
+                    preprocess_source, preprocess_byte_count, preprocess_width,
+                    preprocess_height, preprocess_stride, resized_width, resized_height,
+                    backend_input, backend_input_count, &detector->preprocess_workspace,
+                    detector->session->thread_pool, detector->intra_op_thread_count);
+            }
+        } else
+#endif
         status = lw_det_preprocess_bgr_u8_fixed(
             preprocess_source, preprocess_byte_count, preprocess_width, preprocess_height,
             preprocess_stride, resized_width, resized_height, detector->input,
@@ -526,7 +560,11 @@ static lw_status detector_detect_bgr_u8_impl(
         if (backend_input == NULL || backend_input_count != detector->input_element_count) {
             status = LW_STATUS_INVALID_ARGUMENT;
         } else {
-            memcpy(backend_input, detector->input, (size_t)backend_input_count * sizeof(float));
+#if defined(LW_WASM_COMPILED_DET)
+            if (direct_nhwc_input == 0u)
+#endif
+                memcpy(backend_input, detector->input,
+                       (size_t)backend_input_count * sizeof(float));
             status = lw_x64_det_instance_run_profiled_ex(
                 detector->x64_instance, detector->probabilities,
                 detector->probability_element_count, detector->session->thread_pool,

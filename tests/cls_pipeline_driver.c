@@ -72,7 +72,9 @@ static int run_preprocess(int argc, char** argv) {
     uint32_t height;
     uint32_t stride;
     uint32_t resized_width;
+    uint32_t nhwc_width;
     float* output = NULL;
+    float* nhwc_output = NULL;
     lw_cls_preprocess_workspace workspace;
     lw_status status;
     int result = 1;
@@ -81,12 +83,13 @@ static int run_preprocess(int argc, char** argv) {
         fprintf(stderr, "invalid preprocess arguments or source file\n");
         return 2;
     }
+    lw_cls_preprocess_workspace_init(&workspace);
     if (output_count > SIZE_MAX / sizeof(*output) ||
-        (output = (float*)malloc((size_t)output_count * sizeof(*output))) == NULL) {
+        (output = (float*)malloc((size_t)output_count * sizeof(*output))) == NULL ||
+        (nhwc_output = (float*)malloc((size_t)output_count * sizeof(*nhwc_output))) == NULL) {
         fprintf(stderr, "preprocess output allocation failed\n");
         goto cleanup;
     }
-    lw_cls_preprocess_workspace_init(&workspace);
     status = lw_cls_preprocess_bgr_u8_fixed(source, source_bytes, width, height, stride, output,
                                             output_count - 1u, &resized_width, &workspace);
     if (status != LW_STATUS_INVALID_SHAPE) {
@@ -95,9 +98,33 @@ static int run_preprocess(int argc, char** argv) {
     }
     status = lw_cls_preprocess_bgr_u8_fixed(source, source_bytes, width, height, stride, output,
                                             output_count, &resized_width, &workspace);
-    if (status != LW_STATUS_OK ||
-        !write_file(argv[6], output, (size_t)output_count * sizeof(*output))) {
+    if (status != LW_STATUS_OK) {
         fprintf(stderr, "preprocess failed: %s\n", lw_status_string(status));
+        goto cleanup;
+    }
+    status = lw_cls_preprocess_bgr_u8_fixed_nhwc(
+        source, source_bytes, width, height, stride, nhwc_output,
+        output_count, &nhwc_width, &workspace);
+    if (status != LW_STATUS_OK || nhwc_width != resized_width) {
+        fprintf(stderr, "NHWC preprocess failed or resized width differs\n");
+        goto cleanup;
+    }
+    for (uint32_t y = 0u; y < LW_CLS_INPUT_HEIGHT; ++y) {
+        for (uint32_t x = 0u; x < LW_CLS_INPUT_WIDTH; ++x) {
+            for (uint32_t channel = 0u; channel < 3u; ++channel) {
+                size_t nchw_index = ((size_t)channel * LW_CLS_INPUT_HEIGHT + y) *
+                    LW_CLS_INPUT_WIDTH + x;
+                size_t nhwc_index = ((size_t)y * LW_CLS_INPUT_WIDTH + x) * 3u + channel;
+                if (memcmp(output + nchw_index, nhwc_output + nhwc_index, sizeof(float)) != 0) {
+                    fprintf(stderr, "NHWC preprocess differs from NCHW at %u,%u,%u\n",
+                            y, x, channel);
+                    goto cleanup;
+                }
+            }
+        }
+    }
+    if (!write_file(argv[6], output, (size_t)output_count * sizeof(*output))) {
+        fprintf(stderr, "preprocess output write failed\n");
         goto cleanup;
     }
     printf("resized_width=%u elements=%llu\n", resized_width, (unsigned long long)output_count);
@@ -105,6 +132,7 @@ static int run_preprocess(int argc, char** argv) {
 
 cleanup:
     lw_cls_preprocess_workspace_free(&workspace);
+    free(nhwc_output);
     free(output);
     free(source);
     return result;

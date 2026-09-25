@@ -142,11 +142,11 @@ void lw_cls_preprocess_workspace_free(lw_cls_preprocess_workspace* workspace) {
     memset(workspace, 0, sizeof(*workspace));
 }
 
-lw_status lw_cls_preprocess_bgr_u8_fixed(
+static lw_status cls_preprocess_bgr_u8_fixed_layout(
     const uint8_t* source, uint64_t source_byte_count, uint32_t source_width,
     uint32_t source_height, uint32_t source_stride, float* output,
     uint64_t output_element_count, uint32_t* resized_width,
-    lw_cls_preprocess_workspace* workspace) {
+    lw_cls_preprocess_workspace* workspace, int nhwc) {
     const uint64_t required_output_elements =
         (uint64_t)3u * LW_CLS_INPUT_HEIGHT * LW_CLS_INPUT_WIDTH;
     uint64_t row_bytes;
@@ -238,7 +238,10 @@ lw_status lw_cls_preprocess_bgr_u8_fixed(
                 int32_t value = lw_fixed_blend(workspace->row0[row_offset + channel],
                                                workspace->row1[row_offset + channel], beta0,
                                                beta1);
-                output[(size_t)channel * channel_plane + destination + ox] = rec_lut[value];
+                size_t output_index = nhwc != 0
+                    ? ((size_t)destination + ox) * 3u + channel
+                    : (size_t)channel * channel_plane + destination + ox;
+                output[output_index] = rec_lut[value];
             }
         }
     }
@@ -246,4 +249,24 @@ lw_status lw_cls_preprocess_bgr_u8_fixed(
         *resized_width = actual_width;
     }
     return LW_STATUS_OK;
+}
+
+lw_status lw_cls_preprocess_bgr_u8_fixed(
+    const uint8_t* source, uint64_t source_byte_count, uint32_t source_width,
+    uint32_t source_height, uint32_t source_stride, float* output,
+    uint64_t output_element_count, uint32_t* resized_width,
+    lw_cls_preprocess_workspace* workspace) {
+    return cls_preprocess_bgr_u8_fixed_layout(
+        source, source_byte_count, source_width, source_height, source_stride,
+        output, output_element_count, resized_width, workspace, 0);
+}
+
+lw_status lw_cls_preprocess_bgr_u8_fixed_nhwc(
+    const uint8_t* source, uint64_t source_byte_count, uint32_t source_width,
+    uint32_t source_height, uint32_t source_stride, float* output,
+    uint64_t output_element_count, uint32_t* resized_width,
+    lw_cls_preprocess_workspace* workspace) {
+    return cls_preprocess_bgr_u8_fixed_layout(
+        source, source_byte_count, source_width, source_height, source_stride,
+        output, output_element_count, resized_width, workspace, 1);
 }

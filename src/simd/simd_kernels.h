@@ -35,6 +35,28 @@ void lw_avx2_ctc_emitted_softmax_contiguous_f32(const float* input,
                                                 uint64_t row_count, uint64_t axis_count);
 void lw_wasm128_erf_f32(const float* input, float* output, uint64_t element_count);
 void lw_wasm128_gelu_f32(const float* input, float* output, uint64_t element_count);
+void lw_wasm128_binary_contiguous_f32(lw_scalar_binary_op operation,
+                                      const float* left, const float* right,
+                                      float* output, uint64_t count);
+void lw_wasm128_binary_scalar_f32(lw_scalar_binary_op operation,
+                                  const float* tensor, float scalar, float* output,
+                                  uint64_t count, int scalar_is_left);
+void lw_wasm128_binary_channel_nhwc_f32(lw_scalar_binary_op operation,
+    const float* tensor, const float* channel, float* output,
+    uint64_t pixels, uint32_t channels, int channel_is_left);
+void lw_wasm128_affine_nhwc_f32(const float* input, const float* mul,
+    const float* add, float* output, uint32_t pixels, uint32_t channels);
+void lw_wasm128_relu_f32(const float* input, float* output, uint64_t count);
+void lw_wasm128_reduce_mean_hw_f32(const float* input, float* output,
+    uint32_t batch, uint32_t height, uint32_t width, uint32_t channels);
+void lw_wasm128_pool_nhwc_f32(const float* input, float* output,
+    uint32_t batch, uint32_t input_height, uint32_t input_width,
+    uint32_t output_height, uint32_t output_width, uint32_t channels,
+    uint32_t kernel_h, uint32_t kernel_w, uint32_t stride_h, uint32_t stride_w,
+    uint32_t pad_top, uint32_t pad_left, uint8_t count_include_pad, uint8_t is_max);
+void lw_wasm128_packed_matmul_shared_f32(const float* input,
+    const float* packed_weights, float* output, uint32_t batch_count,
+    uint32_t rows, uint32_t inner_dimension, uint32_t columns);
 
 void lw_sse2_matmul_shared_f32(const float* input, const float* weights, float* output,
                                uint32_t batch_count, uint32_t rows, uint32_t inner_dimension,
