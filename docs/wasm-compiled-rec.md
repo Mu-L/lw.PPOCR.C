@@ -15,8 +15,9 @@ Dense uses four SIMD128 vectors per OC16 block and retains the existing
 six-pixel tile, K blocking, partial sums, and scalar epilogue semantics.
 Depthwise uses four-channel SIMD128 groups with the same OC32 packed weights
 and tap order, including border and row-shard cases. Neither kernel changes
-the public C ABI. The pack format remains OC16. Only the NHWC compiled layout is supported on WASM; NCHW-only
-x64 kernels are not linked into its executor. The CLS backbone attempts the
+the public C ABI. The pack format remains OC16. Only the NHWC compiled layout
+is supported on WASM; NCHW-only x64 kernels are not linked into its executor.
+The CLS backbone attempts the
 same compiler; unsupported CLS graphs fall back to the
 normal session. DET remains on the existing WASM executor.
 
@@ -29,10 +30,13 @@ canonical vs compiled and compiled scalar vs compiled SIMD128 on the same
 runner. To validate the experimental browser HTML and SDK too,
 manually run `browser-wasm-sdk-and-html` with `compiled_rec=true`. Five warmed
 full-OCR iterations per build use the same Tiny
-models and 500x500 PPM. Both runs must match the exact text checksum in
+models and 500x500 PPM. All three runs must match the exact text checksum in
 `ci/web-ppocrv6-tiny.json`; timing and memory remain informational. The job
-summary and `wasm-compiled-rec-comparison-*` artifact contain both paired
-measurements, including process RSS and WASM heap.
+summary and `wasm-compiled-rec-comparison-*` artifact contain the three-way
+measurements, including process RSS and WASM heap. The benchmark records all
+three OCR texts before the reporter checks parity and the checked-in golden
+checksum. A mismatch still fails CI, but the measurements and differing text
+are preserved in the job summary instead of being lost at the first run.
 The CI log must also confirm `widths=5/5` and `ctc=simd128`, so matching
 text cannot pass by silently using only the canonical executor.
 

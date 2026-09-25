@@ -52,6 +52,9 @@ jobs:
           -r requirements-converter.txt
           -r requirements-wasm-test.txt
 
+      - name: Check WASM benchmark report contract
+        run: python -m unittest discover -s tests -p test_compare_wasm_rec_benchmark.py
+
       - name: Cache Playwright Chromium
         uses: actions/cache@v5
         with:
@@ -145,7 +148,7 @@ jobs:
           --sample models/ppocrv6-tiny/sample.jpg
           --golden ci/web-ppocrv6-tiny.json
 
-      - name: Compare compiled REC with canonical WASM full OCR
+      - name: Compare canonical and compiled WASM full OCR
         if: github.event_name == 'push' || github.event_name == 'pull_request' || inputs.compiled_rec == true
         shell: bash
         run: |
@@ -182,43 +185,38 @@ jobs:
           node tests/node/benchmark.cjs \
             --package "${canonical_package}" \
             --sample build-wasm/models/sample.ppm \
-            --expected-text-sha256 "${expected_text_sha256}" \
             --iterations 5 | tee build-wasm/rec-benchmark-canonical.json
           node tests/node/benchmark.cjs \
             --package "${compiled_package}" \
             --sample build-wasm/models/sample.ppm \
-            --expected-text-sha256 "${expected_text_sha256}" \
             --iterations 5 2> build-wasm/rec-benchmark-compiled.log \
             | tee build-wasm/rec-benchmark-compiled.json
           node tests/node/benchmark.cjs \
             --package build-wasm-compiled-scalar/node-wasm \
             --sample build-wasm/models/sample.ppm \
-            --expected-text-sha256 "${expected_text_sha256}" \
             --iterations 5 2> build-wasm/rec-benchmark-compiled-scalar.log \
             | tee build-wasm/rec-benchmark-compiled-scalar.json
           cat build-wasm/rec-benchmark-compiled.log
           cat build-wasm/rec-benchmark-compiled-scalar.log
-          grep -q 'LW_WASM_COMPILED_REC widths=5/5' \
-            build-wasm/rec-benchmark-compiled.log
-          grep -q 'LW_WASM_COMPILED_REC ctc=simd128' \
-            build-wasm/rec-benchmark-compiled.log
-          grep -q 'LW_WASM_COMPILED_REC widths=5/5' \
-            build-wasm/rec-benchmark-compiled-scalar.log
-          grep -q 'LW_WASM_COMPILED_REC ctc=simd128' \
-            build-wasm/rec-benchmark-compiled-scalar.log
+          set +e
           python tools/compare_wasm_rec_benchmark.py \
             --canonical build-wasm/rec-benchmark-canonical.json \
+            --scalar build-wasm/rec-benchmark-compiled-scalar.json \
             --compiled build-wasm/rec-benchmark-compiled.json \
+            --expected-text-sha256 "${expected_text_sha256}" \
             | tee build-wasm/rec-benchmark-summary.md
-          python tools/compare_wasm_rec_benchmark.py \
-            --canonical build-wasm/rec-benchmark-compiled-scalar.json \
-            --compiled build-wasm/rec-benchmark-compiled.json \
-            --baseline-label 'Compiled scalar kernels' \
-            --candidate-label 'Compiled SIMD128 kernels' \
-            --title 'Experimental WASM REC kernel A/B: paired full OCR' \
-            | tee build-wasm/rec-benchmark-kernel-ab.md
+          report_status=${PIPESTATUS[0]}
+          set -e
           cat build-wasm/rec-benchmark-summary.md >> "$GITHUB_STEP_SUMMARY"
-          cat build-wasm/rec-benchmark-kernel-ab.md >> "$GITHUB_STEP_SUMMARY"
+          grep -q 'LW_WASM_COMPILED_REC widths=5/5' \
+            build-wasm/rec-benchmark-compiled.log
+          grep -q 'LW_WASM_COMPILED_REC ctc=simd128' \
+            build-wasm/rec-benchmark-compiled.log
+          grep -q 'LW_WASM_COMPILED_REC widths=5/5' \
+            build-wasm/rec-benchmark-compiled-scalar.log
+          grep -q 'LW_WASM_COMPILED_REC ctc=simd128' \
+            build-wasm/rec-benchmark-compiled-scalar.log
+          exit "$report_status"
 
       - name: Run browser fallback simulation test
         run: >-
@@ -316,7 +314,6 @@ jobs:
             build-wasm/rec-benchmark-compiled-scalar.json
             build-wasm/rec-benchmark-compiled-scalar.log
             build-wasm/rec-benchmark-summary.md
-            build-wasm/rec-benchmark-kernel-ab.md
           if-no-files-found: warn
           retention-days: 14
 

@@ -18,10 +18,10 @@ async function main() {
   const samplePath = argument("--sample");
   const expectedSha = argument("--expected-text-sha256");
   const iterations = Number(argument("--iterations", "5"));
-  if (!packagePath || !samplePath || !expectedSha ||
+  if (!packagePath || !samplePath ||
       !Number.isInteger(iterations) || iterations < 1 || iterations > 100) {
     throw new Error("usage: benchmark.cjs --package <directory> --sample <P6 ppm> " +
-                    "--expected-text-sha256 <digest> [--iterations 5]");
+                    "[--expected-text-sha256 <digest>] [--iterations 5]");
   }
   const root = path.resolve(packagePath);
   const sample = path.resolve(samplePath);
@@ -34,7 +34,10 @@ async function main() {
     let lines = runOcr(engine, image); // warm the physical program and heap
     const expectedText = lines.map(line => line.text).join("\n");
     const digest = crypto.createHash("sha256").update(expectedText, "utf8").digest("hex");
-    if (digest !== expectedSha) throw new Error(`OCR checksum mismatch: ${digest}`);
+    if (expectedSha && digest !== expectedSha) {
+      throw new Error(`OCR checksum mismatch: expected ${expectedSha}, actual ${digest}; ` +
+        `lines: ${JSON.stringify(lines.map(line => line.text))}`);
+    }
     const timings = [];
     for (let index = 0; index < iterations; index++) {
       const started = process.hrtime.bigint();
@@ -58,7 +61,8 @@ async function main() {
       peak_rss_bytes: Math.max(peakRss, process.resourceUsage().maxRSS * 1024),
       wasm_heap_bytes: engine.runtime.HEAPU8.byteLength,
       line_count: lines.length,
-      text_sha256: digest
+      text_sha256: digest,
+      text_lines: lines.map(line => line.text)
     }));
   } finally {
     engine.runtime._lw_web_shutdown();
