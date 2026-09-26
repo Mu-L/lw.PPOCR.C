@@ -385,6 +385,10 @@ typedef struct lw_x64_rec_profile {
     uint64_t transpose_ns;
     uint64_t matmul_ns;
     uint64_t ctc_ns;
+    /* Pointwise epilogue diagnostics; populated only when REC profiling is on. */
+    uint64_t pw_epi_ns[7];
+    uint64_t pw_epi_calls[7];
+    uint64_t pw_epi_macs[7];
 } lw_x64_rec_profile;
 
 typedef struct lw_x64_rec_instance {

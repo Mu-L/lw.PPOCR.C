@@ -31,7 +31,7 @@ class PointwiseAbTest(unittest.TestCase):
                 path.write_text(json.dumps({
                     "schema_version": 1, "wasm_backend": "wasm128",
                     "model_variant": "tiny", "use_cls": True,
-                    "sample_sha256": "sample", "iterations": 5,
+                    "sample_sha256": "sample", "warmup_runs": 1, "iterations": 5,
                     "median_ms": milliseconds, "peak_rss_bytes": 100000000,
                     "wasm_heap_bytes": 70000000,
                     "line_count": 2, "detected_count": 2,
@@ -75,6 +75,14 @@ class PointwiseAbTest(unittest.TestCase):
                                golden, 5, 5.0)
             golden.write_text(json.dumps({"variant": "medium", "expected_line_count": 2,
                                           "expected_text_sha256": digest}), encoding="utf-8")
+            changed = json.loads(paths[2].read_text(encoding="utf-8"))
+            changed["warmup_runs"] = 2
+            paths[2].write_text(json.dumps(changed), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "warm-up count differs"):
+                module.compare([paths[0], paths[3]], [paths[1], paths[2]],
+                               golden, 5, 5.0)
+            changed["warmup_runs"] = 1
+            paths[2].write_text(json.dumps(changed), encoding="utf-8")
             changed = json.loads(paths[2].read_text(encoding="utf-8"))
             changed["text_lines"] = ["文字", "0CR"]
             paths[2].write_text(json.dumps(changed), encoding="utf-8")

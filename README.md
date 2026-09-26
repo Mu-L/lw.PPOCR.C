@@ -217,6 +217,9 @@ named Small and Medium SDK/HTML files after variant-specific real-OCR and
 lifecycle gates. Tiny is recommended for phones; Small is opt-in after testing
 the target corpus/device, and Medium is a desktop-first preview because of its
 substantially higher latency and memory cost. All three expose the same SDK API.
+WASM performance and heap regression work now targets Tiny and Small. Medium
+remains an opt-in compatibility/testing variant, not a browser performance
+target; its availability does not imply the Tiny/Small latency or heap profile.
 
 The HTML Demo accepts screenshots through the normal file picker, drag-and-drop,
 or `Ctrl+V`/`⌘V` image paste. Pasting only prepares a local image preview; it

@@ -19,11 +19,13 @@ async function main() {
   const modelsPath = argument("--models");
   const expectedSha = argument("--expected-text-sha256");
   const iterations = Number(argument("--iterations", "5"));
+  const warmupRuns = Number(argument("--warmup", "1"));
   if (!packagePath || !samplePath ||
-      !Number.isInteger(iterations) || iterations < 1 || iterations > 100) {
+      !Number.isInteger(iterations) || iterations < 1 || iterations > 100 ||
+      !Number.isInteger(warmupRuns) || warmupRuns < 1 || warmupRuns > 20) {
     throw new Error("usage: benchmark.cjs --package <directory> --sample <P6 ppm> " +
                     "[--models <verified runtime-assets directory>] " +
-                    "[--expected-text-sha256 <digest>] [--iterations 5]");
+                    "[--expected-text-sha256 <digest>] [--warmup 1] [--iterations 5]");
   }
   const root = path.resolve(packagePath);
   const modelRoot = modelsPath ? path.resolve(modelsPath) : root;
@@ -58,6 +60,13 @@ async function main() {
       throw new Error(`OCR checksum mismatch: expected ${expectedSha}, actual ${digest}; ` +
         `lines: ${JSON.stringify(lines.map(line => line.text))}`);
     }
+    for (let index = 1; index < warmupRuns; index++) {
+      const next = runOcr(engine, image);
+      if (next.map(line => line.text).join("\n") !== expectedText ||
+          next.detectedCount !== expectedDetectedCount) {
+        throw new Error(`OCR changed on warm-up iteration ${index}`);
+      }
+    }
     const timings = [];
     for (let index = 0; index < iterations; index++) {
       const started = process.hrtime.bigint();
@@ -79,6 +88,7 @@ async function main() {
       model_variant: modelVariant,
       use_cls: true,
       sample_sha256: sampleSha,
+      warmup_runs: warmupRuns,
       iterations,
       median_ms: timings[Math.floor(timings.length / 2)],
       min_ms: timings[0],

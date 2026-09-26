@@ -51,7 +51,8 @@ def load_profile(path: Path, accepted_widths: frozenset[int] = REC_WIDTHS
 
 def compare(four_paths: list[Path], two_paths: list[Path], golden_path: Path,
             expected_iterations: int, max_heap_growth_mib: float,
-            four_profile: Path | None = None, two_profile: Path | None = None) -> str:
+            four_profile: Path | None = None, two_profile: Path | None = None,
+            expected_warmup: int = 1) -> str:
     if len(four_paths) != 2 or len(two_paths) != 2:
         raise ValueError("exactly two results per tile are required")
     golden = json.loads(golden_path.read_text(encoding="utf-8"))
@@ -66,6 +67,8 @@ def compare(four_paths: list[Path], two_paths: list[Path], golden_path: Path,
                 raise ValueError(f"{path}: {field} differs from 4x16 reference")
         if run.get("iterations") != expected_iterations:
             raise ValueError(f"{path}: benchmark iteration count differs")
+        if run.get("warmup_runs", 1) != expected_warmup:
+            raise ValueError(f"{path}: benchmark warm-up count differs")
         if not isinstance(run.get("text_lines"), list) or any(
                 not isinstance(line, str) for line in run["text_lines"]):
             raise ValueError(f"{path}: invalid OCR text lines")
@@ -90,7 +93,7 @@ def compare(four_paths: list[Path], two_paths: list[Path], golden_path: Path,
     paired_ratios = [base["median_ms"] / candidate["median_ms"]
                      for base, candidate in zip(four, two)]
     rows = [f"## WASM Pointwise 4x16 vs 2x16 — {variant.title()} full OCR", "",
-            "Each result is a fresh process with one warm-up and "
+            f"Each result is a fresh process with {expected_warmup} warm-up run(s) and "
             f"{expected_iterations} measured OCR runs; run order is 4/2/2/4.", "",
             "| Pair | 4x16 ms | 2x16 ms | 4x16 / 2x16 | 4x16 heap MiB | 2x16 heap MiB |",
             "| ---: | ---: | ---: | ---: | ---: | ---: |"]
@@ -149,14 +152,17 @@ def main() -> int:
     parser.add_argument("--four-profile", type=Path)
     parser.add_argument("--two-profile", type=Path)
     parser.add_argument("--iterations", type=int, default=5)
+    parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--max-heap-growth-mib", type=float, default=5.0)
     args = parser.parse_args()
-    if args.iterations < 1 or not math.isfinite(args.max_heap_growth_mib) or args.max_heap_growth_mib < 0:
-        parser.error("iterations must be positive and heap growth limit must be finite/nonnegative")
+    if (args.iterations < 1 or args.warmup < 1 or
+            not math.isfinite(args.max_heap_growth_mib) or args.max_heap_growth_mib < 0):
+        parser.error("iterations/warmup must be positive and heap growth limit finite/nonnegative")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
     print(compare(args.four, args.two, args.golden, args.iterations,
-                  args.max_heap_growth_mib, args.four_profile, args.two_profile), end="")
+                  args.max_heap_growth_mib, args.four_profile, args.two_profile,
+                  args.warmup), end="")
     return 0
 
 

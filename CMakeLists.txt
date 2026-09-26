@@ -16,7 +16,7 @@ option(LW_WASM_COMPILED_DET
     "Run WASM DET on the compiled NHWC backend when compiled REC is enabled" ON)
 option(LW_WASM_REC_SIMD_KERNELS
     "Use SIMD128 Dense and Depthwise kernels in experimental WASM compiled REC" ON)
-set(LW_WASM_POINTWISE_ROWS "4" CACHE STRING
+set(LW_WASM_POINTWISE_ROWS "2" CACHE STRING
     "WASM SIMD128 pointwise pixel tile; supported values: 2 or 4")
 set_property(CACHE LW_WASM_POINTWISE_ROWS PROPERTY STRINGS 2 4)
 if(NOT LW_WASM_POINTWISE_ROWS STREQUAL "2" AND

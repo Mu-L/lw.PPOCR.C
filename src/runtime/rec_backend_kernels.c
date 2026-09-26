@@ -9,7 +9,7 @@ void lw_wasm128_nhwc_pointwise_4x16_f32(const float*, const float*,
                                         const lw_nhwc_epilogue*, float*,
                                         uint32_t, uint32_t, uint32_t);
 #ifndef LW_WASM_POINTWISE_ROWS
-#define LW_WASM_POINTWISE_ROWS 4
+#define LW_WASM_POINTWISE_ROWS 2
 #endif
 #if LW_WASM_POINTWISE_ROWS == 2
 #define LW_WASM_POINTWISE_KERNEL lw_wasm128_nhwc_pointwise_2x16_f32

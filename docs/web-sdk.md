@@ -36,6 +36,12 @@ Configure Emscripten with `-DLW_BUILD_WEB_MODEL_VARIANTS=ON`, then build
 | Small | `lw-ppocr-v6-small.js` / `ocr-demo-small.html` | `lw.PPOCR.C-<version>-web-sdk-small.js` / `lw.PPOCR.C-<version>-ocr-demo-small.html` | Opt-in after corpus/device testing |
 | Medium | `lw-ppocr-v6-medium.js` / `ocr-demo-medium.html` | `lw.PPOCR.C-<version>-web-sdk-medium.js` / `lw.PPOCR.C-<version>-ocr-demo-medium.html` | Desktop-first preview |
 
+Tiny is the primary browser performance target; Small is the higher-accuracy
+opt-in target with full-OCR correctness, compiled coverage, latency, and heap
+regression checks. Medium remains available for manual compatibility testing,
+but is not a WASM performance or heap-gated target. This does not change the
+Tiny-only stable model promise for the 1.0 C and WASM Host ABIs.
+
 Use one SDK file as a complete unit; its WASM runtime, DET/CLS/REC models, and dictionary are
 already embedded. All variants expose the same `LwPpocr.create()` and result
 contract, while `LwPpocr.modelInfo` identifies the selected payload.

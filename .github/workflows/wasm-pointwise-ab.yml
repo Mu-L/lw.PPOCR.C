@@ -1,46 +1,14 @@
-name: WASM Pointwise 2x16 A/B
+name: WASM Tiny/Small Performance A/B
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - CMakeLists.txt
-      - src/runtime/rec_backend_kernels.c
-      - src/simd/wasm128_nhwc_pointwise.c
-      - models/ppocrv6-*/**
-      - models/ppocrv6-models.json
-      - ci/web-ppocrv6-*.json
-      - tests/node/benchmark.cjs
-      - tools/prepare_ppocrv6_runtime_variant.py
-      - tools/compare_wasm_pointwise_ab.py
-      - tools/compare_wasm_rec_benchmark.py
-      - tests/test_compare_wasm_pointwise_ab.py
-      - tests/test_compare_wasm_rec_benchmark.py
-      - .github/workflows/wasm-pointwise-ab.yml
-  pull_request:
-    branches: [main]
-    paths:
-      - CMakeLists.txt
-      - src/runtime/rec_backend_kernels.c
-      - src/simd/wasm128_nhwc_pointwise.c
-      - models/ppocrv6-*/**
-      - models/ppocrv6-models.json
-      - ci/web-ppocrv6-*.json
-      - tests/node/benchmark.cjs
-      - tools/prepare_ppocrv6_runtime_variant.py
-      - tools/compare_wasm_pointwise_ab.py
-      - tools/compare_wasm_rec_benchmark.py
-      - tests/test_compare_wasm_pointwise_ab.py
-      - tests/test_compare_wasm_rec_benchmark.py
-      - .github/workflows/wasm-pointwise-ab.yml
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  three_models:
-    name: Tiny, Small, Medium full OCR; 4x16 vs 2x16
+  tiny_small:
+    name: Tiny and Small full OCR; 4x16 vs 2x16
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -78,34 +46,33 @@ jobs:
               -DBUILD_TESTING=OFF \
               -DLW_WEB_PDF=OFF \
               -DLW_WASM_COMPILED_REC=ON \
+              -DLW_WASM_REC_LAZY_FALLBACK=ON \
               -DLW_WASM_REC_SIMD_KERNELS=ON \
               -DLW_WASM_POINTWISE_ROWS="${rows}"
             cmake --build "build-wasm-pw${rows}" \
               --target lw-node-wasm-package det_demo_fixture --parallel
           done
 
-      - name: Prepare Small and Medium runtime models once
+      - name: Prepare Small runtime models once
         shell: bash
         run: |
           set -euo pipefail
-          for variant in small medium; do
-            python tools/prepare_ppocrv6_runtime_variant.py \
-              --variant "${variant}" --build-dir build-wasm-pw4 \
-              --output-dir "build-wasm-pw4/runtime-models/ppocrv6-${variant}"
-          done
+          python tools/prepare_ppocrv6_runtime_variant.py \
+            --variant small --build-dir build-wasm-pw4 \
+            --output-dir build-wasm-pw4/runtime-models/ppocrv6-small
 
-      - name: Run paired three-model full OCR in 4/2/2/4 order
+      - name: Run paired Tiny and Small full OCR in 4/2/2/4 order
         shell: bash
         run: |
           set -euo pipefail
-          for variant in tiny small medium; do
+          for variant in tiny small; do
             model_args=()
             if [[ "${variant}" != tiny ]]; then
               model_args=(--models "build-wasm-pw4/runtime-models/ppocrv6-${variant}")
             fi
-            iterations=5
-            if [[ "${variant}" == small ]]; then iterations=3; fi
-            if [[ "${variant}" == medium ]]; then iterations=2; fi
+            warmup=2
+            iterations=7
+            if [[ "${variant}" == small ]]; then warmup=1; iterations=5; fi
             expected_text_sha256="$(node -p "require('./ci/web-ppocrv6-${variant}.json').expected_text_sha256")"
             for run in 4-a 2-a 2-b 4-b; do
               rows="${run%%-*}"
@@ -114,6 +81,7 @@ jobs:
                 "${model_args[@]}" \
                 --sample build-wasm-pw4/models/sample.ppm \
                 --expected-text-sha256 "${expected_text_sha256}" \
+                --warmup "${warmup}" \
                 --iterations "${iterations}" \
                 > "build-wasm-pw4/pointwise-${variant}-${run}.json" \
                 2> "build-wasm-pw4/pointwise-${variant}-${run}.log" || {
@@ -145,6 +113,7 @@ jobs:
               --golden "ci/web-ppocrv6-${variant}.json" \
               --four-profile "build-wasm-pw4/pointwise-${variant}-4-profile.log" \
               --two-profile "build-wasm-pw4/pointwise-${variant}-2-profile.log" \
+              --warmup "${warmup}" \
               --iterations "${iterations}" \
               | tee "build-wasm-pw4/pointwise-${variant}-summary.md"
             cat "build-wasm-pw4/pointwise-${variant}-summary.md" >> "$GITHUB_STEP_SUMMARY"

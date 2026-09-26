@@ -268,6 +268,8 @@ Windows 下可在 emsdk 目录运行 `emsdk_env.bat`，或按 emsdk 文档使用
 浏览器默认使用 Tiny。Tagged Release 还会在真实 OCR 与生命周期门禁通过后提供
 独立命名的 Small、Medium SDK/HTML。手机优先选 Tiny；Small 应结合真实语料和目标设备
 验证后再启用；Medium 因耗时和内存显著增加，定位为桌面优先的 preview。三者使用同一套 SDK API。
+WASM 性能与内存回归的优化重点是 Tiny 和 Small；Medium 保留按需兼容性测试，
+不作为浏览器性能目标，其可运行不代表达到 Tiny/Small 的耗时或内存水平。
 
 单文件页面的图片入口包括文件选择、拖拽和 `Ctrl+V`/`⌘V` 粘贴截图。粘贴只会
 准备本地预览，不会自动开始 OCR；剪贴板图片同样不会上传到网络。

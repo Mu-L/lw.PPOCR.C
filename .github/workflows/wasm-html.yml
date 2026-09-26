@@ -56,6 +56,7 @@ jobs:
         run: |
           python -m unittest discover -s tests -p test_compare_wasm_rec_benchmark.py
           python -m unittest discover -s tests -p test_summarize_wasm_rec_memory.py
+          python -m unittest discover -s tests -p test_summarize_wasm_pointwise_epilogue.py
 
       - name: Cache Playwright Chromium
         uses: actions/cache@v5
@@ -81,6 +82,7 @@ jobs:
           -DBUILD_TESTING=OFF
           -DLW_WASM_COMPILED_REC=${{ inputs.compiled_rec || false }}
           -DLW_WASM_REC_LAZY_FALLBACK=${{ inputs.compiled_rec || false }}
+          -DLW_WASM_POINTWISE_ROWS=2
           -DLW_BUILD_WEB_MODEL_VARIANTS=${{ inputs.build_web_variants || false }}
 
       - name: Build browser and Node WASM distributions
@@ -202,7 +204,8 @@ jobs:
             -DBUILD_TESTING=OFF \
             -DLW_WEB_PDF=OFF \
             -DLW_WASM_COMPILED_REC="${extra_compiled}" \
-            -DLW_WASM_REC_LAZY_FALLBACK="${extra_compiled}"
+            -DLW_WASM_REC_LAZY_FALLBACK="${extra_compiled}" \
+            -DLW_WASM_POINTWISE_ROWS=2
           cmake --build "${extra_build}" --target lw-node-wasm-package --parallel
           emcmake cmake -S . -B build-wasm-compiled-scalar -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -229,11 +232,11 @@ jobs:
           node tests/node/benchmark.cjs \
             --package "${canonical_package}" \
             --sample build-wasm/models/sample.ppm \
-            --iterations 5 | tee build-wasm/rec-benchmark-canonical.json
+            --warmup 2 --iterations 7 | tee build-wasm/rec-benchmark-canonical.json
           if ! node tests/node/benchmark.cjs \
             --package build-wasm-compiled-scalar/node-wasm \
             --sample build-wasm/models/sample.ppm \
-            --iterations 5 2> build-wasm/rec-benchmark-compiled-scalar.log \
+            --warmup 2 --iterations 7 2> build-wasm/rec-benchmark-compiled-scalar.log \
             | tee build-wasm/rec-benchmark-compiled-scalar.json; then
             diagnose_compiled_det scalar build-wasm-compiled-scalar/node-wasm
             diagnose_compiled_det simd128 "${compiled_package}"
@@ -242,7 +245,7 @@ jobs:
           if ! node tests/node/benchmark.cjs \
             --package "${compiled_package}" \
             --sample build-wasm/models/sample.ppm \
-            --iterations 5 2> build-wasm/rec-benchmark-compiled.log \
+            --warmup 2 --iterations 7 2> build-wasm/rec-benchmark-compiled.log \
             | tee build-wasm/rec-benchmark-compiled.json; then
             diagnose_compiled_det simd128 "${compiled_package}"
             exit 1
@@ -283,6 +286,10 @@ jobs:
             --profile-log build-wasm/rec-profile-compiled.log \
             | tee build-wasm/rec-memory-summary.md
           cat build-wasm/rec-memory-summary.md >> "$GITHUB_STEP_SUMMARY"
+          python tools/summarize_wasm_pointwise_epilogue.py \
+            --variant tiny --log build-wasm/rec-profile-compiled.log \
+            | tee build-wasm/rec-pointwise-epilogue.md
+          cat build-wasm/rec-pointwise-epilogue.md >> "$GITHUB_STEP_SUMMARY"
           grep -q 'LW_WASM_COMPILED_REC widths=5/5' \
             build-wasm/rec-benchmark-compiled.log
           grep -q 'LW_WASM_REC_LAZY_FALLBACK full_coverage=1 canonical_retained=0' \
@@ -305,7 +312,7 @@ jobs:
             build-wasm/rec-benchmark-compiled-scalar.log
           exit "$report_status"
 
-      - name: Compare Small and Medium canonical and compiled WASM full OCR
+      - name: Compare Small canonical and compiled WASM full OCR
         if: github.event_name == 'push' || github.event_name == 'pull_request' || inputs.compiled_rec == true
         shell: bash
         run: |
@@ -318,29 +325,28 @@ jobs:
             compiled_package=build-wasm-compiled/node-wasm
           fi
           overall_status=0
-          for variant in small medium; do
+          for variant in small; do
             model_dir="build-wasm/runtime-models/ppocrv6-${variant}"
             if [[ ! -s "${model_dir}/runtime-assets.json" ]]; then
               python tools/prepare_ppocrv6_runtime_variant.py \
                 --variant "${variant}" --build-dir build-wasm \
                 --output-dir "${model_dir}"
             fi
-            iterations=3
-            if [[ "${variant}" == "medium" ]]; then iterations=2; fi
+            iterations=5
             expected_text_sha256="$(node -p "require('./ci/web-ppocrv6-${variant}.json').expected_text_sha256")"
             expected_line_count="$(node -p "require('./ci/web-ppocrv6-${variant}.json').expected_line_count")"
             node tests/node/benchmark.cjs \
               --package "${canonical_package}" --models "${model_dir}" \
-              --sample build-wasm/models/sample.ppm --iterations "${iterations}" \
+              --sample build-wasm/models/sample.ppm --warmup 1 --iterations "${iterations}" \
               > "build-wasm/wasm-${variant}-canonical.json"
             node tests/node/benchmark.cjs \
               --package build-wasm-compiled-scalar/node-wasm --models "${model_dir}" \
-              --sample build-wasm/models/sample.ppm --iterations "${iterations}" \
+              --sample build-wasm/models/sample.ppm --warmup 1 --iterations "${iterations}" \
               > "build-wasm/wasm-${variant}-scalar.json" \
               2> "build-wasm/wasm-${variant}-scalar.log"
             node tests/node/benchmark.cjs \
               --package "${compiled_package}" --models "${model_dir}" \
-              --sample build-wasm/models/sample.ppm --iterations "${iterations}" \
+              --sample build-wasm/models/sample.ppm --warmup 1 --iterations "${iterations}" \
               > "build-wasm/wasm-${variant}-simd128.json" \
               2> "build-wasm/wasm-${variant}-simd128.log"
             LW_X64_REC_PROFILE=1 LW_WASM_OCR_PROFILE=1 LW_REC_MEMORY_PROFILE=1 node tests/node/benchmark.cjs \
@@ -370,6 +376,10 @@ jobs:
               --profile-log "build-wasm/wasm-${variant}-profile.log" \
               | tee "build-wasm/wasm-${variant}-memory.md"
             cat "build-wasm/wasm-${variant}-memory.md" >> "$GITHUB_STEP_SUMMARY"
+            python tools/summarize_wasm_pointwise_epilogue.py \
+              --variant "${variant}" --log "build-wasm/wasm-${variant}-profile.log" \
+              | tee "build-wasm/wasm-${variant}-pointwise-epilogue.md"
+            cat "build-wasm/wasm-${variant}-pointwise-epilogue.md" >> "$GITHUB_STEP_SUMMARY"
             if [[ "$report_status" -ne 0 ]]; then overall_status=1; fi
             grep -q 'LW_WASM_COMPILED_REC widths=5/5' "build-wasm/wasm-${variant}-simd128.log"
             grep -q 'LW_WASM_REC_LAZY_FALLBACK full_coverage=1 canonical_retained=0' \
@@ -488,6 +498,7 @@ jobs:
             build-wasm/rec-profile-summary.json
             build-wasm/rec-benchmark-summary.md
             build-wasm/rec-memory-summary.md
+            build-wasm/rec-pointwise-epilogue.md
             build-wasm/rec-lazy-contract.log
             build-wasm/rec-det-debug-*.json
             build-wasm/rec-det-debug-*.log
@@ -495,10 +506,7 @@ jobs:
             build-wasm/wasm-small-*.log
             build-wasm/wasm-small-summary.md
             build-wasm/wasm-small-memory.md
-            build-wasm/wasm-medium-*.json
-            build-wasm/wasm-medium-*.log
-            build-wasm/wasm-medium-summary.md
-            build-wasm/wasm-medium-memory.md
+            build-wasm/wasm-small-pointwise-epilogue.md
           if-no-files-found: warn
           retention-days: 14
 

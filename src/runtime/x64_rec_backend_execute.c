@@ -1226,6 +1226,43 @@ static uint64_t* rec_profile_slot(lw_x64_rec_profile* profile, uint16_t kind) {
     }
 }
 
+enum rec_pw_epi_kind {
+    REC_PW_PLAIN = 0,
+    REC_PW_BIAS,
+    REC_PW_HARDSWISH,
+    REC_PW_RESIDUAL,
+    REC_PW_RESIDUAL_GELU,
+    REC_PW_POSTBIAS_GELU,
+    REC_PW_OTHER,
+    REC_PW_EPI_COUNT
+};
+
+static uint32_t classify_rec_pointwise(const lw_x64_rec_conv_op* conv) {
+    if (conv->post_bias == NULL && conv->has_residual == 0u) {
+        if (conv->activation == LW_NHWC_ACT_NONE)
+            return conv->bias == NULL ? REC_PW_PLAIN : REC_PW_BIAS;
+        if (conv->activation == LW_NHWC_ACT_HARDSWISH) return REC_PW_HARDSWISH;
+    }
+    if (conv->post_bias == NULL && conv->has_residual != 0u &&
+        conv->activation == LW_NHWC_ACT_NONE) return REC_PW_RESIDUAL;
+    if (conv->has_residual != 0u && conv->activation == LW_NHWC_ACT_GELU)
+        return REC_PW_RESIDUAL_GELU;
+    if (conv->post_bias != NULL && conv->activation == LW_NHWC_ACT_GELU)
+        return REC_PW_POSTBIAS_GELU;
+    return REC_PW_OTHER;
+}
+
+static void record_rec_pointwise_epilogue(lw_x64_rec_profile* profile,
+                                           const lw_x64_rec_op* op,
+                                           uint64_t elapsed) {
+    const lw_x64_rec_conv_op* conv = &op->data.conv;
+    uint32_t kind = classify_rec_pointwise(conv);
+    uint64_t pixels = (uint64_t)conv->input_height * conv->input_width;
+    profile->pw_epi_ns[kind] += elapsed;
+    ++profile->pw_epi_calls[kind];
+    profile->pw_epi_macs[kind] += pixels * conv->input_channels * conv->output_channels;
+}
+
 static lw_status run_backbone_ops(lw_x64_rec_instance* instance, lw_error* error) {
     uint32_t i;
     lw_status status;
@@ -1248,6 +1285,10 @@ static lw_status run_backbone_ops(lw_x64_rec_instance* instance, lw_error* error
                 uint64_t elapsed = rec_profile_now_ns() - started;
                 if (slot != NULL) *slot += elapsed;
                 instance->profile.total_ns += elapsed;
+                if (instance->program->ops[i].kind == LW_X64_REC_OP_POINTWISE) {
+                    record_rec_pointwise_epilogue(&instance->profile,
+                                                   &instance->program->ops[i], elapsed);
+                }
             }
         } else {
             status = execute_op(instance, &instance->program->ops[i], error);
@@ -1302,6 +1343,22 @@ lw_status lw_x64_rec_instance_run(lw_x64_rec_instance* instance, lw_error* error
             p->binary_ns / 1e6, p->unary_ns / 1e6, p->reduce_ns / 1e6,
             p->pool_ns / 1e6, p->transpose_ns / 1e6, p->matmul_ns / 1e6,
             p->ctc_ns / 1e6);
+#if defined(__EMSCRIPTEN__)
+        {
+            static const char* const names[REC_PW_EPI_COUNT] = {
+                "plain", "bias", "hardswish", "residual", "resgelu", "postgelu", "other"
+            };
+            uint32_t kind;
+            for (kind = 0u; kind < REC_PW_EPI_COUNT; ++kind) {
+                if (p->pw_epi_calls[kind] == 0u) continue;
+                fprintf(stderr, "WASM_PW_EPI width=%u kind=%s calls=%llu macs=%llu elapsed=%.3f\n",
+                        (unsigned)instance->program->target_width, names[kind],
+                        (unsigned long long)p->pw_epi_calls[kind],
+                        (unsigned long long)p->pw_epi_macs[kind],
+                        p->pw_epi_ns[kind] / 1e6);
+            }
+        }
+#endif
     }
     lw_set_error(error, LW_STATUS_OK, "");
     return LW_STATUS_OK;
