@@ -994,9 +994,8 @@ if(EMSCRIPTEN AND LW_WASM_REC_LAZY_FALLBACK)
     target_link_options(wasm-rec-lazy-contract PRIVATE
         -O3 -msimd128 "-sENVIRONMENT=node" "-sFORCE_FILESYSTEM=1"
         "-sALLOW_MEMORY_GROWTH=1"
-        "--embed-file" "${LW_PPOCR_C_REC_LWM}@/models/rec.lwm"
-        "--embed-file"
-        "${CMAKE_CURRENT_SOURCE_DIR}/models/ppocrv6-tiny/ppocr_keys.txt@/models/ppocr_keys.txt")
+        "SHELL:--embed-file \"${LW_PPOCR_C_REC_LWM}@/models/rec.lwm\""
+        "SHELL:--embed-file \"${CMAKE_CURRENT_SOURCE_DIR}/models/ppocrv6-tiny/ppocr_keys.txt@/models/ppocr_keys.txt\"")
     add_dependencies(wasm-rec-lazy-contract convert_rec_model)
 endif()
 
