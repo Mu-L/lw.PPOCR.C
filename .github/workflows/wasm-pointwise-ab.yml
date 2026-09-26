@@ -1,0 +1,119 @@
+name: WASM Pointwise 2x16 A/B
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - CMakeLists.txt
+      - src/runtime/rec_backend_kernels.c
+      - src/simd/wasm128_nhwc_pointwise.c
+      - tools/compare_wasm_pointwise_ab.py
+      - .github/workflows/wasm-pointwise-ab.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - CMakeLists.txt
+      - src/runtime/rec_backend_kernels.c
+      - src/simd/wasm128_nhwc_pointwise.c
+      - tools/compare_wasm_pointwise_ab.py
+      - .github/workflows/wasm-pointwise-ab.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tiny:
+    name: Tiny full OCR, 4x16 vs 2x16
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-converter.txt
+
+      - name: Install model converter dependencies
+        run: python -m pip install -r requirements-converter.txt
+
+      - name: Test A/B report contract
+        run: python -m unittest discover -s tests -p test_compare_wasm_pointwise_ab.py
+
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: 4.0.15
+          actions-cache-folder: emsdk-cache
+
+      - name: Build both Pointwise tiles with identical options
+        shell: bash
+        run: |
+          set -euo pipefail
+          for rows in 4 2; do
+            emcmake cmake -S . -B "build-wasm-pw${rows}" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DLW_BUILD_HTTP_DEMO=OFF \
+              -DLW_BUILD_CSHARP_DEMOS=OFF \
+              -DBUILD_TESTING=OFF \
+              -DLW_WEB_PDF=OFF \
+              -DLW_WASM_COMPILED_REC=ON \
+              -DLW_WASM_REC_SIMD_KERNELS=ON \
+              -DLW_WASM_POINTWISE_ROWS="${rows}"
+            cmake --build "build-wasm-pw${rows}" \
+              --target lw-node-wasm-package det_demo_fixture --parallel
+          done
+
+      - name: Run paired Tiny full OCR in 4/2/2/4 order
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_text_sha256="$(node -p "require('./ci/web-ppocrv6-tiny.json').expected_text_sha256")"
+          for run in 4-a 2-a 2-b 4-b; do
+            rows="${run%%-*}"
+            node tests/node/benchmark.cjs \
+              --package "build-wasm-pw${rows}/node-wasm" \
+              --sample build-wasm-pw4/models/sample.ppm \
+              --expected-text-sha256 "${expected_text_sha256}" \
+              --iterations 5 \
+              > "build-wasm-pw4/pointwise-${run}.json" \
+              2> "build-wasm-pw4/pointwise-${run}.log"
+            grep -q 'LW_WASM_COMPILED_REC widths=5/5' \
+              "build-wasm-pw4/pointwise-${run}.log"
+          done
+          for rows in 4 2; do
+            LW_X64_REC_PROFILE=1 LW_WASM_OCR_PROFILE=1 node tests/node/benchmark.cjs \
+              --package "build-wasm-pw${rows}/node-wasm" \
+              --sample build-wasm-pw4/models/sample.ppm \
+              --expected-text-sha256 "${expected_text_sha256}" \
+              --iterations 1 \
+              > "build-wasm-pw4/pointwise-${rows}-profile.json" \
+              2> "build-wasm-pw4/pointwise-${rows}-profile.log"
+            grep -q 'X64REC width=' "build-wasm-pw4/pointwise-${rows}-profile.log"
+            grep -Eq 'LW_WASM_OCR_PROFILE .*det_compiled=1 det_fallback=0 cls_compiled=[1-9][0-9]* cls_fallback=0 rec_compiled=[1-9][0-9]* rec_fallback=0' \
+              "build-wasm-pw4/pointwise-${rows}-profile.log"
+          done
+          python tools/compare_wasm_pointwise_ab.py \
+            --four build-wasm-pw4/pointwise-4-a.json \
+            --four build-wasm-pw4/pointwise-4-b.json \
+            --two build-wasm-pw4/pointwise-2-a.json \
+            --two build-wasm-pw4/pointwise-2-b.json \
+            --golden ci/web-ppocrv6-tiny.json \
+            --four-profile build-wasm-pw4/pointwise-4-profile.log \
+            --two-profile build-wasm-pw4/pointwise-2-profile.log \
+            | tee build-wasm-pw4/pointwise-summary.md
+          cat build-wasm-pw4/pointwise-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload A/B results and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-pointwise-ab-${{ github.sha }}
+          path: |
+            build-wasm-pw4/pointwise-*.json
+            build-wasm-pw4/pointwise-*.log
+            build-wasm-pw4/pointwise-summary.md
+          if-no-files-found: warn
+          retention-days: 14

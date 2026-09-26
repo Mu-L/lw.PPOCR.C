@@ -126,6 +126,7 @@ class WasmBenchmarkReportTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("2 REC invocations", result.stdout)
         self.assertIn("| Pointwise | 24.000 | 57.1% |", result.stdout)
+        self.assertIn("| 320 | 2 | 24.000 | 2.000 | 42.000 | 57.1% |", result.stdout)
         self.assertIn("| DET graph | 30.000 |", result.stdout)
         self.assertIn("| ConvTranspose | 3.000 |", result.stdout)
         self.assertIn("REC compiled/fallback lines: 2/0", result.stdout)

@@ -116,6 +116,19 @@ def print_compiled_profile(path: Path) -> None:
     for label, milliseconds in sorted(stages, key=lambda item: item[1], reverse=True):
         print(f"| {label} | {milliseconds:.3f} | "
               f"{milliseconds / tracked * 100.0 if tracked else 0.0:.1f}% |")
+    by_width: dict[int, list[dict[str, float]]] = {}
+    for row in snapshots:
+        by_width.setdefault(int(row["width"]), []).append(row)
+    print()
+    print("| REC width | Invocations | Pointwise ms | CTC ms | Tracked ms | Pointwise share |")
+    print("| ---: | ---: | ---: | ---: | ---: | ---: |")
+    for width, rows in sorted(by_width.items()):
+        pointwise = sum(row.get("pw", 0.0) for row in rows)
+        ctc = sum(row.get("ctc", 0.0) for row in rows)
+        tracked_width = sum(row["total"] + row["ctc"] for row in rows)
+        print(f"| {width} | {len(rows)} | {pointwise:.3f} | {ctc:.3f} | "
+              f"{tracked_width:.3f} | "
+              f"{pointwise / tracked_width * 100.0 if tracked_width else 0.0:.1f}% |")
 
 
 def print_full_ocr_profile(path: Path) -> None:
