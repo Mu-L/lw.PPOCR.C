@@ -16,6 +16,13 @@ option(LW_WASM_COMPILED_DET
     "Run WASM DET on the compiled NHWC backend when compiled REC is enabled" ON)
 option(LW_WASM_REC_SIMD_KERNELS
     "Use SIMD128 Dense and Depthwise kernels in experimental WASM compiled REC" ON)
+set(LW_WASM_POINTWISE_ROWS "4" CACHE STRING
+    "WASM SIMD128 pointwise pixel tile; supported values: 2 or 4")
+set_property(CACHE LW_WASM_POINTWISE_ROWS PROPERTY STRINGS 2 4)
+if(NOT LW_WASM_POINTWISE_ROWS STREQUAL "2" AND
+   NOT LW_WASM_POINTWISE_ROWS STREQUAL "4")
+    message(FATAL_ERROR "LW_WASM_POINTWISE_ROWS must be 2 or 4")
+endif()
 option(LW_WASM_DB_BITMAP_SIMD
     "Experimentally use SIMD128 DB thresholding in compiled WASM OCR" OFF)
 option(LW_WEB_LEGACY
@@ -48,6 +55,8 @@ option(LW_EXPERIMENTAL_FUSION_MEMORY
     "Use the experimental physical lifetime plan for fused GELU" OFF)
 option(LW_EXPERIMENTAL_CTC_TILED
     "Use the experimental physical plan for greedy CTC output elision" OFF)
+option(LW_WASM_REC_LAZY_FALLBACK
+    "Avoid canonical REC execution allocations until a compiled WASM fallback is needed" OFF)
 option(LW_EXPERIMENTAL_STREAMING_CROPS
     "Use experimental worker-local streaming crop buffers" OFF)
 option(LW_AVX2_FMA_CONV3X3_DISPATCH
@@ -331,6 +340,11 @@ if(EMSCRIPTEN AND LW_WASM_SIMD128 AND LW_WASM_COMPILED_REC)
 elseif(EMSCRIPTEN AND LW_WASM_COMPILED_REC)
     message(FATAL_ERROR "LW_WASM_COMPILED_REC requires LW_WASM_SIMD128=ON")
 endif()
+if(LW_WASM_REC_LAZY_FALLBACK AND
+   (NOT LW_WASM_COMPILED_REC_ENABLED OR LW_EXPERIMENTAL_CTC_TILED))
+    message(FATAL_ERROR
+        "LW_WASM_REC_LAZY_FALLBACK requires compiled SIMD128 REC without CTC tiled mode")
+endif()
 if(LW_X64_REC_FAST_ENABLED OR LW_WASM_COMPILED_REC_ENABLED)
     list(APPEND LW_PPOCR_C_SOURCES
         src/runtime/layout_planner.c
@@ -452,6 +466,10 @@ set_target_properties(lw_ppocr_c PROPERTIES
 lw_configure_runtime_target(lw_ppocr_c)
 if(LW_X64_REC_FAST_ENABLED OR LW_WASM_COMPILED_REC_ENABLED)
     target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+    if(LW_WASM_COMPILED_REC_ENABLED)
+        target_compile_definitions(lw_ppocr_c PRIVATE
+            LW_WASM_POINTWISE_ROWS=${LW_WASM_POINTWISE_ROWS})
+    endif()
     if(LW_WASM_COMPILED_REC_ENABLED AND LW_WASM_REC_SIMD_KERNELS)
         target_compile_definitions(lw_ppocr_c PRIVATE LW_WASM_REC_SIMD_KERNELS=1)
     endif()
@@ -466,6 +484,9 @@ if(LW_X64_REC_FAST_ENABLED OR LW_WASM_COMPILED_REC_ENABLED)
         set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c src/simd/avx2_nhwc_depthwise.c src/simd/avx2_nhwc_support.c src/simd/avx2_nhwc_convtranspose.c APPEND PROPERTY
             COMPILE_OPTIONS /arch:AVX2 /fp:strict)
     endif()
+endif()
+if(LW_WASM_REC_LAZY_FALLBACK)
+    target_compile_definitions(lw_ppocr_c PRIVATE LW_WASM_REC_LAZY_FALLBACK=1)
 endif()
 if(LW_EXPERIMENTAL_DET_FIXED_POINT_RESIZE)
     target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_DET_FIXED_POINT_RESIZE=1)
@@ -955,6 +976,28 @@ if(EMSCRIPTEN)
         DEPENDS "${LW_PPOCR_C_NODE_PACKAGE_ARCHIVE}"
                 "${LW_PPOCR_C_NODE_PACKAGE_CHECKSUM}")
     endif()
+endif()
+
+if(EMSCRIPTEN AND LW_WASM_REC_LAZY_FALLBACK)
+    # Private CI executable: exercise a source whose canonical REC session was
+    # released, a compiled clone, and a clone forced onto canonical fallback.
+    add_executable(wasm-rec-lazy-contract tests/wasm_rec_lazy_contract_driver.c)
+    target_link_libraries(wasm-rec-lazy-contract PRIVATE lw_ppocr_c m)
+    target_include_directories(wasm-rec-lazy-contract PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/ppocr")
+    target_compile_features(wasm-rec-lazy-contract PRIVATE c_std_11)
+    target_compile_definitions(wasm-rec-lazy-contract PRIVATE
+        LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+    target_compile_options(wasm-rec-lazy-contract PRIVATE
+        -O3 -Wall -Wextra -Wpedantic -Werror -msimd128)
+    target_link_options(wasm-rec-lazy-contract PRIVATE
+        -O3 -msimd128 "-sENVIRONMENT=node" "-sFORCE_FILESYSTEM=1"
+        "-sALLOW_MEMORY_GROWTH=1"
+        "--embed-file" "${LW_PPOCR_C_REC_LWM}@/models/rec.lwm"
+        "--embed-file"
+        "${CMAKE_CURRENT_SOURCE_DIR}/models/ppocrv6-tiny/ppocr_keys.txt@/models/ppocr_keys.txt")
+    add_dependencies(wasm-rec-lazy-contract convert_rec_model)
 endif()
 
 set(LW_PPOCR_C_REC_DEMO_PPM

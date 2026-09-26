@@ -7,6 +7,14 @@ physical REC compiler, its five adaptive width slots (192/320/480/640/960),
 arena lifetime plan, fused epilogues, and CTC output elision. The compiled
 executor selects a 4-pixel x 16-output-channel SIMD128 pointwise kernel and
 panel-outer SIMD128 CTC projection with emitted-row probability recomputation.
+`LW_WASM_POINTWISE_ROWS=2` selects an experimental independent 2x16 pixel tile;
+the default remains `4`. Both use the same OC16 packed weights and non-FMA
+accumulation contract. The `WASM Pointwise 2x16 A/B` workflow builds both
+tiles from one revision, then runs Tiny full OCR in 4/2/2/4 order on one runner
+with a fresh process, one warm-up, and five measured runs per entry. The job
+summary reports paired latency and WASM heap; the checked-in OCR checksum,
+line count, DET box count, and a 5 MiB heap-growth limit are gates. A speedup
+is evidence to consider changing the default, not an automatic promotion.
 Dense and depthwise now have SIMD128 physical kernels, selected by the
 `LW_WASM_REC_SIMD_KERNELS` option (default `ON` when compiled REC is enabled).
 Turning the option `OFF` preserves the portable physical kernels for an
@@ -33,6 +41,42 @@ directly to the backend input. If DET compilation fails, the canonical DET
 executor is used. The `LW_WASM_COMPILED_DET` option can be turned off for a
 REC/CLS-only comparison. The normal browser/Node release build is unaffected.
 
+Compiled REC memory is checked separately from latency. The first Tiny/Small/
+Medium A/B showed equal text and box counts but Small and Medium exceeded the
+canonical WASM-heap gate. `LW_WASM_REC_LAZY_FALLBACK=ON` is an experimental,
+compiled-REC-only memory option (default `OFF`). With a 960-pixel maximum REC
+width it resolves the initial session as metadata only, compiles all five
+adaptive widths using metadata-only shape sessions, and keeps no canonical REC
+execution workspace or input/output buffers when all five compiled instances
+are ready. If compilation or instance creation is incomplete, it constructs
+the normal canonical session before publishing the recognizer. If a compiled
+instance later fails, it reconstructs the canonical NCHW session and
+preprocesses the line again before retrying; it never executes canonical REC
+on NHWC input. Clones follow the same rule. The option requires compiled
+SIMD128 REC and cannot be combined with experimental tiled CTC. The default
+release path still retains its established canonical fallback behavior.
+
+The experimental CI builds enable lazy fallback and require the
+`LW_WASM_REC_LAZY_FALLBACK full_coverage=1 canonical_retained=0` marker, zero
+normal-run REC fallbacks, exact text and box parity, and a WASM heap no more
+than 5 MiB above the canonical build for each model. `LW_REC_MEMORY_PROFILE`
+records the retained canonical REC workspace, input, and output separately
+from compiled allocations in the job summary. It also reports the canonical
+workspace that would be planned for a future fallback, without counting that
+unallocated space as retained. A `free()` call by itself does
+not prove lower WASM heap: linear memory records its high-water size, which is
+why the canonical execution workspace must be avoided during compilation and
+initialization. These gates must pass in remote Emscripten CI before this
+experiment is considered successful.
+The experimental Node CI also runs a private Tiny REC contract executable:
+it directly asserts that the source and both clones have no canonical session
+after full compiled coverage, disables the compiled backend on one clone,
+then recognizes all five adaptive widths. That clone must rebuild a canonical
+session, while the source and compiled clone remain lazy; all three results
+must have identical text for each width. This checks clone ownership and lazy
+canonical reconstruction without adding a public ABI entry point or modifying
+the release package.
+
 There is no pthread requirement, fast-math flag, or relaxed-SIMD dependency.
 The option requires `LW_WASM_SIMD128=ON`.
 
@@ -44,7 +88,8 @@ manually run `browser-wasm-sdk-and-html` with `compiled_rec=true`. Five warmed
 full-OCR iterations per build use the same Tiny
 models and 500x500 PPM with CLS enabled, matching the Web/Node Tiny golden
 configuration. All three runs must match the exact text checksum in
-`ci/web-ppocrv6-tiny.json`; timing and memory remain informational. The job
+`ci/web-ppocrv6-tiny.json`; latency and process RSS remain informational,
+while WASM heap has a 5 MiB growth gate. The job
 summary and `wasm-compiled-rec-comparison-*` artifact contain the three-way
 measurements, including process RSS and WASM heap. The benchmark records all
 three OCR texts before the reporter checks parity and the checked-in golden
@@ -52,7 +97,8 @@ checksum. A mismatch still fails CI, but the measurements and differing text
 are preserved in the job summary instead of being lost at the first run.
 After the uninstrumented A/B, CI also runs compiled SIMD128 in a separate
 profile process and summarizes accumulated REC stage times (pointwise, dense,
-depthwise, CTC, etc.). Those instrumented timings identify hotspots but must
+depthwise, CTC, etc.), including a per-REC-width Pointwise/CTC table. Those
+instrumented timings identify hotspots but must
 not be compared to the full-OCR A/B latency. Only the experimental Node package
 accepts `LW_X64_REC_PROFILE`, `LW_WASM_OCR_PROFILE`, and
 `LW_REC_MEMORY_PROFILE` from its host environment; browser and canonical Node
@@ -86,8 +132,9 @@ actual compiled DET/CLS arena and packed-constant bytes, plus each resident REC
 width's owned/borrowed constants and arena/scratch capacity. Borrowed REC
 constants are references to shared storage, not additional allocations.
 
-This does **not** yet establish a performance win or complete coverage across
-Tiny, Small, and Medium until that CI runs successfully. Keep
+The first same-runner report showed a latency win for compiled SIMD128 on all
+three models, but Small and Medium failed the WASM-heap gate. That report is
+diagnostic, not a promotion decision. Keep
 `LW_WASM_COMPILED_REC` off for releases until CI confirms exact text, backend
 coverage, and end-to-end latency/memory improvement on all intended model
 packs. The local native tests do not substitute for an Emscripten build.

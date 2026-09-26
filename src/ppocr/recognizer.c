@@ -342,6 +342,72 @@ static lw_status validate_options(const lw_recognizer_options* options, uint32_t
     return LW_STATUS_OK;
 }
 
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_LAZY_FALLBACK)
+/* Resolve the initial output shape without allocating the canonical execution
+ * arena. A full session is built only if compiled coverage is incomplete or a
+ * compiled slot later becomes unavailable. */
+static lw_status configure_initial_metadata_session(lw_recognizer* recognizer,
+                                                    uint32_t target_width,
+                                                    lw_session_info* configured_info,
+                                                    lw_error* error) {
+    lw_tensor_desc input_desc;
+    lw_tensor_desc output_desc;
+    lw_session* session = NULL;
+    lw_status status;
+    lw_tensor_desc_init(&input_desc);
+    input_desc.dtype = LW_DTYPE_F32;
+    input_desc.rank = 4u;
+    input_desc.dimensions[0] = 1;
+    input_desc.dimensions[1] = 3;
+    input_desc.dimensions[2] = (int32_t)LW_REC_INPUT_HEIGHT;
+    input_desc.dimensions[3] = (int32_t)target_width;
+    status = lw_session_create_metadata_only(recognizer->model, &input_desc, 1u,
+                                             &recognizer->session_options, &session, error);
+    if (status != LW_STATUS_OK) return status;
+    lw_tensor_desc_init(&output_desc);
+    status = lw_session_get_output_desc(session, 0u, &output_desc);
+    if (status != LW_STATUS_OK || output_desc.dtype != LW_DTYPE_F32 || output_desc.rank != 3u ||
+        output_desc.dimensions[0] != 1 || output_desc.dimensions[1] <= 0 ||
+        output_desc.dimensions[2] <= 0 ||
+        (uint32_t)output_desc.dimensions[2] !=
+            lw_rec_dictionary_class_count(recognizer->dictionary)) {
+        lw_session_free(session);
+        lw_set_error(error, LW_STATUS_INVALID_SHAPE,
+                     "recognizer model output and dictionary are incompatible");
+        return LW_STATUS_INVALID_SHAPE;
+    }
+    lw_session_info_init(configured_info);
+    status = lw_session_get_info(session, configured_info);
+    if (status != LW_STATUS_OK) {
+        lw_session_free(session);
+        lw_set_error(error, status, "unable to read recognizer session information");
+        return status;
+    }
+    recognizer->session = session;
+    recognizer->current_target_width = target_width;
+    recognizer->current_time_steps = (uint32_t)output_desc.dimensions[1];
+    return LW_STATUS_OK;
+}
+
+static void recognizer_release_canonical_state(lw_recognizer* recognizer) {
+    if (recognizer == NULL) return;
+    release_cached_session(recognizer);
+    free(recognizer->best_probabilities);
+    free(recognizer->best_indices);
+    free(recognizer->probabilities);
+    free(recognizer->input);
+    recognizer->best_probabilities = NULL;
+    recognizer->best_indices = NULL;
+    recognizer->probabilities = NULL;
+    recognizer->input = NULL;
+    lw_session_free(recognizer->session);
+    recognizer->session = NULL;
+    recognizer->input_element_count = 0u;
+    recognizer->probability_element_count = 0u;
+    /* Keep current_target_width and current_time_steps as fallback metadata. */
+}
+#endif
+
 static lw_status configure_session(lw_recognizer* recognizer, uint32_t target_width,
                                    lw_session_info* configured_info, lw_error* error) {
     lw_tensor_desc input_desc;
@@ -697,7 +763,26 @@ static void recognizer_report_compiled_memory(const lw_recognizer* recognizer) {
     uint64_t arena_bytes = 0u;
     uint64_t scratch_bytes = 0u;
     uint64_t ctc_rows = 0u;
+    uint64_t canonical_workspace = 0u;
+    uint64_t canonical_input = 0u;
+    uint64_t canonical_output = 0u;
+    lw_session_info session_info;
     if (!lw_profile_env_is_one("LW_REC_MEMORY_PROFILE")) return;
+    lw_session_info_init(&session_info);
+    if (recognizer->session != NULL &&
+        lw_session_get_info(recognizer->session, &session_info) == LW_STATUS_OK) {
+        canonical_workspace = session_info.workspace_size;
+    }
+    if (recognizer->input != NULL)
+        canonical_input = recognizer->input_element_count * sizeof(float);
+    if (recognizer->probabilities != NULL) {
+        canonical_output = recognizer->probability_element_count * sizeof(float);
+    } else {
+        if (recognizer->best_indices != NULL)
+            canonical_output += (uint64_t)recognizer->current_time_steps * sizeof(uint32_t);
+        if (recognizer->best_probabilities != NULL)
+            canonical_output += (uint64_t)recognizer->current_time_steps * sizeof(float);
+    }
     for (index = 0u; index < LW_REC_RESIDENT_WIDTH_COUNT; ++index) {
         const lw_x64_rec_backend_slot* slot = &recognizer->x64_slots[index];
         if (slot->program == NULL) continue;
@@ -719,6 +804,11 @@ static void recognizer_report_compiled_memory(const lw_recognizer* recognizer) {
             (unsigned long long)(recognizer->x64_shared_ctc_scores == NULL ? 0u :
                 ctc_rows * (sizeof(float) * 2u + sizeof(uint32_t))),
             recognizer->fast_shared == NULL ? 0u : 1u);
+    fprintf(stderr, "REC_MEMORY canonical_workspace=%llu canonical_input=%llu canonical_output=%llu canonical_planned_workspace=%llu\n",
+            (unsigned long long)canonical_workspace,
+            (unsigned long long)canonical_input,
+            (unsigned long long)canonical_output,
+            (unsigned long long)recognizer->info.workspace_size);
 }
 #endif
 
@@ -733,6 +823,9 @@ lw_status lw_recognizer_create(const char* model_path_utf8, const char* dictiona
     uint64_t max_image_pixels;
     uint32_t max_label_bytes;
     lw_status status;
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_LAZY_FALLBACK)
+    int metadata_initial = 0;
+#endif
     if (out_recognizer != NULL) {
         *out_recognizer = NULL;
     }
@@ -762,7 +855,17 @@ lw_status lw_recognizer_create(const char* model_path_utf8, const char* dictiona
         goto fail;
     }
     recognizer->session_options = session_options;
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_LAZY_FALLBACK)
+    if (target_width == 960u) {
+        status = configure_initial_metadata_session(recognizer, target_width,
+                                                    &session_info, error);
+        metadata_initial = 1;
+    } else {
+        status = configure_session(recognizer, target_width, &session_info, error);
+    }
+#else
     status = configure_session(recognizer, target_width, &session_info, error);
+#endif
     if (status != LW_STATUS_OK) {
         goto fail;
     }
@@ -783,6 +886,23 @@ lw_status lw_recognizer_create(const char* model_path_utf8, const char* dictiona
     recognizer->info.workspace_size = session_info.workspace_size;
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
     recognizer_try_backends(recognizer);
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_LAZY_FALLBACK)
+    if (metadata_initial) {
+        const int full_coverage = recognizer_has_full_compiled_coverage(recognizer);
+        if (full_coverage) {
+            recognizer_release_canonical_state(recognizer);
+        } else {
+            /* Compilation is all-or-nothing for lazy retention. Rebuild the
+             * complete canonical fallback before publishing this handle. */
+            status = configure_session(recognizer, target_width, &session_info, error);
+            if (status != LW_STATUS_OK) goto fail;
+            release_cached_session(recognizer);
+            recognizer->info.workspace_size = session_info.workspace_size;
+        }
+        (void)fprintf(stderr, "LW_WASM_REC_LAZY_FALLBACK full_coverage=%d canonical_retained=%u\n",
+                      full_coverage, recognizer->session == NULL ? 0u : 1u);
+    }
+#endif
 #if !defined(LW_EXPERIMENTAL_CTC_TILED)
     if (!recognizer_has_full_compiled_coverage(recognizer) &&
         recognizer->model->info.content_checksum == LW_MEDIUM_REC_LWM_CHECKSUM) {
@@ -1067,6 +1187,9 @@ lw_status lw_recognizer_clone(const lw_recognizer* source, lw_recognizer** out_r
     lw_recognizer* clone;
     lw_session_info session_info;
     lw_status status;
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_LAZY_FALLBACK)
+    int metadata_clone = 0;
+#endif
     if (out_recognizer != NULL) {
         *out_recognizer = NULL;
     }
@@ -1090,7 +1213,17 @@ lw_status lw_recognizer_clone(const lw_recognizer* source, lw_recognizer** out_r
     lw_model_retain(clone->model);
     lw_rec_dictionary_retain(clone->dictionary);
     lw_session_info_init(&session_info);
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_LAZY_FALLBACK)
+    if (source->session == NULL && source->info.target_width == 960u) {
+        status = configure_initial_metadata_session(clone, source->current_target_width,
+                                                    &session_info, error);
+        metadata_clone = 1;
+    } else {
+        status = configure_session(clone, source->current_target_width, &session_info, error);
+    }
+#else
     status = configure_session(clone, source->current_target_width, &session_info, error);
+#endif
     if (status != LW_STATUS_OK) {
         lw_recognizer_free(clone);
         return status;
@@ -1101,10 +1234,12 @@ lw_status lw_recognizer_clone(const lw_recognizer* source, lw_recognizer** out_r
     clone->fast_shared = source->fast_shared;
     if (clone->fast_shared != NULL) ++clone->fast_shared->reference_count;
 #endif
-    status = lw_session_share_prepared_constants(clone->session, source->session, error);
-    if (status != LW_STATUS_OK) {
-        lw_recognizer_free(clone);
-        return status;
+    if (source->session != NULL) {
+        status = lw_session_share_prepared_constants(clone->session, source->session, error);
+        if (status != LW_STATUS_OK) {
+            lw_recognizer_free(clone);
+            return status;
+        }
     }
     clone->info.time_steps = clone->current_time_steps;
     clone->info.workspace_size = session_info.workspace_size;
@@ -1121,6 +1256,22 @@ lw_status lw_recognizer_clone(const lw_recognizer* source, lw_recognizer** out_r
         }
         recognizer_create_slot_instances(clone);
     }
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_LAZY_FALLBACK)
+    if (metadata_clone) {
+        if (recognizer_has_full_compiled_coverage(clone)) {
+            recognizer_release_canonical_state(clone);
+        } else {
+            status = configure_session(clone, source->current_target_width,
+                                       &session_info, error);
+            if (status != LW_STATUS_OK) {
+                lw_recognizer_free(clone);
+                return status;
+            }
+            release_cached_session(clone);
+            clone->info.workspace_size = session_info.workspace_size;
+        }
+    }
+#endif
 #endif
     lw_recognizer_set_intra_op_thread_count(clone, source->intra_workers);
     *out_recognizer = clone;
@@ -1150,6 +1301,10 @@ void lw_recognizer_test_disable_x64_backend(lw_recognizer* recognizer) {
     }
     medium_fast_shared_release(recognizer->fast_shared);
     recognizer->fast_shared = NULL;
+}
+
+int lw_recognizer_test_has_canonical_session(const lw_recognizer* recognizer) {
+    return recognizer != NULL && recognizer->session != NULL;
 }
 #endif
 
@@ -1282,7 +1437,8 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
 #endif
     if (profile != NULL) {
         if (backend_active || recognizer->resident_widths_enabled != 0u ||
-            target_width == recognizer->current_target_width ||
+            (recognizer->session != NULL &&
+             target_width == recognizer->current_target_width) ||
             target_width == recognizer->cached_target_width) {
             if (profile->session_cache_hits != UINT64_MAX) {
                 ++profile->session_cache_hits;
@@ -1296,7 +1452,8 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
             }
         }
     }
-    if (!backend_active && target_width != recognizer->current_target_width) {
+    if (!backend_active && (recognizer->session == NULL ||
+                            target_width != recognizer->current_target_width)) {
         status = configure_session(recognizer, target_width, NULL, error);
         if (status != LW_STATUS_OK) {
             return status;
@@ -1330,7 +1487,7 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
     if (status != LW_STATUS_OK && backend_active) {
         backend_active = 0;
-        if (target_width != recognizer->current_target_width) {
+        if (recognizer->session == NULL || target_width != recognizer->current_target_width) {
             status = configure_session(recognizer, target_width, NULL, error);
             if (status != LW_STATUS_OK) return status;
         }
@@ -1365,10 +1522,33 @@ static lw_status recognizer_recognize_bgr_u8_impl(lw_recognizer* recognizer, con
             execution_best_indices = backend_slot->instance->best_indices;
             execution_best_probabilities = backend_slot->instance->best_probabilities;
         } else {
+#if defined(__EMSCRIPTEN__) && defined(LW_WASM_REC_LAZY_FALLBACK)
+            /* Retire the failed private instance. Rebuild a full NCHW
+             * session and preprocess again; the backend input is NHWC. */
+            lw_x64_rec_instance_free(backend_slot->instance);
+            backend_slot->instance = NULL;
+            backend_active = 0;
+            lw_error_init(error);
+            if (recognizer->session == NULL ||
+                target_width != recognizer->current_target_width) {
+                status = configure_session(recognizer, target_width, NULL, error);
+                if (status != LW_STATUS_OK) return status;
+            }
+            execution_time_steps = recognizer->current_time_steps;
+            status = lw_rec_preprocess_bgr_u8(
+                source, source_byte_count, source_width, source_height, source_stride,
+                recognizer->current_target_width, recognizer->input,
+                recognizer->input_element_count, &resized_width);
+            if (status != LW_STATUS_OK) {
+                lw_set_error(error, status, "BGR source layout is invalid");
+                return status;
+            }
+#else
             /* The recognizer input contains the backend layout after a successful
              * backend preprocess. Do not silently feed that NHWC buffer to the
              * canonical NCHW executor after a runtime backend failure. */
             return status;
+#endif
         }
     }
 #endif

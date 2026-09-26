@@ -53,7 +53,9 @@ jobs:
           -r requirements-wasm-test.txt
 
       - name: Check WASM benchmark report contract
-        run: python -m unittest discover -s tests -p test_compare_wasm_rec_benchmark.py
+        run: |
+          python -m unittest discover -s tests -p test_compare_wasm_rec_benchmark.py
+          python -m unittest discover -s tests -p test_summarize_wasm_rec_memory.py
 
       - name: Cache Playwright Chromium
         uses: actions/cache@v5
@@ -78,6 +80,7 @@ jobs:
           -DLW_BUILD_CSHARP_DEMOS=OFF
           -DBUILD_TESTING=OFF
           -DLW_WASM_COMPILED_REC=${{ inputs.compiled_rec || false }}
+          -DLW_WASM_REC_LAZY_FALLBACK=${{ inputs.compiled_rec || false }}
           -DLW_BUILD_WEB_MODEL_VARIANTS=${{ inputs.build_web_variants || false }}
 
       - name: Build browser and Node WASM distributions
@@ -198,7 +201,8 @@ jobs:
             -DLW_BUILD_CSHARP_DEMOS=OFF \
             -DBUILD_TESTING=OFF \
             -DLW_WEB_PDF=OFF \
-            -DLW_WASM_COMPILED_REC="${extra_compiled}"
+            -DLW_WASM_COMPILED_REC="${extra_compiled}" \
+            -DLW_WASM_REC_LAZY_FALLBACK="${extra_compiled}"
           cmake --build "${extra_build}" --target lw-node-wasm-package --parallel
           emcmake cmake -S . -B build-wasm-compiled-scalar -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -207,8 +211,19 @@ jobs:
             -DBUILD_TESTING=OFF \
             -DLW_WEB_PDF=OFF \
             -DLW_WASM_COMPILED_REC=ON \
+            -DLW_WASM_REC_LAZY_FALLBACK=ON \
             -DLW_WASM_REC_SIMD_KERNELS=OFF
           cmake --build build-wasm-compiled-scalar --target lw-node-wasm-package --parallel
+          compiled_build="${compiled_package%/node-wasm}"
+          cmake --build "${compiled_build}" --target wasm-rec-lazy-contract --parallel
+          if ! node "${compiled_build}/wasm-rec-lazy-contract.js" \
+              > build-wasm/rec-lazy-contract.log 2>&1; then
+            cat build-wasm/rec-lazy-contract.log
+            exit 1
+          fi
+          cat build-wasm/rec-lazy-contract.log
+          grep -q 'WASM_REC_LAZY_CONTRACT clone=pass fallback_rebuild=pass widths=5/5' \
+            build-wasm/rec-lazy-contract.log
           expected_text_sha256="$(node -p "require('./ci/web-ppocrv6-tiny.json').expected_text_sha256")"
           expected_line_count="$(node -p "require('./ci/web-ppocrv6-tiny.json').expected_line_count")"
           node tests/node/benchmark.cjs \
@@ -243,6 +258,8 @@ jobs:
           cat build-wasm/rec-benchmark-compiled-scalar.log
           grep -q 'LW_WASM_OCR_PROFILE total=' build-wasm/rec-profile-compiled.log
           grep -q 'LW_WASM_DET_PROFILE total=' build-wasm/rec-profile-compiled.log
+          grep -Eq 'REC_MEMORY canonical_workspace=[0-9]+ canonical_input=[0-9]+ canonical_output=[0-9]+' \
+            build-wasm/rec-profile-compiled.log
           grep -Eq 'LW_WASM_OCR_PROFILE .*det_compiled=1 det_fallback=0 cls_compiled=[1-9][0-9]* cls_fallback=0 rec_compiled=[1-9][0-9]* rec_fallback=0' \
             build-wasm/rec-profile-compiled.log
           set +e
@@ -258,7 +275,17 @@ jobs:
           report_status=${PIPESTATUS[0]}
           set -e
           cat build-wasm/rec-benchmark-summary.md >> "$GITHUB_STEP_SUMMARY"
+          python tools/summarize_wasm_rec_memory.py \
+            --variant tiny \
+            --canonical build-wasm/rec-benchmark-canonical.json \
+            --compiled build-wasm/rec-benchmark-compiled.json \
+            --profile-json build-wasm/rec-profile-summary.json \
+            --profile-log build-wasm/rec-profile-compiled.log \
+            | tee build-wasm/rec-memory-summary.md
+          cat build-wasm/rec-memory-summary.md >> "$GITHUB_STEP_SUMMARY"
           grep -q 'LW_WASM_COMPILED_REC widths=5/5' \
+            build-wasm/rec-benchmark-compiled.log
+          grep -q 'LW_WASM_REC_LAZY_FALLBACK full_coverage=1 canonical_retained=0' \
             build-wasm/rec-benchmark-compiled.log
           grep -q 'LW_WASM_COMPILED_REC ctc=simd128' \
             build-wasm/rec-benchmark-compiled.log
@@ -267,6 +294,8 @@ jobs:
           grep -Eq 'LW_WASM_COMPILED_DET input=512x512 layout=nhwc ops=[1-9][0-9]* unsupported=0 conversions=[0-9]+ direct_input=1' \
             build-wasm/rec-benchmark-compiled.log
           grep -q 'LW_WASM_COMPILED_REC widths=5/5' \
+            build-wasm/rec-benchmark-compiled-scalar.log
+          grep -q 'LW_WASM_REC_LAZY_FALLBACK full_coverage=1 canonical_retained=0' \
             build-wasm/rec-benchmark-compiled-scalar.log
           grep -q 'LW_WASM_COMPILED_REC ctc=simd128' \
             build-wasm/rec-benchmark-compiled-scalar.log
@@ -333,8 +362,18 @@ jobs:
             report_status=${PIPESTATUS[0]}
             set -e
             cat "build-wasm/wasm-${variant}-summary.md" >> "$GITHUB_STEP_SUMMARY"
+            python tools/summarize_wasm_rec_memory.py \
+              --variant "${variant}" \
+              --canonical "build-wasm/wasm-${variant}-canonical.json" \
+              --compiled "build-wasm/wasm-${variant}-simd128.json" \
+              --profile-json "build-wasm/wasm-${variant}-profile-summary.json" \
+              --profile-log "build-wasm/wasm-${variant}-profile.log" \
+              | tee "build-wasm/wasm-${variant}-memory.md"
+            cat "build-wasm/wasm-${variant}-memory.md" >> "$GITHUB_STEP_SUMMARY"
             if [[ "$report_status" -ne 0 ]]; then overall_status=1; fi
             grep -q 'LW_WASM_COMPILED_REC widths=5/5' "build-wasm/wasm-${variant}-simd128.log"
+            grep -q 'LW_WASM_REC_LAZY_FALLBACK full_coverage=1 canonical_retained=0' \
+              "build-wasm/wasm-${variant}-simd128.log"
             grep -Eq 'LW_WASM_COMPILED_CLS layout=nhwc ops=[1-9][0-9]* unsupported=0' \
               "build-wasm/wasm-${variant}-simd128.log"
             grep -Eq 'LW_WASM_COMPILED_DET input=512x512 layout=nhwc ops=[1-9][0-9]* unsupported=0 conversions=[0-9]+ direct_input=1' \
@@ -342,6 +381,10 @@ jobs:
             grep -Eq 'LW_WASM_OCR_PROFILE .*det_compiled=1 det_fallback=0 cls_compiled=[1-9][0-9]* cls_fallback=0 rec_compiled=[1-9][0-9]* rec_fallback=0' \
               "build-wasm/wasm-${variant}-profile.log"
             grep -q 'LW_WASM_DET_PROFILE total=' "build-wasm/wasm-${variant}-profile.log"
+            grep -Eq 'REC_MEMORY canonical_workspace=[0-9]+ canonical_input=[0-9]+ canonical_output=[0-9]+' \
+              "build-wasm/wasm-${variant}-profile.log"
+            grep -q 'REC_MEMORY canonical_workspace=0 canonical_input=0 canonical_output=0' \
+              "build-wasm/wasm-${variant}-profile.log"
           done
           exit "$overall_status"
 
@@ -444,14 +487,18 @@ jobs:
             build-wasm/rec-profile-compiled.log
             build-wasm/rec-profile-summary.json
             build-wasm/rec-benchmark-summary.md
+            build-wasm/rec-memory-summary.md
+            build-wasm/rec-lazy-contract.log
             build-wasm/rec-det-debug-*.json
             build-wasm/rec-det-debug-*.log
             build-wasm/wasm-small-*.json
             build-wasm/wasm-small-*.log
             build-wasm/wasm-small-summary.md
+            build-wasm/wasm-small-memory.md
             build-wasm/wasm-medium-*.json
             build-wasm/wasm-medium-*.log
             build-wasm/wasm-medium-summary.md
+            build-wasm/wasm-medium-memory.md
           if-no-files-found: warn
           retention-days: 14
 
