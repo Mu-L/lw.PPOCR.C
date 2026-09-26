@@ -23,7 +23,7 @@ class PointwiseAbTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             golden = root / "golden.json"
-            golden.write_text(json.dumps({"expected_line_count": 2,
+            golden.write_text(json.dumps({"variant": "tiny", "expected_line_count": 2,
                                           "expected_text_sha256": digest}), encoding="utf-8")
             paths = []
             for index, milliseconds in enumerate((100.0, 80.0, 82.0, 102.0)):
@@ -45,15 +45,36 @@ class PointwiseAbTest(unittest.TestCase):
             self.assertIn("Text contract: **PASS**", report)
             four_profile = root / "four.log"
             two_profile = root / "two.log"
-            four_profile.write_text("X64REC width=320 total=20.000 pw=12.000 ctc=1.000\n",
+            four_profile.write_text("X64REC width=160 total=4.000 pw=3.000 ctc=0.000\n"
+                                    "X64REC width=320 total=20.000 pw=12.000 ctc=1.000\n",
                                     encoding="utf-8")
-            two_profile.write_text("X64REC width=320 total=18.000 pw=10.000 ctc=1.000\n",
+            two_profile.write_text("X64REC width=160 total=4.000 pw=3.000 ctc=0.000\n"
+                                   "X64REC width=320 total=18.000 pw=10.000 ctc=1.000\n",
                                    encoding="utf-8")
             profiled_report = module.compare([paths[0], paths[3]], [paths[1], paths[2]],
                                              golden, 5, 5.0, four_profile, two_profile)
             self.assertIn("| 320 | 1 | 12.000 | 10.000 | 1.200x | 57.1% | 52.6% |",
                           profiled_report)
             self.assertIn("4x16 **57.1%**, 2x16 **52.6%**", profiled_report)
+            self.assertNotIn("| 160 |", profiled_report)
+            self.assertIn("CLS width 160 (separate): 1 invocations", profiled_report)
+            for variant in ("small", "medium"):
+                golden.write_text(json.dumps({"variant": variant, "expected_line_count": 2,
+                                              "expected_text_sha256": digest}), encoding="utf-8")
+                for path in paths:
+                    run = json.loads(path.read_text(encoding="utf-8"))
+                    run["model_variant"] = variant
+                    path.write_text(json.dumps(run), encoding="utf-8")
+                variant_report = module.compare([paths[0], paths[3]], [paths[1], paths[2]],
+                                                golden, 5, 5.0)
+                self.assertIn(f"{variant.title()} full OCR", variant_report)
+            golden.write_text(json.dumps({"variant": "medium", "expected_line_count": 2,
+                                          "expected_text_sha256": "0" * 64}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "golden contract"):
+                module.compare([paths[0], paths[3]], [paths[1], paths[2]],
+                               golden, 5, 5.0)
+            golden.write_text(json.dumps({"variant": "medium", "expected_line_count": 2,
+                                          "expected_text_sha256": digest}), encoding="utf-8")
             changed = json.loads(paths[2].read_text(encoding="utf-8"))
             changed["text_lines"] = ["文字", "0CR"]
             paths[2].write_text(json.dumps(changed), encoding="utf-8")

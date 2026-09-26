@@ -11,6 +11,9 @@ import sys
 from pathlib import Path
 
 
+REC_WIDTHS = frozenset((192, 320, 480, 640, 960))
+
+
 def load_run(path: Path) -> dict:
     run = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(run, dict) or run.get("schema_version") != 1:
@@ -22,8 +25,9 @@ def load_run(path: Path) -> dict:
     return run
 
 
-def load_profile(path: Path) -> dict[int, tuple[int, float, float, float]]:
-    """Aggregate a separately instrumented run by adaptive REC width."""
+def load_profile(path: Path, accepted_widths: frozenset[int] = REC_WIDTHS
+                 ) -> dict[int, tuple[int, float, float, float]]:
+    """Aggregate separately instrumented REC or CLS runs by width."""
     widths: dict[int, list[dict[str, float]]] = {}
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         if not line.startswith("X64REC width="):
@@ -31,9 +35,13 @@ def load_profile(path: Path) -> dict[int, tuple[int, float, float, float]]:
         fields = {key: float(value) for key, value in
                   re.findall(r"([a-z]+)=([0-9]+(?:\.[0-9]+)?)", line)}
         if all(key in fields for key in ("width", "total", "pw", "ctc")):
-            widths.setdefault(int(fields["width"]), []).append(fields)
+            width = int(fields["width"])
+            if width in accepted_widths:
+                widths.setdefault(width, []).append(fields)
+            elif width not in REC_WIDTHS and width != 160:
+                raise ValueError(f"{path}: unknown REC/CLS profile width {width}")
     if not widths:
-        raise ValueError(f"{path}: no per-width REC profile was captured")
+        raise ValueError(f"{path}: no requested-width profile was captured")
     return {width: (len(rows),
                     sum(row["pw"] for row in rows),
                     sum(row["ctc"] for row in rows),
@@ -64,21 +72,24 @@ def compare(four_paths: list[Path], two_paths: list[Path], golden_path: Path,
         actual_digest = hashlib.sha256("\n".join(run["text_lines"]).encode("utf-8")).hexdigest()
         if actual_digest != run["text_sha256"]:
             raise ValueError(f"{path}: OCR text checksum does not match text lines")
+    variant = golden.get("variant")
+    if variant not in ("tiny", "small", "medium"):
+        raise ValueError("golden must identify a supported model variant")
     if (reference["wasm_backend"] != "wasm128" or
-            reference["model_variant"] != "tiny" or
+            reference["model_variant"] != variant or
             reference["use_cls"] is not True or
             reference["line_count"] != golden["expected_line_count"] or
             reference["detected_count"] != golden["expected_line_count"] or
             reference["text_sha256"] != golden["expected_text_sha256"] or
             len(reference["text_lines"]) != reference["line_count"]):
-        raise ValueError("4x16 reference does not match the Tiny OCR golden contract")
+        raise ValueError(f"4x16 reference does not match the {variant} OCR golden contract")
     if max(run["wasm_heap_bytes"] for run in two) > (
             max(run["wasm_heap_bytes"] for run in four) + max_heap_growth_mib * 1048576):
         raise ValueError("2x16 WASM heap exceeds 4x16 by more than the allowed growth")
 
     paired_ratios = [base["median_ms"] / candidate["median_ms"]
                      for base, candidate in zip(four, two)]
-    rows = ["## WASM Pointwise 4x16 vs 2x16 — Tiny full OCR", "",
+    rows = [f"## WASM Pointwise 4x16 vs 2x16 — {variant.title()} full OCR", "",
             "Each result is a fresh process with one warm-up and "
             f"{expected_iterations} measured OCR runs; run order is 4/2/2/4.", "",
             "| Pair | 4x16 ms | 2x16 ms | 4x16 / 2x16 | 4x16 heap MiB | 2x16 heap MiB |",
@@ -100,6 +111,7 @@ def compare(four_paths: list[Path], two_paths: list[Path], golden_path: Path,
                 for width in profiled_four):
             raise ValueError("REC width/profile invocation coverage differs between tiles")
         rows += ["", "### Instrumented REC width diagnostic", "",
+                 "Width 160 is CLS and excluded from REC totals. "
                  "These values come from separate profiled runs and are not part of the "
                  "full-OCR latency A/B above.", "",
                  "| Width | Invocations | 4x16 PW ms/inv | 2x16 PW ms/inv | PW 4x16/2x16 | 4x16 PW share | 2x16 PW share | 4x16 CTC ms/inv | 2x16 CTC ms/inv |",
@@ -119,6 +131,13 @@ def compare(four_paths: list[Path], two_paths: list[Path], golden_path: Path,
         rows += ["", "Overall Pointwise share of tracked REC time: "
                  f"4x16 **{total_four_pw / total_four_tracked * 100.0 if total_four_tracked else 0.0:.1f}%**, "
                  f"2x16 **{total_two_pw / total_two_tracked * 100.0 if total_two_tracked else 0.0:.1f}%**."]
+        cls_four = load_profile(four_profile, frozenset((160,)))[160]
+        cls_two = load_profile(two_profile, frozenset((160,)))[160]
+        if cls_four[0] != cls_two[0]:
+            raise ValueError("CLS profile invocation coverage differs between tiles")
+        rows += [f"CLS width 160 (separate): {cls_four[0]} invocations; "
+                 f"Pointwise 4x16 {cls_four[1] / cls_four[0]:.3f} ms/inv, "
+                 f"2x16 {cls_two[1] / cls_two[0]:.3f} ms/inv."]
     return "\n".join(rows) + "\n"
 
 

@@ -7,7 +7,15 @@ on:
       - CMakeLists.txt
       - src/runtime/rec_backend_kernels.c
       - src/simd/wasm128_nhwc_pointwise.c
+      - models/ppocrv6-*/**
+      - models/ppocrv6-models.json
+      - ci/web-ppocrv6-*.json
+      - tests/node/benchmark.cjs
+      - tools/prepare_ppocrv6_runtime_variant.py
       - tools/compare_wasm_pointwise_ab.py
+      - tools/compare_wasm_rec_benchmark.py
+      - tests/test_compare_wasm_pointwise_ab.py
+      - tests/test_compare_wasm_rec_benchmark.py
       - .github/workflows/wasm-pointwise-ab.yml
   pull_request:
     branches: [main]
@@ -15,7 +23,15 @@ on:
       - CMakeLists.txt
       - src/runtime/rec_backend_kernels.c
       - src/simd/wasm128_nhwc_pointwise.c
+      - models/ppocrv6-*/**
+      - models/ppocrv6-models.json
+      - ci/web-ppocrv6-*.json
+      - tests/node/benchmark.cjs
+      - tools/prepare_ppocrv6_runtime_variant.py
       - tools/compare_wasm_pointwise_ab.py
+      - tools/compare_wasm_rec_benchmark.py
+      - tests/test_compare_wasm_pointwise_ab.py
+      - tests/test_compare_wasm_rec_benchmark.py
       - .github/workflows/wasm-pointwise-ab.yml
   workflow_dispatch:
 
@@ -23,8 +39,8 @@ permissions:
   contents: read
 
 jobs:
-  tiny:
-    name: Tiny full OCR, 4x16 vs 2x16
+  three_models:
+    name: Tiny, Small, Medium full OCR; 4x16 vs 2x16
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -39,8 +55,10 @@ jobs:
       - name: Install model converter dependencies
         run: python -m pip install -r requirements-converter.txt
 
-      - name: Test A/B report contract
-        run: python -m unittest discover -s tests -p test_compare_wasm_pointwise_ab.py
+      - name: Test A/B and profile report contracts
+        run: |
+          python -m unittest discover -s tests -p test_compare_wasm_pointwise_ab.py
+          python -m unittest discover -s tests -p test_compare_wasm_rec_benchmark.py
 
       - name: Set up Emscripten
         uses: mymindstorm/setup-emsdk@v16
@@ -66,45 +84,71 @@ jobs:
               --target lw-node-wasm-package det_demo_fixture --parallel
           done
 
-      - name: Run paired Tiny full OCR in 4/2/2/4 order
+      - name: Prepare Small and Medium runtime models once
         shell: bash
         run: |
           set -euo pipefail
-          expected_text_sha256="$(node -p "require('./ci/web-ppocrv6-tiny.json').expected_text_sha256")"
-          for run in 4-a 2-a 2-b 4-b; do
-            rows="${run%%-*}"
-            node tests/node/benchmark.cjs \
-              --package "build-wasm-pw${rows}/node-wasm" \
-              --sample build-wasm-pw4/models/sample.ppm \
-              --expected-text-sha256 "${expected_text_sha256}" \
-              --iterations 5 \
-              > "build-wasm-pw4/pointwise-${run}.json" \
-              2> "build-wasm-pw4/pointwise-${run}.log"
-            grep -q 'LW_WASM_COMPILED_REC widths=5/5' \
-              "build-wasm-pw4/pointwise-${run}.log"
+          for variant in small medium; do
+            python tools/prepare_ppocrv6_runtime_variant.py \
+              --variant "${variant}" --build-dir build-wasm-pw4 \
+              --output-dir "build-wasm-pw4/runtime-models/ppocrv6-${variant}"
           done
-          for rows in 4 2; do
-            LW_X64_REC_PROFILE=1 LW_WASM_OCR_PROFILE=1 node tests/node/benchmark.cjs \
-              --package "build-wasm-pw${rows}/node-wasm" \
-              --sample build-wasm-pw4/models/sample.ppm \
-              --expected-text-sha256 "${expected_text_sha256}" \
-              --iterations 1 \
-              > "build-wasm-pw4/pointwise-${rows}-profile.json" \
-              2> "build-wasm-pw4/pointwise-${rows}-profile.log"
-            grep -q 'X64REC width=' "build-wasm-pw4/pointwise-${rows}-profile.log"
-            grep -Eq 'LW_WASM_OCR_PROFILE .*det_compiled=1 det_fallback=0 cls_compiled=[1-9][0-9]* cls_fallback=0 rec_compiled=[1-9][0-9]* rec_fallback=0' \
-              "build-wasm-pw4/pointwise-${rows}-profile.log"
+
+      - name: Run paired three-model full OCR in 4/2/2/4 order
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variant in tiny small medium; do
+            model_args=()
+            if [[ "${variant}" != tiny ]]; then
+              model_args=(--models "build-wasm-pw4/runtime-models/ppocrv6-${variant}")
+            fi
+            iterations=5
+            if [[ "${variant}" == small ]]; then iterations=3; fi
+            if [[ "${variant}" == medium ]]; then iterations=2; fi
+            expected_text_sha256="$(node -p "require('./ci/web-ppocrv6-${variant}.json').expected_text_sha256")"
+            for run in 4-a 2-a 2-b 4-b; do
+              rows="${run%%-*}"
+              node tests/node/benchmark.cjs \
+                --package "build-wasm-pw${rows}/node-wasm" \
+                "${model_args[@]}" \
+                --sample build-wasm-pw4/models/sample.ppm \
+                --expected-text-sha256 "${expected_text_sha256}" \
+                --iterations "${iterations}" \
+                > "build-wasm-pw4/pointwise-${variant}-${run}.json" \
+                2> "build-wasm-pw4/pointwise-${variant}-${run}.log" || {
+                  cat "build-wasm-pw4/pointwise-${variant}-${run}.log"; exit 1;
+                }
+              grep -q 'LW_WASM_COMPILED_REC widths=5/5' \
+                "build-wasm-pw4/pointwise-${variant}-${run}.log"
+            done
+            for rows in 4 2; do
+              LW_X64_REC_PROFILE=1 LW_WASM_OCR_PROFILE=1 node tests/node/benchmark.cjs \
+                --package "build-wasm-pw${rows}/node-wasm" \
+                "${model_args[@]}" \
+                --sample build-wasm-pw4/models/sample.ppm \
+                --expected-text-sha256 "${expected_text_sha256}" \
+                --iterations 1 \
+                > "build-wasm-pw4/pointwise-${variant}-${rows}-profile.json" \
+                2> "build-wasm-pw4/pointwise-${variant}-${rows}-profile.log" || {
+                  cat "build-wasm-pw4/pointwise-${variant}-${rows}-profile.log"; exit 1;
+                }
+              grep -q 'X64REC width=' "build-wasm-pw4/pointwise-${variant}-${rows}-profile.log"
+              grep -Eq 'LW_WASM_OCR_PROFILE .*det_compiled=1 det_fallback=0 cls_compiled=[1-9][0-9]* cls_fallback=0 rec_compiled=[1-9][0-9]* rec_fallback=0' \
+                "build-wasm-pw4/pointwise-${variant}-${rows}-profile.log"
+            done
+            python tools/compare_wasm_pointwise_ab.py \
+              --four "build-wasm-pw4/pointwise-${variant}-4-a.json" \
+              --four "build-wasm-pw4/pointwise-${variant}-4-b.json" \
+              --two "build-wasm-pw4/pointwise-${variant}-2-a.json" \
+              --two "build-wasm-pw4/pointwise-${variant}-2-b.json" \
+              --golden "ci/web-ppocrv6-${variant}.json" \
+              --four-profile "build-wasm-pw4/pointwise-${variant}-4-profile.log" \
+              --two-profile "build-wasm-pw4/pointwise-${variant}-2-profile.log" \
+              --iterations "${iterations}" \
+              | tee "build-wasm-pw4/pointwise-${variant}-summary.md"
+            cat "build-wasm-pw4/pointwise-${variant}-summary.md" >> "$GITHUB_STEP_SUMMARY"
           done
-          python tools/compare_wasm_pointwise_ab.py \
-            --four build-wasm-pw4/pointwise-4-a.json \
-            --four build-wasm-pw4/pointwise-4-b.json \
-            --two build-wasm-pw4/pointwise-2-a.json \
-            --two build-wasm-pw4/pointwise-2-b.json \
-            --golden ci/web-ppocrv6-tiny.json \
-            --four-profile build-wasm-pw4/pointwise-4-profile.log \
-            --two-profile build-wasm-pw4/pointwise-2-profile.log \
-            | tee build-wasm-pw4/pointwise-summary.md
-          cat build-wasm-pw4/pointwise-summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload A/B results and diagnostics
         if: always()
@@ -114,6 +158,6 @@ jobs:
           path: |
             build-wasm-pw4/pointwise-*.json
             build-wasm-pw4/pointwise-*.log
-            build-wasm-pw4/pointwise-summary.md
+            build-wasm-pw4/pointwise-*-summary.md
           if-no-files-found: warn
           retention-days: 14

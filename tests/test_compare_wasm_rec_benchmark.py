@@ -115,6 +115,7 @@ class WasmBenchmarkReportTest(unittest.TestCase):
             "LW_WASM_DET_PROFILE total=30.000 pointwise=10.000 dense=8.000 "
             "depthwise=6.000 convtranspose=3.000 binary=1.000 pool=1.000 "
             "concat=0.500 resize=0.250 other=0.250",
+            "X64REC width=160 total=8.000 pw=6.000 ctc=0.000",
             "X64REC width=320 total=20.000 pw=12.000 dense=5.000 dw=2.000 "
             "bin=0.000 unary=0.000 reduce=0.000 pool=0.000 transpose=0.000 "
             "matmul=0.000 ctc=1.000",
@@ -125,6 +126,9 @@ class WasmBenchmarkReportTest(unittest.TestCase):
         result = self.run_report(["识别结果", "OCR"], profile_text=profile)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("2 REC invocations", result.stdout)
+        self.assertIn("Excluded 1 width-160 CLS invocations", result.stdout)
+        self.assertNotIn("| 160 |", result.stdout)
+        self.assertIn("CLS width 160: 1 invocations, Pointwise 6.000 ms", result.stdout)
         self.assertIn("| Pointwise | 24.000 | 57.1% |", result.stdout)
         self.assertIn("| 320 | 2 | 24.000 | 2.000 | 42.000 | 57.1% |", result.stdout)
         self.assertIn("| DET graph | 30.000 |", result.stdout)
@@ -158,6 +162,7 @@ class WasmBenchmarkReportTest(unittest.TestCase):
                 "arena=16384 scratch=256\n"
                 "REC_MEMORY shared_arena=16384 shared_scratch=256 "
                 "ctc_workspace=128 medium_fast_shared=0\n"
+                "X64REC width=160 total=4.000 pw=3.000 ctc=0.000\n"
                 "X64REC width=320 total=20.000 pw=12.000 ctc=1.000\n",
                 encoding="utf-8",
             )
@@ -171,6 +176,7 @@ class WasmBenchmarkReportTest(unittest.TestCase):
             self.assertEqual(value["det_compiled_runs"], 1)
             self.assertEqual(value["cls_fallback_runs"], 0)
             self.assertEqual(len(value["rec_invocations"]), 1)
+            self.assertEqual(len(value["cls_invocations"]), 1)
             self.assertEqual(value["compiled_memory"]["det_arena_bytes"], 8192)
             self.assertEqual(value["compiled_memory"]["cls_packed_bytes"], 512)
             self.assertEqual(value["compiled_memory"]["rec_unique_owned_constant_bytes"], 2048)

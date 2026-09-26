@@ -9,6 +9,19 @@ import sys
 from pathlib import Path
 
 
+REC_WIDTHS = frozenset((192, 320, 480, 640, 960))
+CLS_WIDTH = 160
+
+
+def split_rec_cls(rows: list[dict[str, float]]) -> tuple[list[dict[str, float]], list[dict[str, float]]]:
+    """The shared backend logs CLS at width 160 under its historical X64REC label."""
+    rec = [row for row in rows if row.get("width") in REC_WIDTHS]
+    cls = [row for row in rows if row.get("width") == CLS_WIDTH]
+    if len(rec) + len(cls) != len(rows):
+        raise ValueError("instrumented WASM run contains an unknown REC/CLS width")
+    return rec, cls
+
+
 def load(path: Path) -> dict:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -51,6 +64,9 @@ def write_profile_json(log_path: Path, output_path: Path, variant: str) -> None:
     rec_shared = memory_fields("REC_MEMORY shared_arena=")
     if not cls_memory or not det_memory or not rec_widths or not rec_shared:
         raise ValueError("instrumented WASM run did not emit compiled memory metrics")
+    rec_invocations, cls_invocations = split_rec_cls(snapshots["X64REC width="])
+    if not rec_invocations:
+        raise ValueError("instrumented WASM run did not capture REC invocations")
     report = {
         "schema_version": 1,
         "model_variant": variant,
@@ -66,7 +82,8 @@ def write_profile_json(log_path: Path, output_path: Path, variant: str) -> None:
         "det_physical": {f"{name}_ms": det[name] for name in
                          ("total", "pointwise", "dense", "depthwise", "convtranspose",
                           "binary", "pool", "concat", "resize", "other")},
-        "rec_invocations": snapshots["X64REC width="],
+        "rec_invocations": rec_invocations,
+        "cls_invocations": cls_invocations,
         "compiled_memory": {
             "cls_arena_bytes": cls_memory[-1]["arena_bytes"],
             "cls_packed_bytes": cls_memory[-1]["packed_bytes"],
@@ -97,8 +114,13 @@ def print_compiled_profile(path: Path) -> None:
     if not snapshots:
         print("No per-line REC timings were captured; check the profile log artifact.")
         return
+    snapshots, cls_snapshots = split_rec_cls(snapshots)
+    if not snapshots:
+        print("No REC-width timings were captured; check the profile log artifact.")
+        return
     print(f"{len(snapshots)} REC invocations across one warm-up and one measured "
           "full OCR. These instrumented times are not part of the A/B latency above.")
+    print(f"Excluded {len(cls_snapshots)} width-{CLS_WIDTH} CLS invocations from REC totals.")
     print()
     print("| Stage | Accumulated ms | Share of tracked REC time |")
     print("| --- | ---: | ---: |")
@@ -129,6 +151,12 @@ def print_compiled_profile(path: Path) -> None:
         print(f"| {width} | {len(rows)} | {pointwise:.3f} | {ctc:.3f} | "
               f"{tracked_width:.3f} | "
               f"{pointwise / tracked_width * 100.0 if tracked_width else 0.0:.1f}% |")
+    if cls_snapshots:
+        cls_pw = sum(row.get("pw", 0.0) for row in cls_snapshots)
+        cls_tracked = sum(row["total"] + row["ctc"] for row in cls_snapshots)
+        print(f"CLS width {CLS_WIDTH}: {len(cls_snapshots)} invocations, "
+              f"Pointwise {cls_pw:.3f} ms, tracked {cls_tracked:.3f} ms "
+              "(excluded from REC totals).")
 
 
 def print_full_ocr_profile(path: Path) -> None:
