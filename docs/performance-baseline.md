@@ -629,3 +629,30 @@ The 1-worker node diagnostics fell from about 157.27 ms to 6.52 ms for 5x1
 and from 89.79 ms to 8.84 ms for 1x5. All pairs retained 16 lines and
 checksum `ededc8978c6a78ee`; the direct kernel reference test remains the
 correctness gate.
+
+## Sparse-line x64 REC thread budget (2026-09-28)
+
+With four configured line workers, the previous fixed policy divided the
+physical-core REC thread budget by four even when DET found only one or two
+lines. The native x64 compiled REC path now divides it by the number of active
+line workers for each request. Recognizers keep their largest intra-op pool
+across requests; a later dense page lowers the active count without rebuilding
+the pool. `LW_EXPERIMENTAL_ADAPTIVE_REC_BUDGET=OFF` restores the fixed policy
+for A/B testing. Other architectures and the public C ABI are unchanged.
+
+Exploratory Release/AVX2 measurements on the same Ryzen 7 7735H used the same
+Tiny, Small, and Medium LWM files, a generated 1600x500 one-line PPM, four
+workers, and REC maximum width 960. These are medians of independent
+per-process OCR means, not portable performance gates:
+
+| Model | Fixed budget | Active-line budget | Approx. speedup | Peak WS change |
+|---|---:|---:|---:|---:|
+| Tiny | 27.43 ms | 23.22 ms | 1.18x | +0.3 MiB |
+| Small | 91.93 ms | 66.18 ms | 1.39x | +0.4 MiB |
+| Medium | 362.35 ms | 253.78 ms | 1.43x | within 0.3 MiB |
+
+The one- and two-line fixtures retained identical text checksums in every
+paired build. On the bundled 16-line sample, the thread allocation is
+unchanged and both builds retained the same checksum. The
+`full_ocr_adaptive_rec_budget` regression exercises one, two, sixteen, then
+one detected line on a single OCR handle, including calls after the pool grows.

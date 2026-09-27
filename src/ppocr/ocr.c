@@ -781,6 +781,18 @@ static lw_status run_worker_tasks(lw_ocr* ocr, const uint8_t* source, uint64_t s
         return LW_STATUS_INVALID_ARGUMENT;
     }
     active_worker_count = crop_count < ocr->worker_count ? crop_count : ocr->worker_count;
+#if defined(LW_EXPERIMENTAL_ADAPTIVE_REC_BUDGET)
+    {
+        /* A sparse request has fewer concurrent recognizers than the handle's
+         * configured line workers. Spend the same total thread budget on the
+         * recognizers that will actually run, before dispatching any work. */
+        uint32_t rec_intra = ocr->det_intra_op_thread_cap / active_worker_count;
+        if (rec_intra == 0u) rec_intra = 1u;
+        for (slot = 0u; slot < active_worker_count; ++slot) {
+            lw_recognizer_set_intra_op_thread_count(ocr->recognizers[slot], rec_intra);
+        }
+    }
+#endif
     memset(ocr->worker_started, 0, ocr->worker_count * sizeof(*ocr->worker_started));
     memset(worker_used, 0, sizeof(worker_used));
     ocr->crop_schedule_count = crop_count;

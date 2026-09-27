@@ -70,6 +70,16 @@ parallel phases do not overlap. More line workers trade model, workspace, crop,
 and thread resources for lower latency, so applications should benchmark `1`,
 `2`, `4`, and `8` on their target CPU and memory budget.
 
+On native x64 builds with the compiled REC backend, REC's intra-op budget is
+shared across the line workers that are actually active in each request. A
+four-worker handle processing only one detected line can use the full REC
+thread budget; two lines split it between two recognizers; four or more lines
+keep the original per-worker allocation. Each recognizer retains a grow-only
+thread pool, avoiding per-request thread creation during sparse/dense page
+transitions. This is internal scheduling only and does not change the C ABI or
+OCR result order. Set `LW_EXPERIMENTAL_ADAPTIVE_REC_BUDGET=OFF` at CMake
+configure time to restore the fixed allocation for A/B measurement.
+
 The detector's DB postprocessor may allocate bounded transient scratch. The
 full-OCR path therefore promises bounded resources and buffer reuse, not zero
 allocations per call. Internal line workers do not make the public handle

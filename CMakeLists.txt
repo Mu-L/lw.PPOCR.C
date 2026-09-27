@@ -39,6 +39,8 @@ option(LW_EXPERIMENTAL_AVX2_FMA_MATMUL_DISPATCH
     "Use the experimental AVX2+FMA terminal MatMul dispatch in native builds" OFF)
 option(LW_EXPERIMENTAL_AVX2_FAST_PATH
     "Enable compiled AVX2/FMA x64 REC backends for adaptive widths" ON)
+option(LW_EXPERIMENTAL_ADAPTIVE_REC_BUDGET
+    "Share the native x64 REC intra-op thread budget across active line workers" ON)
 option(LW_EXPERIMENTAL_DET_FIXED_POINT_RESIZE
     "Use the OpenCV-parity fixed-point DET resize with LUT normalization" ON)
 option(LW_EXPERIMENTAL_CLS_FIXED_POINT_RESIZE
@@ -466,6 +468,9 @@ set_target_properties(lw_ppocr_c PROPERTIES
 lw_configure_runtime_target(lw_ppocr_c)
 if(LW_X64_REC_FAST_ENABLED OR LW_WASM_COMPILED_REC_ENABLED)
     target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+    if(LW_X64_REC_FAST_ENABLED AND LW_EXPERIMENTAL_ADAPTIVE_REC_BUDGET)
+        target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_ADAPTIVE_REC_BUDGET=1)
+    endif()
     if(LW_WASM_COMPILED_REC_ENABLED)
         target_compile_definitions(lw_ppocr_c PRIVATE
             LW_WASM_POINTWISE_ROWS=${LW_WASM_POINTWISE_ROWS})
@@ -545,6 +550,9 @@ target_compile_definitions(lw_ppocr_c_shared
 lw_configure_runtime_target(lw_ppocr_c_shared)
 if(LW_X64_REC_FAST_ENABLED)
     target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+    if(LW_EXPERIMENTAL_ADAPTIVE_REC_BUDGET)
+        target_compile_definitions(lw_ppocr_c_shared PRIVATE LW_EXPERIMENTAL_ADAPTIVE_REC_BUDGET=1)
+    endif()
     if(MSVC)
         set_property(SOURCE src/simd/avx2_nhwc_pointwise.c src/simd/avx2_nhwc_dense.c src/simd/avx2_nhwc_depthwise.c src/simd/avx2_nhwc_support.c src/simd/avx2_nhwc_convtranspose.c APPEND PROPERTY
             COMPILE_OPTIONS /arch:AVX2 /fp:strict)
@@ -2233,6 +2241,19 @@ if(BUILD_TESTING AND NOT EMSCRIPTEN)
         else()
             target_compile_options(full-ocr-dataset-benchmark PRIVATE
                 -Wall -Wextra -Wpedantic -Werror)
+        endif()
+        if(LW_X64_REC_FAST_ENABLED AND LW_EXPERIMENTAL_ADAPTIVE_REC_BUDGET)
+            add_test(
+                NAME full_ocr_adaptive_rec_budget
+                COMMAND "${Python3_EXECUTABLE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ocr_adaptive_rec_budget.py"
+                        --benchmark "$<TARGET_FILE:full-ocr-dataset-benchmark>"
+                        --det "${LW_PPOCR_C_DET_LWM}"
+                        --cls "${LW_PPOCR_C_CLS_LWM}"
+                        --rec "${LW_PPOCR_C_REC_LWM}"
+                        --dictionary "${CMAKE_CURRENT_SOURCE_DIR}/models/ppocrv6-tiny/ppocr_keys.txt"
+                        --sample "${LW_PPOCR_C_DET_DEMO_PPM}")
+            set_tests_properties(full_ocr_adaptive_rec_budget PROPERTIES TIMEOUT 180)
         endif()
     endif()
 

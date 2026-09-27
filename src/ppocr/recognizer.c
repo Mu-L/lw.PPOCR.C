@@ -1363,14 +1363,31 @@ static void recognizer_attach_intra_pool(lw_recognizer* recognizer) {
 }
 
 void lw_recognizer_set_intra_op_thread_count(lw_recognizer* recognizer, uint32_t thread_count) {
+    lw_thread_pool* replacement;
+    uint32_t capacity;
     if (recognizer == NULL) return;
     if (thread_count == 0u) thread_count = 1u;
     if (thread_count > LW_PARALLEL_MAX_WORKERS) thread_count = LW_PARALLEL_MAX_WORKERS;
-    lw_thread_pool_free(recognizer->intra_pool);
-    recognizer->intra_pool =
-        thread_count > 1u ? lw_thread_pool_create(thread_count) : NULL;
-    recognizer->intra_workers =
-        thread_count > 1u ? lw_thread_pool_worker_count(recognizer->intra_pool) : 1u;
+    capacity = lw_thread_pool_worker_count(recognizer->intra_pool);
+    if (thread_count == recognizer->intra_workers &&
+        (thread_count == 1u || capacity >= thread_count)) return;
+    if (thread_count > 1u && capacity < thread_count) {
+        replacement = lw_thread_pool_create(thread_count);
+        if (replacement != NULL) {
+            uint32_t replacement_capacity = lw_thread_pool_worker_count(replacement);
+            if (replacement_capacity > capacity) {
+                lw_thread_pool_free(recognizer->intra_pool);
+                recognizer->intra_pool = replacement;
+                capacity = replacement_capacity;
+            } else {
+                lw_thread_pool_free(replacement);
+            }
+        }
+    }
+    /* Keep the largest pool for later sparse requests. A smaller active count
+     * is passed to each kernel, so parked threads do no work or allocation. */
+    recognizer->intra_workers = thread_count < capacity ? thread_count : capacity;
+    if (recognizer->intra_workers == 0u) recognizer->intra_workers = 1u;
     recognizer_attach_intra_pool(recognizer);
 }
 
