@@ -995,7 +995,7 @@ static lw_status crop_and_run_adaptive(lw_ocr* ocr, const uint8_t* source,
         uint64_t crop_bytes;
         uint64_t crop_started;
 #endif
-#if defined(LW_EXPERIMENTAL_PARALLEL_CROP_PHASE) || !defined(LW_EXPERIMENTAL_STREAMING_CROPS)
+#if !defined(LW_EXPERIMENTAL_STREAMING_CROPS)
         lw_status status;
 #endif
         for (index = 0u; index < line_count; ++index) {

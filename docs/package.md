@@ -255,13 +255,13 @@ hardware.
 Pushing a tag whose base version matches the CMake project version starts the
 release workflow. Stable and prerelease suffixes are accepted. Before creating
 the stable release, run `python -m unittest tests.test_versioning` and
-`python tools/check_release_readiness.py --mode stable --version 1.0.0`. Then
+`python tools/check_release_readiness.py --mode stable --version 1.1.0`. Then
 create an annotated tag:
 
 ```bash
-git tag -a v1.0.0 -m "lw.PPOCR.C v1.0.0 stable release"
-git show --no-patch v1.0.0
-git push origin v1.0.0
+git tag -a v1.1.0 -m "lw.PPOCR.C v1.1.0: native x64 performance and memory"
+git show --no-patch v1.1.0
+git push origin v1.1.0
 ```
 
 Do not replace or move an existing public tag. If a release must be corrected,
@@ -280,7 +280,7 @@ The release asset contract is machine-readable in
 [`ci/release-assets.json`](../ci/release-assets.json). It currently contains 18
 primary downloads:
 
-The separate 1.0 support proposal is machine-readable in
+The approved stable support scope is machine-readable in
 [`ci/stable-release-scope.json`](../ci/stable-release-scope.json); assets listed
 as Small, Medium, Android, or Java/JNI remain Preview until that scope is
 approved and the corresponding contracts are frozen.

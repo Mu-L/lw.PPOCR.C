@@ -151,8 +151,9 @@ class ReleaseAssetContractTests(unittest.TestCase):
         self.assertIn("git rev-parse \"${GITHUB_REF_NAME}^{tag}\"", workflow)
         self.assertNotIn("Require a verified tag signature for stable releases", workflow)
         self.assertNotIn(".verification.verified", workflow)
-        self.assertIn("docs/release-notes-v1.0.0.md", workflow)
-        self.assertIn('if [[ "${VERSION}" == "1.0.0" ]]', workflow)
+        self.assertIn('notes_file="docs/release-notes-v${VERSION}.md"', workflow)
+        self.assertIn('if [[ -f "${notes_file}" ]]', workflow)
+        self.assertIn('--notes-file "${notes_file}"', workflow)
         self.assertEqual(
             workflow.count("runtime_version: ${{ github.ref_name }}"),
             3,

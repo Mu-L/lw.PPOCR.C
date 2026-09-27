@@ -4,8 +4,9 @@ import json
 import re
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from tools.check_release_readiness import check
+from tools.check_release_readiness import check, load_json
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +25,7 @@ class VersionConsistencyTest(unittest.TestCase):
 
     def test_product_metadata_uses_the_cmake_version(self) -> None:
         version = self.project_version()
-        self.assertEqual(version, "1.0.0")
+        self.assertEqual(version, "1.1.0")
 
         assembly = (
             ROOT / "examples" / "csharp-winforms" / "Properties" / "AssemblyInfo.cs"
@@ -37,7 +38,7 @@ class VersionConsistencyTest(unittest.TestCase):
             "android/demo-java/build.gradle.kts",
         ):
             gradle = (ROOT / relative).read_text(encoding="utf-8")
-            self.assertIn("versionCode = 2", gradle)
+            self.assertIn("versionCode = 3", gradle)
             self.assertIn(f'versionName = "{version}-preview.1"', gradle)
 
         sbom = json.loads((ROOT / "sbom.cdx.json").read_text(encoding="utf-8"))
@@ -111,14 +112,15 @@ class VersionConsistencyTest(unittest.TestCase):
             )
         )
         self.assertEqual(scope["schema_version"], 1)
-        self.assertEqual(scope["release_version"], "1.0.0")
+        self.assertEqual(scope["release_version"], self.project_version())
         self.assertEqual(scope["status"], "approved")
         self.assertEqual(scope["lwm_policy"], "internal-preview")
         self.assertEqual(scope["stable_models"], ["tiny"])
         self.assertEqual(scope["preview_only_models"], ["small", "medium"])
 
     def test_stable_gate_only_requires_models_in_stable_scope(self) -> None:
-        report = check("stable", "1.0.0")
+        report = check("stable", self.project_version())
+        self.assertEqual(report["blockers"], [])
         self.assertNotIn("stable release scope is not approved", report["blockers"])
         self.assertNotIn(
             "analysis-only model variants remain: medium, small",
@@ -131,7 +133,7 @@ class VersionConsistencyTest(unittest.TestCase):
             encoding="utf-8"
         )
         package_doc = (ROOT / "docs" / "package.md").read_text(encoding="utf-8")
-        release_notes = (ROOT / "docs" / "release-notes-v1.0.0.md").read_text(
+        release_notes = (ROOT / "docs" / f"release-notes-v{version}.md").read_text(
             encoding="utf-8"
         )
         web_doc = (ROOT / "docs" / "web-sdk.md").read_text(encoding="utf-8")
@@ -139,16 +141,45 @@ class VersionConsistencyTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(f'DEFAULT_RUNTIME_VERSION = "{version}"', packager)
-        self.assertIn(f'DEFAULT_MINIMUM_RUNTIME_VERSION = "{version}"', packager)
-        self.assertIn(f"`v{version}` archive is the first ABI-frozen stable release", package_doc)
+        self.assertIn('DEFAULT_MINIMUM_RUNTIME_VERSION = "1.0.0"', packager)
+        self.assertIn("`v1.0.0` archive is the first ABI-frozen stable release", package_doc)
         self.assertIn(f"git tag -a v{version}", package_doc)
         self.assertNotIn(f"git tag -s v{version}", package_doc)
         self.assertIn("gh attestation verify", package_doc)
-        self.assertIn("# lw.PPOCR.C v1.0.0", release_notes)
-        self.assertIn("Tiny DET LWM", release_notes)
-        self.assertIn("frozen manifest checksums", release_notes)
+        self.assertIn(f"# lw.PPOCR.C v{version}", release_notes)
+        self.assertIn("LW_WASM_COMPILED_REC", release_notes)
+        self.assertIn("Small and Medium remain Preview", release_notes)
         self.assertIn(f'for example "{version}"', web_doc)
         self.assertIn("frozen contract", node_packager)
+
+        for variant in ("tiny", "small", "medium"):
+            validation = (ROOT / "tools" / f"run_{variant}_validation.py").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(f'--runtime-version", default="{version}"', validation)
+
+    def test_stale_scope_and_expected_version_are_rejected(self) -> None:
+        def stale_scope(path, blockers):
+            value = load_json(path, blockers)
+            if path.name == "stable-release-scope.json":
+                value["release_version"] = "0.0.0"
+            return value
+
+        with patch("tools.check_release_readiness.load_json", side_effect=stale_scope):
+            report = check("stable", self.project_version())
+        self.assertIn(
+            "stable release scope version does not match CMake", report["blockers"]
+        )
+        self.assertEqual(check("stable", "0.0.0")["status"], "blocked")
+
+    def test_release_keeps_compiled_wasm_opt_in(self) -> None:
+        cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertRegex(
+            cmake, r'option\(LW_WASM_COMPILED_REC\s+"[^"]+" OFF\)'
+        )
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        wasm_job = workflow.split("  wasm:", 1)[1].split("  android:", 1)[0]
+        self.assertNotIn("compiled_rec: true", wasm_job)
 
     def test_preview_release_documentation_matches_supported_outputs(self) -> None:
         version = self.project_version()
@@ -168,15 +199,15 @@ class VersionConsistencyTest(unittest.TestCase):
             ROOT / "examples" / "java-jni" / "README.zh-CN.md"
         ).read_text(encoding="utf-8")
 
-        self.assertIn(f"## Current stable release: v{version}", readme)
-        self.assertIn(f"## 当前稳定版：v{version}", readme_zh)
+        self.assertIn(f"## Preparing stable release: v{version}", readme)
+        self.assertIn(f"## 准备发布稳定版：v{version}", readme_zh)
         for token in ("Tiny", "Small", "Medium", "android-arm64.aar"):
             self.assertIn(token, readme)
         for token in ("Tiny", "Small", "Medium", "android-arm64.aar"):
             self.assertIn(token, readme_zh)
         self.assertIn("Do not mix binaries", readme)
-        self.assertIn(f"`v{version}` stable package carries this contract", c_api_doc)
-        self.assertIn(f"`v{version}` stable package", abi_candidate_doc)
+        self.assertIn(f"The v{version} release preserves", c_api_doc)
+        self.assertIn(f"v{version} preserves it unchanged", abi_candidate_doc)
         self.assertIn("不要混用不同 Release", readme_zh)
 
         for artifact in (

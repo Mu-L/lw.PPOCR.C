@@ -9,7 +9,13 @@ TensorRT, protobuf, or any other deployment-time runtime dependency.
 
 > This is not a general-purpose ONNX Runtime.
 
-## Current stable release: v1.0.0
+## Preparing stable release: v1.1.0
+
+The latest published stable release is `v1.0.0`. The `v1.1.0` release
+preparation concentrates on native x64 end-to-end latency and compiled REC
+memory reduction, without expanding the frozen support scope. See the
+[v1.1.0 release notes](docs/release-notes-v1.1.0.md) and
+[release checklist](docs/release-readiness-v1.1.md).
 
 This stable release makes PP-OCRv6 Tiny available through the frozen v1 C
 Runtime and WASM Host ABI. Tiny is the only stable model promise. Small and
@@ -40,7 +46,7 @@ the complete matching set and rebuild native/managed consumers because LWM
 remains an internal Preview format.
 See the [package guide](docs/package.md) and
 [model selection matrix](docs/supported-models.md). The stable-release gate is
-tracked in the [v1.0 readiness checklist](docs/release-readiness-v1.0.md).
+tracked in the [v1.1 readiness checklist](docs/release-readiness-v1.1.md).
 The approved stable scope is recorded in
 [`ci/stable-release-scope.json`](ci/stable-release-scope.json); Small, Medium,
 Android, Java/JNI, ARM64, and LoongArch64 remain explicitly Preview.
@@ -106,6 +112,10 @@ host was an AMD Ryzen 7 7735H (8 cores/16 threads), Windows 10, with 15.24 GiB
 RAM; the selected backend was AVX2. Each case used one warm-up, three measured
 calls, and three fresh-process runs. The table reports medians of the
 per-process OCR means and peak working sets:
+
+This source-build snapshot enables resident REC widths and experimental
+Conv3x3 dispatch; it is not a benchmark of the default tagged release archive.
+The linked baseline records those options explicitly.
 
 | Model | 1 worker | 4 workers | Peak WS, 1 worker | Peak WS, 4 workers |
 |---|---:|---:|---:|---:|

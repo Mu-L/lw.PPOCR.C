@@ -9,7 +9,12 @@ Python、OpenCV、ONNX Runtime、OpenVINO、TensorRT 或 protobuf，适合将文
 > 本项目不是通用 ONNX 推理框架。当前目标是可靠、高效地运行已经转换为 LWM 格式的
 > PP-OCRv6 Tiny、Small 和 Medium；Tiny 为默认模型，Small/Medium 为可选 preview。
 
-## 当前稳定版：v1.0.0
+## 准备发布稳定版：v1.1.0
+
+当前已发布的最新稳定版仍是 `v1.0.0`。`v1.1.0` 聚焦原生 x64 端到端耗时和
+compiled REC 常驻内存优化，不扩大冻结的支持范围。详见
+[v1.1.0 发布说明](docs/release-notes-v1.1.0.md)和
+[发布检查清单](docs/release-readiness-v1.1.md)。
 
 本稳定版对 Tiny 模型承诺冻结的 C ABI v1 和 WASM Host ABI v1。Tiny 是唯一纳入稳定
 支持范围的模型；Small 和 Medium 仍作为可选 Preview 变体，通过独立 Runtime Model
@@ -33,7 +38,7 @@ Pack 与自包含浏览器文件提供。LWM v0.1 仍是内部 Preview 格式。
 从 `0.1.x` 升级时应整体替换同一版本的配套文件，并重新编译 Native/Managed 调用方，
 因为 LWM 仍是内部 Preview 格式。详见[开发包说明](docs/package.md)和
 [模型选型矩阵](docs/supported-models.md)。正式版门槛见
-[v1.0 发布准备清单](docs/release-readiness-v1.0.md)。
+[v1.1 发布准备清单](docs/release-readiness-v1.1.md)。
 已批准的 1.0 稳定范围记录在
 [`ci/stable-release-scope.json`](ci/stable-release-scope.json)；Small、Medium、
 Android、Java/JNI、ARM64 和 LoongArch64 仍明确标记为 Preview。
@@ -115,6 +120,9 @@ DET/CLS/REC 分阶段、算子、REC 宽度和 RSS，作为定向 x64 优化前�
 测试机器为 AMD Ryzen 7 7735H（8 核/16 线程）、Windows 10、15.24 GiB 内存，
 实际后端为 AVX2。每组预热 1 次、测量 3 次，独立进程重复 3 轮；下表取各进程
 OCR 平均耗时和进程峰值工作集的中位数：
+
+这份源码构建快照启用了 resident REC widths 和实验 Conv3x3 dispatch，不是默认
+tag 发行包的实测结果；下方链接的基线文档明确记录了这些开关。
 
 | 模型 | 1 worker | 4 workers | 1 worker 峰值工作集 | 4 workers 峰值工作集 |
 |---|---:|---:|---:|---:|

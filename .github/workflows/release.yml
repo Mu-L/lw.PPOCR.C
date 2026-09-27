@@ -412,8 +412,9 @@ jobs:
               --draft
               --title "${TAG} — lw.PPOCR.C Pure C OCR Runtime / 纯 C OCR 运行时"
             )
-            if [[ "${VERSION}" == "1.0.0" ]]; then
-              create_args+=(--notes-file "docs/release-notes-v1.0.0.md")
+            notes_file="docs/release-notes-v${VERSION}.md"
+            if [[ -f "${notes_file}" ]]; then
+              create_args+=(--notes-file "${notes_file}")
             else
               create_args+=(--generate-notes)
             fi

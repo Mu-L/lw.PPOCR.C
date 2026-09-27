@@ -103,13 +103,14 @@ def check(mode: str, expected_version: str | None = None) -> dict[str, Any]:
     required_assets = release_assets.get("required_assets")
     if not isinstance(required_assets, list) or len(required_assets) != 18:
         blockers.append("release asset manifest must contain exactly 18 primary assets")
-    if not (ROOT / "docs" / "release-readiness-v1.0.md").is_file():
-        blockers.append("v1.0 readiness checklist is missing")
+    release_line = ".".join(version.split(".")[:2])
+    if not (ROOT / "docs" / f"release-readiness-v{release_line}.md").is_file():
+        blockers.append(f"v{release_line} readiness checklist is missing")
 
     if scope.get("schema_version") != 1:
         blockers.append("stable release scope has an unsupported schema_version")
-    if scope.get("release_version") != "1.0.0":
-        blockers.append("stable release scope must target 1.0.0")
+    if scope.get("release_version") != version:
+        blockers.append("stable release scope version does not match CMake")
     if scope.get("status") not in VALID_SCOPE_STATUSES:
         blockers.append("stable release scope has an invalid status")
     if scope.get("lwm_policy") not in VALID_LWM_POLICIES:
@@ -170,8 +171,8 @@ def check(mode: str, expected_version: str | None = None) -> dict[str, Any]:
             )
 
     if mode == "stable":
-        if version != "1.0.0":
-            blockers.append("stable readiness requires CMake project version 1.0.0")
+        if not (ROOT / "docs" / f"release-notes-v{version}.md").is_file():
+            blockers.append(f"v{version} release notes are missing")
         if candidate.get("status") != "frozen":
             blockers.append("C ABI is not frozen")
         if runtime.get("c_abi", {}).get("status") != "frozen":

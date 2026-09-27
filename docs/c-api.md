@@ -2,7 +2,8 @@
 
 The high-level REC, CLS, DET, and full-OCR portions of `include/lw_infer.h`
 form the frozen C ABI v1 contract for the approved Tiny-only 1.0 scope. The
-`v1.0.0` stable package carries this contract. See
+`v1.0.0` stable package carries this contract. The v1.1.0 release preserves
+this high-level ABI without a version bump. See
 `docs/c-abi-v1-candidate.md` and
 `abi/exports-v1-candidate.txt` for the exact scope and release gates; their
 historical candidate filenames are retained for path compatibility.
