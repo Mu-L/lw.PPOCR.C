@@ -8,6 +8,7 @@
 #include "model_internal.h"
 #include "profile_internal.h"
 #include "rec_internal.h"
+#include "rec_widths_internal.h"
 #include "session_internal.h"
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
 #include "x64_rec_backend_internal.h"
@@ -28,11 +29,7 @@
 
 #define LW_REC_DEFAULT_TARGET_WIDTH 960u
 #define LW_REC_DEFAULT_MAX_IMAGE_PIXELS UINT64_C(40000000)
-#define LW_REC_RESIDENT_WIDTH_COUNT 5u
 #define LW_MEDIUM_REC_LWM_CHECKSUM UINT64_C(0x5c1ad5136616c165)
-static const uint32_t lw_rec_adaptive_widths[LW_REC_RESIDENT_WIDTH_COUNT] = {
-    192u, 320u, 480u, 640u, 960u
-};
 
 #if defined(LW_EXPERIMENTAL_AVX2_FAST_PATH)
 typedef struct lw_x64_rec_backend_slot {
@@ -1305,6 +1302,14 @@ void lw_recognizer_test_disable_x64_backend(lw_recognizer* recognizer) {
 
 int lw_recognizer_test_has_canonical_session(const lw_recognizer* recognizer) {
     return recognizer != NULL && recognizer->session != NULL;
+}
+
+uint32_t lw_recognizer_test_compiled_width_count(const lw_recognizer* recognizer) {
+    uint32_t count = 0u;
+    if (recognizer == NULL) return 0u;
+    for (uint32_t index = 0u; index < LW_REC_RESIDENT_WIDTH_COUNT; ++index)
+        if (recognizer->x64_slots[index].instance != NULL) ++count;
+    return count;
 }
 #endif
 

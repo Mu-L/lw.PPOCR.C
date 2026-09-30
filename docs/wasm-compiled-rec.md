@@ -5,10 +5,10 @@ default. `LW_WASM_COMPILED_REC=ON` is an opt-in experiment for the SIMD128 build
 it does not change the legacy scalar HTML. This first stage reuses the x64
 physical REC compiler, its five adaptive width slots (192/320/480/640/960),
 arena lifetime plan, fused epilogues, and CTC output elision. The compiled
-executor selects a 4-pixel x 16-output-channel SIMD128 pointwise kernel and
+executor selects a 2-pixel x 16-output-channel SIMD128 pointwise kernel and
 panel-outer SIMD128 CTC projection with emitted-row probability recomputation.
-`LW_WASM_POINTWISE_ROWS=2` selects an experimental independent 2x16 pixel tile;
-the default remains `4`. Both use the same OC16 packed weights and non-FMA
+`LW_WASM_POINTWISE_ROWS=4` selects the independent 4x16 comparison tile;
+the current default is `2`. Both use the same OC16 packed weights and non-FMA
 accumulation contract. The `WASM Pointwise 2x16 A/B` workflow builds both
 tiles from one revision, then runs Tiny full OCR in 4/2/2/4 order on one runner
 with a fresh process, one warm-up, and five measured runs per entry. The job
@@ -141,3 +141,11 @@ packs. The local native tests do not substitute for an Emscripten build.
 
 For local standalone-HTML measurements and reproducible browser A/B commands,
 see [WASM browser benchmark](wasm-browser-benchmark.md).
+
+`LW_WASM_FINE_REC_WIDTHS=ON` optionally replaces the five compiled REC buckets
+with thirteen 64-pixel-spaced buckets from 192 to 960. The option defaults to
+OFF and does not change canonical/native/Legacy width policies. Its separate
+Tiny/Small browser CI validates 13/13 coverage and a reviewed Small golden;
+the ordinary release tests above retain five widths and their existing goldens.
+See [fine-grained WASM REC widths](wasm-fine-rec-widths.md) for the local
+end-to-end results, text difference, memory cost and reproduction commands.

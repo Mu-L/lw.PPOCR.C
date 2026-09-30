@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "family": "PP-OCRv6",
+  "variant": "small",
+  "sample": "models/ppocrv6-tiny/sample.jpg",
+  "expected_line_count": 16,
+  "expected_text_sha256": "9cd560aaff37f1013cf10ebd9c616f4e2446b800985a9d15aa408d4010cdba95",
+  "rec_width_policy": "experimental-fine-64-from-192-to-960",
+  "review_note": "User confirmed OEM ODM (with the space) is correct. Only line 4 differs from the five-width golden, which has OEMODM."
+}

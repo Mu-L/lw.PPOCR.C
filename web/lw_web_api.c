@@ -67,6 +67,13 @@ static void web_print_ocr_profile(const lw_ocr_execution_profile* profile) {
         (unsigned long long)cls->canonical_fallback_runs,
         (unsigned long long)rec->compiled_backend_lines,
         (unsigned long long)rec->canonical_fallback_lines);
+    (void)fprintf(stderr,
+        "LW_WASM_REC_WIDTH_PROFILE samples=%llu resized_sum=%llu target_sum=%llu padding_ratio=%.6f\n",
+        (unsigned long long)profile->rec_width_sample_count,
+        (unsigned long long)profile->rec_resized_width_sum,
+        (unsigned long long)profile->rec_target_width_sum,
+        profile->rec_target_width_sum == 0u ? 0.0 :
+            1.0 - (double)profile->rec_resized_width_sum / (double)profile->rec_target_width_sum);
 }
 #endif
 

@@ -12,6 +12,8 @@ option(LW_WASM_SIMD128
     "Enable portable WebAssembly SIMD128 for the standalone OCR HTML" ON)
 option(LW_WASM_COMPILED_REC
     "Experimentally run WASM REC on the compiled physical backend" OFF)
+option(LW_WASM_FINE_REC_WIDTHS
+    "Use 64-pixel adaptive REC width buckets in compiled WASM OCR" OFF)
 option(LW_WASM_COMPILED_DET
     "Run WASM DET on the compiled NHWC backend when compiled REC is enabled" ON)
 option(LW_WASM_REC_SIMD_KERNELS
@@ -347,6 +349,9 @@ if(LW_WASM_REC_LAZY_FALLBACK AND
     message(FATAL_ERROR
         "LW_WASM_REC_LAZY_FALLBACK requires compiled SIMD128 REC without CTC tiled mode")
 endif()
+if(LW_WASM_FINE_REC_WIDTHS AND NOT LW_WASM_COMPILED_REC_ENABLED)
+    message(FATAL_ERROR "LW_WASM_FINE_REC_WIDTHS requires compiled SIMD128 WASM REC")
+endif()
 if(LW_X64_REC_FAST_ENABLED OR LW_WASM_COMPILED_REC_ENABLED)
     list(APPEND LW_PPOCR_C_SOURCES
         src/runtime/layout_planner.c
@@ -472,6 +477,9 @@ if(LW_X64_REC_FAST_ENABLED OR LW_WASM_COMPILED_REC_ENABLED)
         target_compile_definitions(lw_ppocr_c PRIVATE LW_EXPERIMENTAL_ADAPTIVE_REC_BUDGET=1)
     endif()
     if(LW_WASM_COMPILED_REC_ENABLED)
+        if(LW_WASM_FINE_REC_WIDTHS)
+            target_compile_definitions(lw_ppocr_c PRIVATE LW_WASM_FINE_REC_WIDTHS=1)
+        endif()
         target_compile_definitions(lw_ppocr_c PRIVATE
             LW_WASM_POINTWISE_ROWS=${LW_WASM_POINTWISE_ROWS})
     endif()
@@ -1000,6 +1008,19 @@ if(EMSCRIPTEN AND LW_WASM_SIMD128)
     target_link_options(wasm-erf-contract PRIVATE -O3 -msimd128 "-sENVIRONMENT=node")
 endif()
 
+if(LW_WASM_COMPILED_REC_ENABLED)
+    add_executable(wasm-pointwise-contract tests/wasm_pointwise_contract_driver.c)
+    target_include_directories(wasm-pointwise-contract PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simd"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels")
+    target_compile_features(wasm-pointwise-contract PRIVATE c_std_11)
+    target_compile_options(wasm-pointwise-contract PRIVATE
+        -O3 -Wall -Wextra -Wpedantic -Werror -msimd128)
+    target_link_libraries(wasm-pointwise-contract PRIVATE lw_ppocr_c)
+    target_link_options(wasm-pointwise-contract PRIVATE -O3 -msimd128 "-sENVIRONMENT=node")
+endif()
+
 if(EMSCRIPTEN AND LW_WASM_REC_LAZY_FALLBACK)
     # Private CI executable: exercise a source whose canonical REC session was
     # released, a compiled clone, and a clone forced onto canonical fallback.
@@ -1011,6 +1032,9 @@ if(EMSCRIPTEN AND LW_WASM_REC_LAZY_FALLBACK)
     target_compile_features(wasm-rec-lazy-contract PRIVATE c_std_11)
     target_compile_definitions(wasm-rec-lazy-contract PRIVATE
         LW_EXPERIMENTAL_AVX2_FAST_PATH=1)
+    if(LW_WASM_FINE_REC_WIDTHS)
+        target_compile_definitions(wasm-rec-lazy-contract PRIVATE LW_WASM_FINE_REC_WIDTHS=1)
+    endif()
     target_compile_options(wasm-rec-lazy-contract PRIVATE
         -O3 -Wall -Wextra -Wpedantic -Werror -msimd128)
     target_link_options(wasm-rec-lazy-contract PRIVATE

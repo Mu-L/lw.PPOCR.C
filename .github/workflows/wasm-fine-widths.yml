@@ -1,0 +1,114 @@
+name: WASM Tiny Small fine REC widths A-B
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install converter and browser tests
+        run: |
+          python -m pip install -r requirements-converter.txt -r requirements-wasm-test.txt
+          python -m unittest discover -s tests -p test_web_compiled_diagnostics.py
+          python -m unittest discover -s tests -p test_summarize_wasm_fine_widths.py
+          python -m playwright install --with-deps chromium
+      - uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: 4.0.15
+          actions-cache-folder: emsdk-cache
+      - name: Build identical configurations except width policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          for mode in baseline candidate; do
+            fine=OFF
+            if [ "$mode" = candidate ]; then fine=ON; fi
+            emcmake cmake -S . -B "build/fine-$mode" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+            -DLW_BUILD_HTTP_DEMO=OFF -DLW_BUILD_WEB_MODEL_VARIANTS=ON \
+            -DLW_WASM_COMPILED_REC=ON -DLW_WASM_REC_LAZY_FALLBACK=ON \
+            -DLW_WASM_REC_SIMD_KERNELS=ON -DLW_WASM_POINTWISE_ROWS=2 \
+            -DLW_WASM_FINE_REC_WIDTHS="$fine"
+            cmake --build "build/fine-$mode" --parallel \
+            --target lw-ocr-html lw-ocr-html-small lw-node-wasm-package det_demo_fixture \
+            wasm-rec-lazy-contract wasm-pointwise-contract
+            node "build/fine-$mode/wasm-rec-lazy-contract.js" \
+            > "build/fine-$mode/lazy.log" 2>&1
+            node "build/fine-$mode/wasm-pointwise-contract.js"
+            expected=5
+            if [ "$mode" = candidate ]; then expected=13; fi
+            python web/compiled_diagnostics.py "build/fine-$mode/lazy.log" \
+            --expected-widths "$expected"
+          done
+      - name: Tiny strict browser golden and end-to-end comparison
+        run: |
+          python web/benchmark_ocr_html.py \
+            --baseline build/fine-baseline/ocr-demo.html \
+            --candidate build/fine-candidate/ocr-demo.html \
+            --sample models/ppocrv6-tiny/sample.jpg --golden ci/web-ppocrv6-tiny.json \
+            --baseline-widths 5 --candidate-widths 13 --interleave \
+            --iterations 7 --rounds 3 --output build/fine-candidate/tiny-ab.json
+          python web/test_ocr_html.py --html build/fine-candidate/ocr-demo.html \
+            --sample models/ppocrv6-tiny/sample.jpg --golden ci/web-ppocrv6-tiny.json
+          python web/test_ocr_sdk.py --sdk build/fine-candidate/lw-ppocr.js \
+            --sample models/ppocrv6-tiny/sample.jpg --golden ci/web-ppocrv6-tiny.json
+      - name: Small strict reviewed golden and end-to-end comparison
+        run: |
+          python web/benchmark_ocr_html.py \
+            --baseline build/fine-baseline/ocr-demo-small.html \
+            --candidate build/fine-candidate/ocr-demo-small.html \
+            --sample models/ppocrv6-tiny/sample.jpg --golden ci/web-ppocrv6-small.json \
+            --baseline-widths 5 --candidate-widths 13 --interleave \
+            --iterations 5 --rounds 3 --candidate-golden ci/web-ppocrv6-small-fine-widths.json \
+            --output build/fine-candidate/small-ab.json
+          python web/test_ocr_html.py --html build/fine-candidate/ocr-demo-small.html \
+            --sample models/ppocrv6-tiny/sample.jpg --golden ci/web-ppocrv6-small-fine-widths.json \
+            --variant-contract-only
+      - name: Separate Node padding and fallback diagnostics (not browser timings)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for mode in baseline candidate; do
+            for variant in tiny small; do
+              models=()
+              if [ "$variant" = small ]; then
+                models=(--models "build/fine-$mode/runtime-models/ppocrv6-small")
+              fi
+              golden="ci/web-ppocrv6-$variant.json"
+              if [ "$mode" = candidate ] && [ "$variant" = small ]; then
+                golden=ci/web-ppocrv6-small-fine-widths.json
+              fi
+              expected_sha=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["expected_text_sha256"])' "$golden")
+              LW_WASM_OCR_PROFILE=1 node tests/node/benchmark.cjs \
+            --package "build/fine-$mode/node-wasm" \
+            --sample build/fine-baseline/models/sample.ppm "${models[@]}" \
+            --expected-text-sha256 "$expected_sha" --warmup 1 --iterations 1 \
+            > "build/fine-$mode/$variant-profile.json" \
+            2> "build/fine-$mode/$variant-profile.log"
+              grep -Eq 'LW_WASM_OCR_PROFILE .*det_compiled=1 det_fallback=0 cls_compiled=[1-9][0-9]* cls_fallback=0 rec_compiled=[1-9][0-9]* rec_fallback=0' \
+            "build/fine-$mode/$variant-profile.log"
+              grep 'LW_WASM_REC_WIDTH_PROFILE' "build/fine-$mode/$variant-profile.log"
+            done
+          done
+      - name: Publish comparison summary
+        if: always()
+        run: |
+          python tools/summarize_wasm_fine_widths.py --directory build/fine-candidate \
+            >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: wasm-fine-widths-diagnostics
+          path: |
+            build/fine-*/*.json
+            build/fine-*/*.log
+          if-no-files-found: warn

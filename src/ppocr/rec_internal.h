@@ -76,6 +76,7 @@ void lw_recognizer_set_intra_op_thread_count(lw_recognizer* recognizer, uint32_t
 void lw_recognizer_test_disable_x64_backend(lw_recognizer* recognizer);
 /* Private lazy-fallback contract probe; not part of the public C ABI. */
 int lw_recognizer_test_has_canonical_session(const lw_recognizer* recognizer);
+uint32_t lw_recognizer_test_compiled_width_count(const lw_recognizer* recognizer);
 #endif
 
 #endif

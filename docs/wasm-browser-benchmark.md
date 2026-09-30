@@ -1,5 +1,9 @@
 # Local standalone HTML A/B
 
+For the subsequent Tiny/Small thirteen-bucket experiment, its reviewed Small
+text difference and strict A/B commands, see
+[fine-grained WASM REC widths](wasm-fine-rec-widths.md).
+
 2026-09-30: Emscripten 4.0.15, Chromium 151, bundled 500x500 JPEG,
 CLS enabled, adaptive REC capped at 960. The same browser runs each build
 in a fresh context; revision order alternates. Three warm-ups precede five

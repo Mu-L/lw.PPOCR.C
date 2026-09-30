@@ -1,5 +1,6 @@
 #include "lw_infer.h"
 #include "rec_internal.h"
+#include "rec_widths_internal.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -26,7 +27,6 @@ static int recognize(lw_recognizer* recognizer, const uint8_t* source,
 }
 
 int main(void) {
-    static const uint32_t widths[] = {192u, 320u, 480u, 640u, 960u};
     const uint32_t height = 48u;
     const uint32_t max_width = 960u * height / LW_REC_INPUT_HEIGHT;
     lw_recognizer_options options;
@@ -62,6 +62,12 @@ int main(void) {
         fprintf(stderr, "REC canonical session was retained despite full compiled coverage\n");
         goto cleanup;
     }
+    if (lw_recognizer_test_compiled_width_count(source) != LW_REC_RESIDENT_WIDTH_COUNT ||
+        lw_recognizer_test_compiled_width_count(clone) != LW_REC_RESIDENT_WIDTH_COUNT ||
+        lw_recognizer_test_compiled_width_count(fallback) != LW_REC_RESIDENT_WIDTH_COUNT) {
+        fprintf(stderr, "REC compiled width coverage is incomplete\n");
+        goto cleanup;
+    }
     /* This private hook drops all compiled slots. The next recognition must
      * construct a full canonical session from the released lazy state. */
     lw_recognizer_test_disable_x64_backend(fallback);
@@ -81,9 +87,14 @@ int main(void) {
         goto cleanup;
     }
     memset(pixels, 255, (size_t)max_width * height * 3u);
-    for (size_t i = 0u; i < sizeof(widths) / sizeof(widths[0]); ++i) {
-        const uint32_t width = widths[i] * height / LW_REC_INPUT_HEIGHT;
-        if (lw_recognizer_target_width_for_image(source, width, height) != widths[i] ||
+    for (size_t i = 0u; i < LW_REC_RESIDENT_WIDTH_COUNT; ++i) {
+        const uint32_t target = lw_rec_adaptive_widths[i];
+        const uint32_t width = target * height / LW_REC_INPUT_HEIGHT;
+        if (lw_recognizer_target_width_for_image(source, width, height) != target ||
+            lw_recognizer_target_width_for_image(source, width - 1u, height) != target ||
+            (i + 1u < LW_REC_RESIDENT_WIDTH_COUNT &&
+             lw_recognizer_target_width_for_image(source, width + 1u, height) !=
+                lw_rec_adaptive_widths[i + 1u]) ||
             !recognize(source, pixels, width, height, source_text,
                        info.max_text_capacity) ||
             !recognize(clone, pixels, width, height, clone_text,
@@ -93,14 +104,15 @@ int main(void) {
             !lw_recognizer_test_has_canonical_session(fallback) ||
             lw_recognizer_test_has_canonical_session(source) ||
             lw_recognizer_test_has_canonical_session(clone) ||
-            lw_recognizer_current_target_width(fallback) != widths[i] ||
+            lw_recognizer_current_target_width(fallback) != target ||
             strcmp(source_text, clone_text) != 0 ||
             strcmp(source_text, fallback_text) != 0) {
-            fprintf(stderr, "REC lazy contract differs at target width %u\n", widths[i]);
+            fprintf(stderr, "REC lazy contract differs at target width %u\n", target);
             goto cleanup;
         }
     }
-    puts("WASM_REC_LAZY_CONTRACT clone=pass fallback_rebuild=pass widths=5/5");
+    printf("WASM_REC_LAZY_CONTRACT clone=pass fallback_rebuild=pass widths=%u/%u\n",
+           lw_recognizer_test_compiled_width_count(source), LW_REC_RESIDENT_WIDTH_COUNT);
     success = 1;
 
 cleanup:
