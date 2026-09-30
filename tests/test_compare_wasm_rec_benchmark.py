@@ -14,6 +14,15 @@ SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "compare_wasm_rec_bench
 
 
 class WasmBenchmarkReportTest(unittest.TestCase):
+    def test_fine_widths_remain_rec_not_cls(self) -> None:
+        from tools.compare_wasm_rec_benchmark import split_rec_cls
+        widths = [192, 256, 320, 384, 448, 480, 512, 576, 640, 704, 768, 832, 896, 960]
+        rec, cls = split_rec_cls([{"width": width} for width in [160, *widths]])
+        self.assertEqual([row["width"] for row in rec], widths)
+        self.assertEqual(cls, [{"width": 160}])
+        with self.assertRaises(ValueError):
+            split_rec_cls([{"width": 333}])
+
     def run_report(self, simd_lines: list[str], expected_override: str | None = None,
                    use_cls: bool = True, profile_text: str | None = None,
                    simd_heap_bytes: int = 67108864,

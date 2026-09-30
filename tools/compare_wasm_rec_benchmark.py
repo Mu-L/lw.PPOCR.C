@@ -9,7 +9,9 @@ import sys
 from pathlib import Path
 
 
-REC_WIDTHS = frozenset((192, 320, 480, 640, 960))
+# Accept the existing five slots and the opt-in thirteen-slot policy. Coverage
+# gates still independently require the exact configured slot count.
+REC_WIDTHS = frozenset((480, *range(192, 961, 64)))
 CLS_WIDTH = 160
 
 

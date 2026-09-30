@@ -151,3 +151,5 @@ Erf/GELU contract also passes 65,536 vector blocks.
 Timing is informational, not a hosted-runner gate. Neither this workflow nor
 its reviewed Small golden changes the normal five-width release tests. Medium
 is deliberately outside this browser optimization experiment.
+
+See [WASM REC physical-op profile](wasm-rec-op-profile.md) for the next experiment.

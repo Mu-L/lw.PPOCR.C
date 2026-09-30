@@ -982,7 +982,7 @@ if(EMSCRIPTEN)
                 --lwm-version "${LW_LWM_FORMAT_VERSION}"
                 --output-dir "${LW_PPOCR_C_NODE_PACKAGE_DIR}"
                 --archive "${LW_PPOCR_C_NODE_PACKAGE_ARCHIVE}"
-        DEPENDS lw-node-wasm
+        DEPENDS lw-node-wasm "${LW_PPOCR_C_NODE_RUNTIME}"
                 "${LW_PPOCR_C_DET_LWM}" "${LW_PPOCR_C_CLS_LWM}" "${LW_PPOCR_C_REC_LWM}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tools/package_node_wasm.py"
                 "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
@@ -1019,6 +1019,18 @@ if(LW_WASM_COMPILED_REC_ENABLED)
         -O3 -Wall -Wextra -Wpedantic -Werror -msimd128)
     target_link_libraries(wasm-pointwise-contract PRIVATE lw_ppocr_c)
     target_link_options(wasm-pointwise-contract PRIVATE -O3 -msimd128 "-sENVIRONMENT=node")
+
+    # Keep the bitwise generic/prepared kernel contract even though the
+    # compiled prepared-offset experiment did not meet the E2E threshold.
+    add_executable(wasm-dense-prepared-contract tests/wasm_dense_prepared_contract_driver.c)
+    target_include_directories(wasm-dense-prepared-contract PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels")
+    target_compile_features(wasm-dense-prepared-contract PRIVATE c_std_11)
+    target_compile_options(wasm-dense-prepared-contract PRIVATE
+        -O3 -Wall -Wextra -Wpedantic -Werror -msimd128)
+    target_link_libraries(wasm-dense-prepared-contract PRIVATE lw_ppocr_c)
+    target_link_options(wasm-dense-prepared-contract PRIVATE -O3 -msimd128 "-sENVIRONMENT=node")
 endif()
 
 if(EMSCRIPTEN AND LW_WASM_REC_LAZY_FALLBACK)

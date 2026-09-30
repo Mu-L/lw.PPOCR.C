@@ -1208,6 +1208,67 @@ static int rec_profile_enabled(void) {
     return cached;
 }
 
+#if defined(__EMSCRIPTEN__)
+static int rec_op_profile_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) cached = lw_profile_env_is_one("LW_WASM_REC_OP_PROFILE") ? 1 : 0;
+    return cached;
+}
+
+static const char* rec_op_kind_name(uint16_t kind) {
+    switch (kind) {
+    case LW_X64_REC_OP_POINTWISE: return "pointwise";
+    case LW_X64_REC_OP_DENSE: return "dense";
+    case LW_X64_REC_OP_DEPTHWISE: return "depthwise";
+    case LW_X64_REC_OP_AFFINE: return "affine";
+    case LW_X64_REC_OP_ADD: return "add";
+    case LW_X64_REC_OP_MUL: return "mul";
+    case LW_X64_REC_OP_DIV: return "div";
+    case LW_X64_REC_OP_SUB: return "sub";
+    case LW_X64_REC_OP_POW: return "pow";
+    case LW_X64_REC_OP_RELU: return "relu";
+    case LW_X64_REC_OP_ERF: return "erf";
+    case LW_X64_REC_OP_GELU: return "gelu";
+    case LW_X64_REC_OP_HARD_SIGMOID: return "hard_sigmoid";
+    case LW_X64_REC_OP_SIGMOID: return "sigmoid";
+    case LW_X64_REC_OP_SQRT: return "sqrt";
+    case LW_X64_REC_OP_REDUCE_MEAN: return "reduce_mean";
+    case LW_X64_REC_OP_AVG_POOL: return "avg_pool";
+    case LW_X64_REC_OP_MAX_POOL: return "max_pool";
+    case LW_X64_REC_OP_TRANSPOSE: return "transpose";
+    case LW_X64_REC_OP_MATMUL: return "matmul";
+    case LW_X64_REC_OP_CONCAT: return "concat";
+    case LW_X64_REC_OP_RESIZE: return "resize";
+    case LW_X64_REC_OP_SOFTMAX: return "softmax";
+    case LW_X64_REC_OP_SLICE: return "slice";
+    default: return "other";
+    }
+}
+
+static void rec_op_profile_record(const lw_x64_rec_program* program, uint32_t index,
+                                    uint64_t invocation, uint64_t elapsed,
+                                    lw_status status) {
+    const lw_x64_rec_op* op = &program->ops[index];
+    fprintf(stderr, "WASM_REC_OP width=%u invocation=%llu index=%u semantic=%u "
+        "span=%u kind=%s elapsed=%.6f status=%d",
+        program->target_width, (unsigned long long)invocation, index,
+        op->semantic_begin, (unsigned)op->semantic_count, rec_op_kind_name(op->kind),
+        elapsed / 1e6, (int)status);
+    if (op->kind == LW_X64_REC_OP_POINTWISE || op->kind == LW_X64_REC_OP_DENSE ||
+        op->kind == LW_X64_REC_OP_DEPTHWISE) {
+        const lw_x64_rec_conv_op* conv = &op->data.conv;
+        fprintf(stderr, " ic=%u oc=%u ih=%u iw=%u oh=%u ow=%u kh=%u kw=%u "
+            "sh=%u sw=%u groups=%u act=%u residual=%u post_bias=%u input=%llu output=%llu",
+            conv->input_channels, conv->output_channels, conv->input_height, conv->input_width,
+            conv->output_height, conv->output_width, conv->kernel_h, conv->kernel_w,
+            conv->stride_h, conv->stride_w, conv->groups, (unsigned)conv->activation,
+            (unsigned)conv->has_residual, conv->post_bias != NULL ? 1u : 0u,
+            (unsigned long long)conv->input_offset, (unsigned long long)conv->output_offset);
+    }
+    fputc('\n', stderr);
+}
+#endif
+
 static uint64_t* rec_profile_slot(lw_x64_rec_profile* profile, uint16_t kind) {
     switch (kind) {
     case LW_X64_REC_OP_POINTWISE: return &profile->pointwise_ns;
@@ -1267,11 +1328,27 @@ static lw_status run_backbone_ops(lw_x64_rec_instance* instance, lw_error* error
     uint32_t i;
     lw_status status;
     int profiling;
+#if defined(__EMSCRIPTEN__)
+    static uint64_t next_invocation = 0u; /* Single-threaded diagnostic runs only. */
+    uint64_t invocation = 0u;
+    int detailed = 0;
+#endif
     if (instance == NULL || instance->program == NULL) {
         lw_set_error(error, LW_STATUS_INVALID_ARGUMENT, "REC instance is invalid");
         return LW_STATUS_INVALID_ARGUMENT;
     }
     profiling = rec_profile_enabled();
+#if defined(__EMSCRIPTEN__)
+    /* CLS shares this executor but has no CTC tail: never pool it into REC. */
+    detailed = rec_op_profile_enabled() && instance->program->ctc.enabled != 0u;
+    if (detailed) {
+        invocation = ++next_invocation;
+        fprintf(stderr, "WASM_REC_OP_BEGIN width=%u invocation=%llu ops=%u\n",
+            instance->program->target_width, (unsigned long long)invocation,
+            instance->program->op_count);
+        profiling = 1;
+    }
+#endif
     if (profiling) {
         memset(&instance->profile, 0, sizeof(instance->profile));
     }
@@ -1282,13 +1359,17 @@ static lw_status run_backbone_ops(lw_x64_rec_instance* instance, lw_error* error
             status = execute_op(instance, &instance->program->ops[i], error);
             slot = rec_profile_slot(&instance->profile, instance->program->ops[i].kind);
             {
-                uint64_t elapsed = rec_profile_now_ns() - started;
+                uint64_t finished = rec_profile_now_ns();
+                uint64_t elapsed = finished >= started ? finished - started : 0u;
                 if (slot != NULL) *slot += elapsed;
                 instance->profile.total_ns += elapsed;
                 if (instance->program->ops[i].kind == LW_X64_REC_OP_POINTWISE) {
                     record_rec_pointwise_epilogue(&instance->profile,
                                                    &instance->program->ops[i], elapsed);
                 }
+#if defined(__EMSCRIPTEN__)
+                if (detailed) rec_op_profile_record(instance->program, i, invocation, elapsed, status);
+#endif
             }
         } else {
             status = execute_op(instance, &instance->program->ops[i], error);
@@ -1302,6 +1383,10 @@ static lw_status run_backbone_ops(lw_x64_rec_instance* instance, lw_error* error
             return status;
         }
     }
+#if defined(__EMSCRIPTEN__)
+    if (detailed) fprintf(stderr, "WASM_REC_OP_END width=%u invocation=%llu\n",
+        instance->program->target_width, (unsigned long long)invocation);
+#endif
     return LW_STATUS_OK;
 }
 

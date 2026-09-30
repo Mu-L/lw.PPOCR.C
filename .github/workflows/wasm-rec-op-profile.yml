@@ -1,0 +1,105 @@
+name: WASM Tiny Small physical REC profile
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install converter and browser tests
+        run: |
+          python -m pip install -r requirements-converter.txt -r requirements-wasm-test.txt
+          python -m unittest tests.test_summarize_wasm_rec_ops tests.test_web_compiled_diagnostics tests.test_compare_wasm_rec_benchmark
+          python -m playwright install --with-deps chromium
+      - uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: 4.0.15
+          actions-cache-folder: emsdk-cache
+      - name: Build fine-width compiled SIMD128 configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          emcmake cmake -S . -B build/wasm-rec-profile -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+            -DLW_BUILD_HTTP_DEMO=OFF -DLW_BUILD_WEB_MODEL_VARIANTS=ON \
+            -DLW_WASM_COMPILED_REC=ON -DLW_WASM_REC_LAZY_FALLBACK=ON \
+            -DLW_WASM_REC_SIMD_KERNELS=ON -DLW_WASM_POINTWISE_ROWS=2 \
+            -DLW_WASM_FINE_REC_WIDTHS=ON
+          cmake --build build/wasm-rec-profile --parallel \
+            --target lw-node-wasm-package lw-ocr-html lw-ocr-html-small det_demo_fixture \
+            wasm-rec-lazy-contract wasm-pointwise-contract wasm-dense-prepared-contract
+      - name: Contracts and uninstrumented browser regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          node build/wasm-rec-profile/wasm-rec-lazy-contract.js \
+            2>&1 | tee build/wasm-rec-profile/lazy-contract.log
+          python web/compiled_diagnostics.py build/wasm-rec-profile/lazy-contract.log \
+            --expected-widths 13
+          node build/wasm-rec-profile/wasm-pointwise-contract.js
+          node build/wasm-rec-profile/wasm-dense-prepared-contract.js
+          python web/test_ocr_html.py --html build/wasm-rec-profile/ocr-demo.html \
+            --sample models/ppocrv6-tiny/sample.jpg --golden ci/web-ppocrv6-tiny.json
+          python web/test_ocr_sdk.py --sdk build/wasm-rec-profile/lw-ppocr.js \
+            --sample models/ppocrv6-tiny/sample.jpg --golden ci/web-ppocrv6-tiny.json
+          python web/test_ocr_html.py --html build/wasm-rec-profile/ocr-demo-small.html \
+            --sample models/ppocrv6-tiny/sample.jpg --golden ci/web-ppocrv6-small-fine-widths.json \
+            --variant-contract-only
+      - name: Separate instrumented Node profiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variant in tiny small; do
+            models=()
+            golden=ci/web-ppocrv6-tiny.json
+            if [ "$variant" = small ]; then
+              models=(--models build/wasm-rec-profile/runtime-models/ppocrv6-small)
+              golden=ci/web-ppocrv6-small-fine-widths.json
+            fi
+            expected_sha=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["expected_text_sha256"])' "$golden")
+            LW_WASM_REC_OP_PROFILE=1 LW_X64_REC_PROFILE=1 LW_WASM_OCR_PROFILE=1 LW_REC_MEMORY_PROFILE=1 \
+              node tests/node/benchmark.cjs --package build/wasm-rec-profile/node-wasm \
+              --sample build/wasm-rec-profile/models/sample.ppm "${models[@]}" \
+              --expected-text-sha256 "$expected_sha" --warmup 1 --iterations 3 \
+              > "build/wasm-rec-profile/$variant-profile.json" \
+              2> "build/wasm-rec-profile/$variant-profile.log"
+            cat "build/wasm-rec-profile/$variant-profile.json"
+            python web/compiled_diagnostics.py "build/wasm-rec-profile/$variant-profile.log" \
+              --expected-widths 13
+            python tools/summarize_wasm_rec_ops.py \
+              --log "build/wasm-rec-profile/$variant-profile.log" \
+              --output "build/wasm-rec-profile/$variant-ops.json" \
+              --stage-output "build/wasm-rec-profile/$variant-stage.json" \
+              --variant "$variant" --skip-ocr-runs 1 \
+              --markdown "build/wasm-rec-profile/$variant-ops.md"
+          done
+      - name: Publish physical-op summaries
+        if: always()
+        shell: bash
+        run: |
+          for variant in tiny small; do
+            echo "## $variant" >> "$GITHUB_STEP_SUMMARY"
+            if [ -f "build/wasm-rec-profile/$variant-ops.md" ]; then
+              cat "build/wasm-rec-profile/$variant-ops.md" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "No completed profile; inspect the uploaded logs." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: wasm-tiny-small-physical-rec-profile
+          path: |
+            build/wasm-rec-profile/*.json
+            build/wasm-rec-profile/*.log
+            build/wasm-rec-profile/*-ops.md
+          if-no-files-found: warn
