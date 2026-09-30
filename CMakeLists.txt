@@ -782,6 +782,7 @@ if(EMSCRIPTEN)
             --output "${LW_PPOCR_C_WEB_HTML}"
         DEPENDS
             lw-ocr-js
+            "${LW_PPOCR_C_WEB_SDK}"
             "${CMAKE_CURRENT_SOURCE_DIR}/web/ocr-demo.template.html"
             "${CMAKE_CURRENT_SOURCE_DIR}/web/ocr-demo-ui.js"
             "${CMAKE_CURRENT_SOURCE_DIR}/web/package_ocr_html.py"
@@ -874,6 +875,7 @@ if(EMSCRIPTEN)
                         ${LW_PPOCR_C_WEB_HTML_PDF_ARGS}
                         --output "${_variant_html}"
                 DEPENDS lw-ocr-js-${variant}
+                        "${_variant_sdk}"
                         "${CMAKE_CURRENT_SOURCE_DIR}/web/ocr-demo.template.html"
                         "${CMAKE_CURRENT_SOURCE_DIR}/web/ocr-demo-ui.js"
                         "${CMAKE_CURRENT_SOURCE_DIR}/web/package_ocr_html.py"

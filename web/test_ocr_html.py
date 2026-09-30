@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from playwright.sync_api import ConsoleMessage, sync_playwright
+from compiled_diagnostics import is_compiled_status
 
 
 EXPECTED_FIRST_LINE = "纯臻营养护发素"
@@ -108,7 +109,7 @@ def main() -> int:
         )
 
         def capture_console(message: ConsoleMessage) -> None:
-            if message.type == "error":
+            if message.type == "error" and not is_compiled_status(message.text):
                 browser_messages.append(f"{message.type}: {message.text}")
 
         page.on("console", capture_console)

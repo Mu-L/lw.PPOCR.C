@@ -57,6 +57,7 @@ jobs:
           python -m unittest discover -s tests -p test_compare_wasm_rec_benchmark.py
           python -m unittest discover -s tests -p test_summarize_wasm_rec_memory.py
           python -m unittest discover -s tests -p test_summarize_wasm_pointwise_epilogue.py
+          python -m unittest discover -s tests -p test_web_compiled_diagnostics.py
 
       - name: Cache Playwright Chromium
         uses: actions/cache@v5

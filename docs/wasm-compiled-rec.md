@@ -138,3 +138,6 @@ diagnostic, not a promotion decision. Keep
 `LW_WASM_COMPILED_REC` off for releases until CI confirms exact text, backend
 coverage, and end-to-end latency/memory improvement on all intended model
 packs. The local native tests do not substitute for an Emscripten build.
+
+For local standalone-HTML measurements and reproducible browser A/B commands,
+see [WASM browser benchmark](wasm-browser-benchmark.md).
