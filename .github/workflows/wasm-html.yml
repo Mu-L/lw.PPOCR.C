@@ -92,6 +92,11 @@ jobs:
           --target lw-ocr-js lw-ocr-html lw-node-wasm-package det_demo_fixture
           --parallel
 
+      - name: Verify SIMD128 Erf and GELU bitwise contract
+        run: |
+          cmake --build build-wasm --target wasm-erf-contract --parallel
+          node build-wasm/wasm-erf-contract.js
+
       - name: Build optional PP-OCRv6 Small and Medium Web variants
         if: inputs.build_web_variants == true
         run: >-

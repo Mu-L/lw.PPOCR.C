@@ -7,6 +7,7 @@
 
 #if defined(__EMSCRIPTEN__) && defined(__wasm_simd128__)
 #include <wasm_simd128.h>
+#include "wasm128_erf_internal.h"
 
 /* Full OC16 blocks only: callers handle the channel tail without reading
  * past post_bias or residual. Bias is already in the accumulators. */
@@ -48,13 +49,8 @@ static inline void lw_wasm128_apply_epilogue_oc16(
                 : wasm_f32x4_mul(gate, inverse_six);
         }
     } else if (epilogue->activation == LW_NHWC_ACT_GELU) {
-        float block[LW_NHWC_OC_BLOCK];
         for (group = 0u; group < 4u; ++group) {
-            wasm_v128_store(block + group * 4u, values[group]);
-        }
-        lw_wasm128_gelu_f32(block, block, LW_NHWC_OC_BLOCK);
-        for (group = 0u; group < 4u; ++group) {
-            values[group] = wasm_v128_load(block + group * 4u);
+            values[group] = lw_wasm128_gelu_vector_f32(values[group]);
         }
     }
 }

@@ -988,6 +988,18 @@ if(EMSCRIPTEN)
     endif()
 endif()
 
+if(EMSCRIPTEN AND LW_WASM_SIMD128)
+    add_executable(wasm-erf-contract tests/wasm_erf_contract_driver.c)
+    target_include_directories(wasm-erf-contract PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/simd"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/kernels")
+    target_compile_features(wasm-erf-contract PRIVATE c_std_11)
+    target_compile_options(wasm-erf-contract PRIVATE
+        -O3 -Wall -Wextra -Wpedantic -Werror -msimd128)
+    target_link_options(wasm-erf-contract PRIVATE -O3 -msimd128 "-sENVIRONMENT=node")
+endif()
+
 if(EMSCRIPTEN AND LW_WASM_REC_LAZY_FALLBACK)
     # Private CI executable: exercise a source whose canonical REC session was
     # released, a compiled clone, and a clone forced onto canonical fallback.

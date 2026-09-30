@@ -62,3 +62,52 @@ including model variants. Incremental runtime changes therefore update the
 embedded WASM instead of silently leaving a stale HTML. Successful compiled
 status lines emitted on stderr are matched strictly by browser regression
 tests; unknown console errors and JavaScript page errors still fail tests.
+
+## Erf/GELU optimization on top of the compiled baseline
+
+The next local round optimized actual SIMD computation, not backend selection.
+The Node profile identified REC as about 77% of Tiny full OCR, with Pointwise
+post-bias/GELU the main REC hotspot. Instrumented timings guided the work;
+the results below come from separate uninstrumented Chromium HTML A/B runs.
+
+Changes:
+
+- Skip middle/large Erf polynomials when all four SIMD lanes have magnitude
+  below 1. Mixed intervals, infinities and NaNs keep the previous selection path.
+- Share the original polynomial coefficients and GELU division/add/multiply
+  sequence in a private inline header. OC16 epilogues consume vector values
+  directly instead of storing to a stack block and calling/reloading GELU.
+- Preserve standard SIMD128, non-FMA arithmetic, scalar tails, and public ABI.
+  No relaxed SIMD, fast-math, reciprocal substitution, or new approximation.
+
+Three alternating rounds, three warm-ups each:
+
+| Configuration | Before ms | After ms | Paired speedup | Heap before/after MiB |
+| --- | ---: | ---: | ---: | ---: |
+| Tiny compiled, 7 measured calls/round | 589.80 | 566.50 | 1.036x | 59.25 / 59.25 |
+| Small compiled, 5 measured calls/round | 2551.80 | 2438.50 | 1.058x | 132.38 / 132.38 |
+| Tiny canonical, 5 measured calls/round | 1036.90 | 963.90 | 1.068x | 70.50 / 70.50 |
+
+Latencies are medians of round medians; speedups are medians of paired ratios,
+so dividing the displayed median latencies need not produce the paired ratio.
+All calls matched the unchanged goldens. The combined compiled HTML grows
+about 11.5 KiB; the canonical Tiny HTML grows about 0.7 KiB. Neither allocates
+additional runtime buffers. These sample results are not mobile benchmarks.
+The first small-interval-only experiment measured 1.065x for Tiny on a separate
+run; it must not be added to or multiplied by the combined result above.
+
+`wasm-erf-contract` compares the new Erf/GELU vectors against the pre-optimization
+unconditional selection path over 65,536 deterministic vector blocks, uniform
+and mixed boundary inputs, signed zero, subnormals, infinities and NaNs. It also
+checks direct register GELU, in-place calls, and scalar tails. Finite results
+and Erf outputs are bitwise checked; arithmetic GELU NaN payloads are not
+specified by WebAssembly and are checked as NaN. The contract preserves the
+existing polynomial approximation, not equality to mathematical `erf`.
+
+```powershell
+cmake --build build/wasm-fast --target wasm-erf-contract --parallel 8
+node build/wasm-fast/wasm-erf-contract.js
+```
+
+The SIMD128 contract runs in browser-WASM CI. Native/scalar builds retain their
+existing scalar `erff` implementation; the compiled REC global default stays OFF.
